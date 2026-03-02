@@ -84,12 +84,11 @@ class TmuxInterface:
                 pass
             self._session = None
 
-    def new_pane(self, window_index: int = 0) -> libtmux.Pane:
-        """Spawn a new pane in the managed session's first window."""
+    def new_pane(self, agent_id: str = "") -> libtmux.Pane:
+        """Spawn a new window for the agent and return its first pane."""
         session = self.ensure_session()
-        window = session.windows[window_index]
-        pane: libtmux.Pane = window.split(attach=False)
-        return pane
+        window = session.new_window(window_name=agent_id or None, attach=False)
+        return window.panes[0]
 
     def get_first_pane(self) -> libtmux.Pane:
         """Return the first (pre-existing) pane of the session."""

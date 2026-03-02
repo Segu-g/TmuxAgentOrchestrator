@@ -71,7 +71,7 @@ class ClaudeCodeAgent(Agent):
 
     async def start(self) -> None:
         loop = asyncio.get_event_loop()
-        pane = await loop.run_in_executor(None, self._tmux.new_pane)
+        pane = await loop.run_in_executor(None, self._tmux.new_pane, self.id)
         self.pane = pane
         cwd = await self._setup_worktree()
         if cwd is not None:
