@@ -248,7 +248,7 @@ _HTML_UI = """<!DOCTYPE html>
     flex: 1;
     display: grid;
     grid-template-columns: 1fr 1fr;
-    grid-template-rows: 180px auto 200px;
+    grid-template-rows: 180px 200px 200px;
     gap: 1px;
     background: #30363d;
     overflow: hidden;
@@ -444,6 +444,32 @@ _HTML_UI = """<!DOCTYPE html>
     outline: none;
   }
   .empty-hint { color: #6e7681; font-size: 0.8rem; padding: 12px; text-align: center; }
+
+  /* ── Agent Conversations ── */
+  #conv-list {
+    overflow-y: auto;
+    flex: 1;
+    padding: 6px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-height: 0;
+  }
+  .conv-entry {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    font-size: 0.82rem;
+    padding: 4px 0;
+    border-bottom: 1px solid #21262d33;
+    flex-wrap: wrap;
+  }
+  .conv-ts   { color: #6e7681; flex-shrink: 0; font-size: 0.72rem; font-family: monospace; }
+  .conv-from { font-weight: 700; flex-shrink: 0; }
+  .conv-arrow{ color: #6e7681; flex-shrink: 0; }
+  .conv-to   { font-weight: 700; flex-shrink: 0; }
+  .conv-sep  { color: #6e7681; flex-shrink: 0; }
+  .conv-content { color: #c9d1d9; word-break: break-word; flex: 1; min-width: 0; }
 </style>
 </head>
 <body>
@@ -492,6 +518,15 @@ _HTML_UI = """<!DOCTYPE html>
       <input id="chat-input" type="text" placeholder="Message the Director… (Enter to send)" autocomplete="off" />
       <button id="chat-send-btn" onclick="sendChat()">Send</button>
     </div>
+  </section>
+
+  <!-- Agent Conversations panel -->
+  <section class="full-width">
+    <div class="section-header">
+      Agent Conversations
+      <span id="conv-count" class="badge">0</span>
+    </div>
+    <div id="conv-list"><div class="empty-hint">No P2P messages yet</div></div>
   </section>
 
   <!-- Event Log panel -->
@@ -549,6 +584,10 @@ function connectWS() {
       document.getElementById('chat-send-btn').disabled = false;
       document.getElementById('chat-input').disabled = false;
     }
+    // Agent P2P conversation (only show forwarded = actually delivered)
+    if (msg.type === 'PEER_MSG' && msg.payload?._forwarded) {
+      addConversationEntry(msg);
+    }
   };
 }
 
@@ -584,12 +623,12 @@ function refreshAgents() {
         directorId = director.id;
         document.getElementById('director-id-badge').textContent = director.id;
         chatSection.style.display = 'flex';
-        // Update grid to add chat row
-        document.querySelector('main').style.gridTemplateRows = '180px auto 280px 200px';
+        // Insert director-chat row between agents/tasks and conversations
+        document.querySelector('main').style.gridTemplateRows = '180px 280px 200px 200px';
       } else if (!director && directorId) {
         directorId = null;
         chatSection.style.display = 'none';
-        document.querySelector('main').style.gridTemplateRows = '180px auto 200px';
+        document.querySelector('main').style.gridTemplateRows = '180px 200px 200px';
       }
     }).catch(console.error);
 }
@@ -610,6 +649,38 @@ function refreshTasks() {
         <td>${esc(t.prompt.slice(0,60))}${t.prompt.length > 60 ? '…' : ''}</td>
       </tr>`).join('');
     }).catch(console.error);
+}
+
+// --- Agent Conversations ---
+let convTotal = 0;
+
+function agentColor(id) {
+  let h = 0;
+  for (const c of id) h = (h * 31 + c.charCodeAt(0)) & 0xffff;
+  return `hsl(${h % 360}, 65%, 65%)`;
+}
+
+function addConversationEntry(msg) {
+  const list = document.getElementById('conv-list');
+  if (convTotal === 0) list.innerHTML = ''; // clear placeholder
+  convTotal++;
+  document.getElementById('conv-count').textContent = convTotal;
+
+  const content = msg.payload?.content
+    || (msg.payload ? JSON.stringify(msg.payload).replace(/"_forwarded":true,?\s*/g, '') : '');
+  const ts = new Date(msg.timestamp).toLocaleTimeString();
+
+  const div = document.createElement('div');
+  div.className = 'conv-entry';
+  div.innerHTML =
+    `<span class="conv-ts">${ts}</span>` +
+    `<span class="conv-from" style="color:${agentColor(msg.from_id)}">${esc(msg.from_id)}</span>` +
+    `<span class="conv-arrow">→</span>` +
+    `<span class="conv-to" style="color:${agentColor(msg.to_id || '')}">${esc(msg.to_id || '*')}</span>` +
+    `<span class="conv-sep">│</span>` +
+    `<span class="conv-content">${esc(String(content).slice(0, 300))}</span>`;
+  list.appendChild(div);
+  list.scrollTop = list.scrollHeight;
 }
 
 // --- Director Chat ---
