@@ -17,7 +17,6 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from webauthn.helpers.structs import (
     AuthenticationCredential,
-    AuthenticatorAttachment,
     AuthenticatorSelectionCriteria,
     PublicKeyCredentialDescriptor,
     RegistrationCredential,
@@ -85,6 +84,12 @@ def _valid_session(token: str | None) -> bool:
         return False
     expiry = _sessions.get(token)
     return expiry is not None and expiry > time.time()
+
+
+def _request_origin(request: Request) -> str:
+    """Derive the WebAuthn expected_origin, respecting X-Forwarded-Proto from proxies."""
+    scheme = request.headers.get("X-Forwarded-Proto", request.url.scheme)
+    return f"{scheme}://{request.url.netloc}"
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -186,7 +191,6 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
             authenticator_selection=AuthenticatorSelectionCriteria(
                 resident_key=ResidentKeyRequirement.REQUIRED,
                 user_verification=UserVerificationRequirement.REQUIRED,
-                authenticator_attachment=AuthenticatorAttachment.PLATFORM,
             ),
         )
         _pending_challenge = options.challenge
@@ -198,7 +202,7 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
         if _pending_challenge is None:
             raise HTTPException(400, "No pending challenge")
         rp_id = request.url.hostname
-        origin = f"{request.url.scheme}://{request.url.netloc}"
+        origin = _request_origin(request)
         try:
             body = await request.body()
             credential = RegistrationCredential.parse_raw(body)
@@ -242,7 +246,7 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
         if _pending_challenge is None:
             raise HTTPException(400, "No pending challenge")
         rp_id = request.url.hostname
-        origin = f"{request.url.scheme}://{request.url.netloc}"
+        origin = _request_origin(request)
         try:
             body = await request.body()
             credential = AuthenticationCredential.parse_raw(body)
