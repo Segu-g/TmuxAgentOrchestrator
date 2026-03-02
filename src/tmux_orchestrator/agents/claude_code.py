@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import shlex
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from tmux_orchestrator.agents.base import Agent, AgentStatus, Task
 from tmux_orchestrator.bus import Message, MessageType
@@ -51,8 +50,9 @@ class ClaudeCodeAgent(Agent):
         cwd_override: Path | None = None,
         session_name: str = "orchestrator",
         web_base_url: str = "http://localhost:8000",
+        task_timeout: float | None = None,
     ) -> None:
-        super().__init__(agent_id, bus)
+        super().__init__(agent_id, bus, task_timeout=task_timeout)
         self.mailbox = mailbox
         self._tmux = tmux
         self._command = command
@@ -86,22 +86,8 @@ class ClaudeCodeAgent(Agent):
         await self._start_message_loop()
         logger.info("ClaudeCodeAgent %s started in pane %s", self.id, pane.id)
 
-    def _write_context_file(self, cwd: Path) -> None:
-        """Write ``__orchestrator_context__.json`` to the agent's working directory."""
-        if self.mailbox is not None:
-            # mailbox._root is {mailbox_dir}/{session_name}; parent recovers mailbox_dir
-            mailbox_dir = str(self.mailbox._root.parent)
-        else:
-            mailbox_dir = str(Path.home() / ".tmux_orchestrator")
-        ctx = {
-            "agent_id": self.id,
-            "session_name": self._session_name,
-            "mailbox_dir": mailbox_dir,
-            "worktree_path": str(cwd),
-            "web_base_url": self._web_base_url,
-        }
-        (cwd / "__orchestrator_context__.json").write_text(json.dumps(ctx, indent=2))
-        logger.debug("ClaudeCodeAgent %s wrote context file to %s", self.id, cwd)
+    def _context_extras(self) -> dict[str, Any]:
+        return {"session_name": self._session_name, "web_base_url": self._web_base_url}
 
     async def stop(self) -> None:
         self.status = AgentStatus.STOPPED

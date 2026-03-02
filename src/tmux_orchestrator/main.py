@@ -67,6 +67,7 @@ def _build_system(config_path: Path) -> tuple[Orchestrator, Bus, TmuxInterface]:
                 isolate=agent_cfg.isolate,
                 session_name=config.session_name,
                 web_base_url=config.web_base_url,
+                task_timeout=config.task_timeout,
             )
         elif agent_cfg.type == "custom":
             if not agent_cfg.command:
@@ -83,6 +84,7 @@ def _build_system(config_path: Path) -> tuple[Orchestrator, Bus, TmuxInterface]:
                 mailbox=mailbox,
                 worktree_manager=wm,
                 isolate=agent_cfg.isolate,
+                task_timeout=config.task_timeout,
             )
         else:
             typer.echo(f"[error] Unknown agent type: {agent_cfg.type!r}", err=True)
@@ -91,6 +93,23 @@ def _build_system(config_path: Path) -> tuple[Orchestrator, Bus, TmuxInterface]:
         orchestrator.register_agent(agent)
 
     return orchestrator, bus, tmux
+
+
+def _patch_web_url(orchestrator: Orchestrator, host: str, port: int) -> None:
+    """Update the web_base_url on all ClaudeCodeAgents to match the actual listen address.
+
+    When ``--port`` differs from the config default, or ``--host`` is ``0.0.0.0``,
+    the stored URL would be wrong.  This corrects every registered agent in-place
+    so that the ``__orchestrator_context__.json`` re-written on the next task will
+    reflect the real address.
+    """
+    from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent  # noqa: PLC0415
+
+    display_host = "localhost" if host in ("0.0.0.0", "") else host
+    url = f"http://{display_host}:{port}"
+    for agent in orchestrator._agents.values():
+        if isinstance(agent, ClaudeCodeAgent):
+            agent._web_base_url = url
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +159,7 @@ def web(
     from tmux_orchestrator.web.ws import WebSocketHub
 
     orchestrator, bus, tmux = _build_system(config)
+    _patch_web_url(orchestrator, host, port)
     hub = WebSocketHub(bus=bus)
     fastapi_app = create_app(orchestrator=orchestrator, hub=hub)
 

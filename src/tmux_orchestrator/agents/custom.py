@@ -39,8 +39,9 @@ class CustomAgent(Agent):
         worktree_manager: "WorktreeManager | None" = None,
         isolate: bool = True,
         cwd_override: Path | None = None,
+        task_timeout: float | None = None,
     ) -> None:
-        super().__init__(agent_id, bus)
+        super().__init__(agent_id, bus, task_timeout=task_timeout)
         self.mailbox = mailbox
         self._tmux = tmux
         self._command = command
@@ -55,7 +56,10 @@ class CustomAgent(Agent):
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
+        loop = asyncio.get_event_loop()
         cwd = await self._setup_worktree()
+        if cwd is not None:
+            await loop.run_in_executor(None, self._write_context_file, cwd)
         self._proc = await asyncio.create_subprocess_shell(
             self._command,
             stdin=asyncio.subprocess.PIPE,
