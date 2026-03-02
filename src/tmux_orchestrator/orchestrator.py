@@ -14,6 +14,7 @@ from tmux_orchestrator.messaging import Mailbox
 if TYPE_CHECKING:
     from tmux_orchestrator.config import OrchestratorConfig
     from tmux_orchestrator.tmux_interface import TmuxInterface
+    from tmux_orchestrator.worktree import WorktreeManager
 
 logger = logging.getLogger(__name__)
 
@@ -29,10 +30,17 @@ class Orchestrator:
     - Forward bus events to any attached observers (TUI, web hub).
     """
 
-    def __init__(self, bus: Bus, tmux: "TmuxInterface", config: "OrchestratorConfig") -> None:
+    def __init__(
+        self,
+        bus: Bus,
+        tmux: "TmuxInterface",
+        config: "OrchestratorConfig",
+        worktree_manager: "WorktreeManager | None" = None,
+    ) -> None:
         self.bus = bus
         self.tmux = tmux
         self.config = config
+        self._worktree_manager = worktree_manager
         self._agents: dict[str, Agent] = {}
         # Priority queue: (priority, task) — lower priority value = dispatched first
         self._task_queue: asyncio.PriorityQueue[tuple[int, Task]] = asyncio.PriorityQueue()
@@ -221,19 +229,42 @@ class Orchestrator:
             parent_id = msg.from_id
             agent_type = msg.payload.get("agent_type", "custom")
             command = msg.payload.get("command", "")
-            await self._spawn_subagent(parent_id, agent_type, command)
+            isolate = msg.payload.get("isolate", True)
+            share_parent = msg.payload.get("share_parent_worktree", False)
+            await self._spawn_subagent(
+                parent_id, agent_type, command,
+                isolate=isolate, share_parent=share_parent,
+            )
         else:
             logger.warning("Orchestrator received unknown CONTROL action: %s", action)
 
     async def _spawn_subagent(
-        self, parent_id: str, agent_type: str, command: str
+        self,
+        parent_id: str,
+        agent_type: str,
+        command: str,
+        *,
+        isolate: bool = True,
+        share_parent: bool = False,
     ) -> "Agent | None":
         """Create, register, and start a sub-agent; grant P2P with parent."""
+        from pathlib import Path as _Path  # noqa: PLC0415
+
         from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent
         from tmux_orchestrator.agents.custom import CustomAgent
 
         sub_id = f"{parent_id}-sub-{uuid.uuid4().hex[:6]}"
         mailbox = Mailbox(self.config.mailbox_dir, self.config.session_name)
+
+        # Determine cwd_override for share_parent_worktree option.
+        cwd_override: _Path | None = None
+        if share_parent:
+            parent_agent = self._agents.get(parent_id)
+            if parent_agent is not None:
+                cwd_override = parent_agent.worktree_path
+
+        # When cwd_override is provided, no worktree management is needed.
+        effective_wm = self._worktree_manager if cwd_override is None else None
 
         if agent_type == "custom":
             agent: Agent = CustomAgent(
@@ -242,6 +273,9 @@ class Orchestrator:
                 tmux=self.tmux,
                 command=command,
                 mailbox=mailbox,
+                worktree_manager=effective_wm,
+                isolate=isolate,
+                cwd_override=cwd_override,
             )
         elif agent_type == "claude_code":
             agent = ClaudeCodeAgent(
@@ -249,6 +283,11 @@ class Orchestrator:
                 bus=self.bus,
                 tmux=self.tmux,
                 mailbox=mailbox,
+                worktree_manager=effective_wm,
+                isolate=isolate,
+                cwd_override=cwd_override,
+                session_name=self.config.session_name,
+                web_base_url=self.config.web_base_url,
             )
         else:
             logger.error("Unknown agent type for sub-agent: %s", agent_type)

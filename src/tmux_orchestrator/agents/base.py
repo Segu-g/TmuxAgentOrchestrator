@@ -11,9 +11,11 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import libtmux
+    from pathlib import Path
 
     from tmux_orchestrator.bus import Bus
     from tmux_orchestrator.messaging import Mailbox
+    from tmux_orchestrator.worktree import WorktreeManager
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,11 @@ class Agent(ABC):
         self._current_task: Task | None = None
         self._run_task: asyncio.Task | None = None
         self._msg_task: asyncio.Task | None = None
+        # Worktree isolation (set by concrete subclasses after super().__init__)
+        self._worktree_manager: "WorktreeManager | None" = None
+        self._isolate: bool = True
+        self._cwd_override: "Path | None" = None
+        self.worktree_path: "Path | None" = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -125,6 +132,39 @@ class Agent(ABC):
                 self.status = AgentStatus.ERROR
             finally:
                 self._task_queue.task_done()
+
+    # ------------------------------------------------------------------
+    # Worktree helpers
+    # ------------------------------------------------------------------
+
+    async def _setup_worktree(self) -> "Path | None":
+        """Set up the agent's working directory via worktree isolation.
+
+        Returns the path to use as cwd, or ``None`` if no isolation is active.
+        Priority: ``_cwd_override`` > ``_worktree_manager`` > None.
+        """
+        from pathlib import Path as _Path  # noqa: PLC0415
+
+        if self._cwd_override is not None:
+            # Shared parent worktree — do not register or teardown.
+            return self._cwd_override
+        if self._worktree_manager is None:
+            return None
+        loop = asyncio.get_event_loop()
+        path: _Path = await loop.run_in_executor(
+            None,
+            lambda: self._worktree_manager.setup(self.id, isolate=self._isolate),  # type: ignore[union-attr]
+        )
+        self.worktree_path = path
+        return path
+
+    async def _teardown_worktree(self) -> None:
+        """Remove the agent's worktree (no-op when not isolated or not set up)."""
+        if self._worktree_manager is None or self.worktree_path is None:
+            return
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, self._worktree_manager.teardown, self.id)
+        self.worktree_path = None
 
     def _set_idle(self) -> None:
         self._current_task = None

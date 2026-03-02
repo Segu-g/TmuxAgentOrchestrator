@@ -16,6 +16,7 @@ from tmux_orchestrator.config import load_config
 from tmux_orchestrator.messaging import Mailbox
 from tmux_orchestrator.orchestrator import Orchestrator
 from tmux_orchestrator.tmux_interface import TmuxInterface
+from tmux_orchestrator.worktree import WorktreeManager
 
 app = typer.Typer(
     name="tmux-orchestrator",
@@ -34,6 +35,9 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
+_logger = logging.getLogger(__name__)
+
+
 def _build_system(config_path: Path) -> tuple[Orchestrator, Bus, TmuxInterface]:
     """Instantiate all core components from a config file."""
     from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent
@@ -42,12 +46,28 @@ def _build_system(config_path: Path) -> tuple[Orchestrator, Bus, TmuxInterface]:
     config = load_config(config_path)
     bus = Bus()
     tmux = TmuxInterface(session_name=config.session_name, bus=bus)
-    orchestrator = Orchestrator(bus=bus, tmux=tmux, config=config)
     mailbox = Mailbox(root_dir=config.mailbox_dir, session_name=config.session_name)
+
+    try:
+        wm: WorktreeManager | None = WorktreeManager(Path.cwd())
+    except RuntimeError:
+        _logger.warning("Not inside a git repository; worktree isolation disabled")
+        wm = None
+
+    orchestrator = Orchestrator(bus=bus, tmux=tmux, config=config, worktree_manager=wm)
 
     for agent_cfg in config.agents:
         if agent_cfg.type == "claude_code":
-            agent = ClaudeCodeAgent(agent_id=agent_cfg.id, bus=bus, tmux=tmux, mailbox=mailbox)
+            agent = ClaudeCodeAgent(
+                agent_id=agent_cfg.id,
+                bus=bus,
+                tmux=tmux,
+                mailbox=mailbox,
+                worktree_manager=wm,
+                isolate=agent_cfg.isolate,
+                session_name=config.session_name,
+                web_base_url=config.web_base_url,
+            )
         elif agent_cfg.type == "custom":
             if not agent_cfg.command:
                 typer.echo(
@@ -61,6 +81,8 @@ def _build_system(config_path: Path) -> tuple[Orchestrator, Bus, TmuxInterface]:
                 tmux=tmux,
                 command=agent_cfg.command,
                 mailbox=mailbox,
+                worktree_manager=wm,
+                isolate=agent_cfg.isolate,
             )
         else:
             typer.echo(f"[error] Unknown agent type: {agent_cfg.type!r}", err=True)

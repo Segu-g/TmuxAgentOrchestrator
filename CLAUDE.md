@@ -80,3 +80,104 @@ pytest
 - `libtmux` is the sole tmux binding; pane watcher runs in a daemon thread, uses `asyncio.run_coroutine_threadsafe` to publish to the async bus.
 - Textual TUI and FastAPI web server are two separate CLI commands (`tui` vs `web`) that share the same core components.
 - P2P routing is bidirectional per permission entry — stored as `frozenset` pairs.
+
+---
+
+## Running as an Orchestrated Agent
+
+If you are a Claude Code instance launched by TmuxAgentOrchestrator, this section explains your environment and how to use inter-agent communication.
+
+### Your Identity
+
+At startup the orchestrator writes a context file to your working directory:
+
+```
+__orchestrator_context__.json
+```
+
+Contents:
+
+```json
+{
+  "agent_id": "worker-1",
+  "session_name": "orchestrator",
+  "mailbox_dir": "/home/user/.tmux_orchestrator",
+  "worktree_path": "/path/to/repo/.worktrees/worker-1",
+  "web_base_url": "http://localhost:8000"
+}
+```
+
+Read this file to know your `agent_id`, where your mailbox is, and the REST API base URL.
+
+### Receiving Messages
+
+When a message is sent to you, the orchestrator types `__MSG__:{msg_id}` into your pane as a notification. **Do not respond to this text literally** — it is a trigger to check your inbox.
+
+Typical workflow on receiving `__MSG__:{id}`:
+1. Run `/check-inbox` — lists all unread messages with from/type/payload preview.
+2. Run `/read-message <msg_id>` — shows full JSON, marks message as read.
+
+Message schema (JSON file in `{mailbox_dir}/{session_name}/{agent_id}/inbox/`):
+
+```json
+{
+  "id": "uuid",
+  "type": "PEER_MSG",
+  "from_id": "worker-2",
+  "to_id": "worker-1",
+  "payload": { "text": "…" },
+  "timestamp": "2026-03-02T08:00:00+00:00"
+}
+```
+
+### Sending Messages
+
+Use `/send-message <target_agent_id> <message text>`.
+
+The orchestrator enforces P2P permissions. Your message is silently dropped if the pair `{your_id, target_id}` is not in the config's `p2p_permissions` table. Permissions are automatically granted for sub-agents you spawn.
+
+### Slash Command Reference
+
+| Command | Usage | What it does |
+|---|---|---|
+| `/check-inbox` | `/check-inbox` | List unread messages (ID, from, type, payload preview) |
+| `/read-message` | `/read-message <msg_id>` | Read a message in full, mark it as read |
+| `/send-message` | `/send-message <agent_id> <text>` | Send a PEER_MSG to another agent |
+| `/spawn-subagent` | `/spawn-subagent <type> [cmd]` | Spawn a sub-agent; P2P auto-granted |
+| `/list-agents` | `/list-agents` | Show all agents and their IDLE/BUSY/ERROR status |
+
+All commands require `__orchestrator_context__.json` in your cwd.
+Commands that use REST (`/send-message`, `/spawn-subagent`, `/list-agents`) require the orchestrator to have been started with `tmux-orchestrator web`.
+
+### Spawning Sub-Agents
+
+Use `/spawn-subagent <type> [command]` to create a helper agent:
+
+- `claude_code` — new Claude instance in a dedicated tmux pane (isolated worktree)
+- `custom python3 scripts/worker.py` — subprocess speaking newline-delimited JSON
+
+After spawning, the orchestrator sends you a STATUS message:
+```json
+{ "event": "subagent_spawned", "sub_agent_id": "worker-1-sub-a3f2c1", "parent_id": "worker-1" }
+```
+Retrieve it with `/check-inbox` → `/read-message`, then delegate with `/send-message`.
+
+### Task Completion
+
+The orchestrator detects task completion by polling your pane output. It declares you done when the output **has not changed for 3 consecutive 500 ms polls** and the last line matches one of:
+
+- `$` or `$ ` — shell prompt
+- `>` — bare Claude prompt
+- `Human:` — Claude conversation prompt
+
+Ensure your final output settles at a recognisable prompt. Do not leave the pane in the middle of streaming output when you are finished.
+
+### Worktree Isolation
+
+By default you run in an isolated git worktree at `{repo_root}/.worktrees/{agent_id}/` on branch `worktree/{agent_id}`. This means:
+
+- Your filesystem changes do not affect other agents.
+- Commit freely on your branch.
+- On agent stop, your worktree and branch are automatically deleted.
+
+If the config sets `isolate: false` for your agent, you share the main repo working tree.

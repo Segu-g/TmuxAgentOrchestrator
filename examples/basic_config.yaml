@@ -17,6 +17,7 @@ agents:
   - id: worker-2
     type: custom
     command: "python3 -u examples/echo_agent.py"
+    isolate: false  # shares the main repo working tree (opt-out demo)
 
 p2p_permissions:
   - [worker-1, worker-2]   # bidirectional P2P allowed

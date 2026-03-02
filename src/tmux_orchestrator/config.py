@@ -13,6 +13,7 @@ class AgentConfig:
     id: str
     type: Literal["claude_code", "custom"]
     command: str | None = None  # required for type=custom
+    isolate: bool = True  # False → share main repo working tree
 
 
 @dataclass
@@ -23,6 +24,7 @@ class OrchestratorConfig:
     p2p_permissions: list[tuple[str, str]] = field(default_factory=list)
     task_timeout: int = 120
     mailbox_dir: str = "~/.tmux_orchestrator"
+    web_base_url: str = "http://localhost:8000"
 
 
 def load_config(path: str | Path) -> OrchestratorConfig:
@@ -34,6 +36,7 @@ def load_config(path: str | Path) -> OrchestratorConfig:
             id=a["id"],
             type=a["type"],
             command=a.get("command"),
+            isolate=a.get("isolate", True),
         )
         for a in data.get("agents", [])
     ]
@@ -46,4 +49,5 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         p2p_permissions=p2p,  # type: ignore[arg-type]
         task_timeout=data.get("task_timeout", 120),
         mailbox_dir=data.get("mailbox_dir", "~/.tmux_orchestrator"),
+        web_base_url=data.get("web_base_url", "http://localhost:8000"),
     )

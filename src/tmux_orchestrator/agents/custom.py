@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from tmux_orchestrator.agents.base import Agent, AgentStatus, Task
@@ -14,6 +15,7 @@ if TYPE_CHECKING:
     from tmux_orchestrator.bus import Bus
     from tmux_orchestrator.messaging import Mailbox
     from tmux_orchestrator.tmux_interface import TmuxInterface
+    from tmux_orchestrator.worktree import WorktreeManager
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,9 @@ class CustomAgent(Agent):
         *,
         command: str,
         mailbox: "Mailbox | None" = None,
+        worktree_manager: "WorktreeManager | None" = None,
+        isolate: bool = True,
+        cwd_override: Path | None = None,
     ) -> None:
         super().__init__(agent_id, bus)
         self.mailbox = mailbox
@@ -41,17 +46,22 @@ class CustomAgent(Agent):
         self._command = command
         self._proc: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task | None = None
+        self._worktree_manager = worktree_manager
+        self._isolate = isolate
+        self._cwd_override = cwd_override
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
+        cwd = await self._setup_worktree()
         self._proc = await asyncio.create_subprocess_shell(
             self._command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            cwd=str(cwd) if cwd is not None else None,
         )
         self.status = AgentStatus.IDLE
         self._reader_task = asyncio.create_task(
@@ -78,6 +88,7 @@ class CustomAgent(Agent):
             except asyncio.TimeoutError:
                 self._proc.kill()
         await self.bus.unsubscribe(self.id)
+        await self._teardown_worktree()
         logger.info("CustomAgent %s stopped", self.id)
 
     # ------------------------------------------------------------------
