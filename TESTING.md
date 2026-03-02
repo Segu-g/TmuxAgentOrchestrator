@@ -8,7 +8,7 @@
 4. [test_bus.py — Message Bus (6 tests)](#4-test_buspy--message-bus-6-tests)
 5. [test_messaging.py — Mailbox (10 tests)](#5-test_messagingpy--mailbox-10-tests)
 6. [test_orchestrator.py — Task Dispatch, P2P & Timeouts (11 tests)](#6-test_orchestratorpy--task-dispatch-p2p--timeouts-11-tests)
-7. [test_tmux_interface.py — tmux Wrapper (7 tests)](#7-test_tmux_interfacepy--tmux-wrapper-7-tests)
+7. [test_tmux_interface.py — tmux Wrapper (8 tests)](#7-test_tmux_interfacepy--tmux-wrapper-8-tests)
 8. [test_worktree.py — Git Worktree Manager (9 tests)](#8-test_worktreepy--git-worktree-manager-9-tests)
 9. [Test Infrastructure](#9-test-infrastructure)
 10. [Coverage & Gaps](#10-coverage--gaps)
@@ -18,21 +18,21 @@
 
 ## 1. Overview
 
-The suite has **42 tests** across 5 files. Every public behaviour of the core library modules is covered. Integration with real external processes (tmux server, `claude` CLI) is avoided entirely — those are replaced with mocks or temporary real git repositories.
+The suite has **43 tests** across 5 files. Every public behaviour of the core library modules is covered. Integration with real external processes (tmux server, `claude` CLI) is avoided entirely — those are replaced with mocks or temporary real git repositories.
 
 ```
 tests/
 ├── test_bus.py             6 tests  — async pub/sub message bus
 ├── test_messaging.py      10 tests  — file-based mailbox (4 classes)
 ├── test_orchestrator.py   11 tests  — task queue, dispatch, P2P routing, timeouts, events
-├── test_tmux_interface.py  7 tests  — libtmux wrapper
+├── test_tmux_interface.py  8 tests  — libtmux wrapper
 └── test_worktree.py        9 tests  — git worktree lifecycle (real git)
 ```
 
 **Run result:**
 
 ```
-42 passed in ~3.4 s
+43 passed in ~3.4 s
 ```
 
 ---
@@ -413,7 +413,7 @@ Tests `Orchestrator` from `tmux_orchestrator.orchestrator` using `DummyAgent` an
 
 ---
 
-## 7. `test_tmux_interface.py` — tmux Wrapper (7 tests)
+## 7. `test_tmux_interface.py` — tmux Wrapper (8 tests)
 
 Tests `TmuxInterface` and the `_hash` helper from `tmux_orchestrator.tmux_interface`. All tests that touch the tmux server mock `libtmux.Server`.
 
@@ -441,11 +441,23 @@ Computes the expected MD5 hex digest of `"test content"` using the stdlib and as
 
 ### `test_ensure_session_kills_existing_and_creates_fresh`
 
-**Scenario:** A session with the given name already exists.
+**Scenario:** A session with the given name already exists and the user confirms the kill.
 
-**Mock setup:** `mock_server.find_where.return_value = existing_mock`.
+**Mock setup:** `mock_server.find_where.return_value = existing_mock`; `TmuxInterface` constructed with `confirm_kill=lambda _: True`.
 
 **Assertions:** `existing.kill_session()` is called once; `new_session` is then called to create a fresh session; the new session is returned.
+
+---
+
+### `test_ensure_session_aborts_when_user_declines`
+
+**Scenario:** A session with the given name already exists but the user declines the confirmation prompt.
+
+**Mock setup:** `mock_server.find_where.return_value = existing_mock`; `TmuxInterface` constructed with `confirm_kill=lambda _: False`.
+
+**Assertions:** `pytest.raises(RuntimeError, match="already exists")` — a `RuntimeError` is raised. `existing.kill_session()` is **not** called.
+
+**Why this matters:** Prevents accidental destruction of an existing session. The `confirm_kill` callback is how `main.py` wires in `typer.confirm` with `default=False`, making "abort" the safe default.
 
 ---
 
@@ -638,7 +650,7 @@ Several orchestrator tests use `await asyncio.sleep(N)` to wait for the backgrou
 | `bus.py` | All public methods; queue-full edge case |
 | `messaging.py` | All CRUD operations; missing-file edge cases |
 | `orchestrator.py` | Dispatch, requeue, P2P allow/block, pause/resume, list, task timeout, status events |
-| `tmux_interface.py` | Session create/kill-existing/create-fresh, watch/unwatch, send_keys, capture, hash |
+| `tmux_interface.py` | Session create/kill-existing/create-fresh/abort-on-decline, watch/unwatch, send_keys, capture, hash |
 | `worktree.py` | Setup, teardown, isolate=false, gitignore, non-git, duplicate setup |
 | `agents/base.py` | Timeout enforcement, status events |
 

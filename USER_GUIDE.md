@@ -624,7 +624,7 @@ Commands that call the REST API (`/send-message`, `/spawn-subagent`, `/list-agen
 ### Agent doesn't start
 
 - The orchestrator creates its own fresh tmux session on startup — no pre-existing session is required.
-- If a session with the same `session_name` already exists it will be killed and replaced.
+- If a session with the same `session_name` already exists, you will be prompted to confirm before it is killed and replaced. Press `y` to proceed or `n` to abort.
 - Run with `--verbose` for debug logs.
 
 ### Task never completes (ClaudeCodeAgent stuck)

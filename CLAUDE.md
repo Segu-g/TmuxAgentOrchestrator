@@ -76,7 +76,7 @@ pytest
 ## Key Decisions
 
 - `libtmux` is the sole tmux binding; pane watcher runs in a daemon thread, uses `asyncio.run_coroutine_threadsafe` to publish to the async bus.
-- `TmuxInterface.ensure_session()` always creates a **fresh** tmux session, killing any pre-existing session with the same name. `kill_session()` is called on orchestrator shutdown to clean up.
+- `TmuxInterface.ensure_session()` always creates a **fresh** tmux session. If a session with the same name exists, the user is prompted via a `confirm_kill: Callable[[str], bool] | None` callback (wired to `typer.confirm` in `main.py`); declining raises `RuntimeError`. `kill_session()` is called on orchestrator shutdown to clean up.
 - Textual TUI and FastAPI web server are two separate CLI commands (`tui` vs `web`) that share the same core components.
 - P2P routing is bidirectional per permission entry — stored as `frozenset` pairs.
 - Sub-agent spawning via CONTROL message requires a `template_id` matching an agent defined in the YAML config — arbitrary commands cannot be injected at runtime.
