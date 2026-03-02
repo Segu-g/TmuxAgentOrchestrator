@@ -44,7 +44,14 @@ def _build_system(config_path: Path) -> tuple[Orchestrator, Bus, TmuxInterface]:
 
     config = load_config(config_path)
     bus = Bus()
-    tmux = TmuxInterface(session_name=config.session_name, bus=bus)
+
+    def _confirm_kill(session_name: str) -> bool:
+        return typer.confirm(
+            f"tmux session '{session_name}' already exists. Kill it and start fresh?",
+            default=False,
+        )
+
+    tmux = TmuxInterface(session_name=config.session_name, bus=bus, confirm_kill=_confirm_kill)
     mailbox = Mailbox(root_dir=config.mailbox_dir, session_name=config.session_name)
 
     try:

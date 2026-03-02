@@ -7,7 +7,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 import libtmux
 
@@ -34,9 +34,15 @@ class TmuxInterface:
     and emits :class:`PaneOutputEvent` messages onto the bus.
     """
 
-    def __init__(self, session_name: str, bus: "Bus | None" = None) -> None:
+    def __init__(
+        self,
+        session_name: str,
+        bus: "Bus | None" = None,
+        confirm_kill: "Callable[[str], bool] | None" = None,
+    ) -> None:
         self.session_name = session_name
         self.bus = bus
+        self._confirm_kill = confirm_kill
         self._server = libtmux.Server()
         self._session: libtmux.Session | None = None
         # pane_id → (agent_id, last_hash)
@@ -52,13 +58,19 @@ class TmuxInterface:
     def ensure_session(self) -> libtmux.Session:
         """Return the managed session, always creating a fresh one.
 
-        Any pre-existing session with the same name is killed first so that
-        the orchestrator never silently attaches to a leftover session.
+        If a session with the same name already exists and *confirm_kill* was
+        provided at construction time, the user is prompted for confirmation
+        before the existing session is killed.  If the user declines, a
+        ``RuntimeError`` is raised and the orchestrator does not start.
         """
         if self._session is not None:
             return self._session
         existing = self._server.find_where({"session_name": self.session_name})
         if existing:
+            if self._confirm_kill is not None and not self._confirm_kill(self.session_name):
+                raise RuntimeError(
+                    f"tmux session '{self.session_name}' already exists and was not replaced; aborting"
+                )
             existing.kill_session()
         self._session = self._server.new_session(session_name=self.session_name)
         return self._session
