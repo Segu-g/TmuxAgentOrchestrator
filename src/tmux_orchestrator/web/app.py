@@ -7,7 +7,7 @@ import logging
 import uuid
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -54,7 +54,28 @@ class DirectorChat(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def create_app(orchestrator: Any, hub: WebSocketHub) -> FastAPI:
+def _make_auth(api_key: str):
+    """Return a FastAPI dependency that validates X-API-Key header or ?key= param.
+
+    If *api_key* is empty the dependency is a no-op (auth disabled).
+    """
+    if not api_key:
+        async def _no_auth() -> None:
+            pass
+        return _no_auth
+
+    async def _verify(request: Request) -> None:
+        provided = (
+            request.headers.get("X-API-Key", "")
+            or request.query_params.get("key", "")
+        )
+        if provided != api_key:
+            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+    return _verify
+
+
+def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> FastAPI:
     """Create and wire up the FastAPI application.
 
     Parameters
@@ -64,6 +85,8 @@ def create_app(orchestrator: Any, hub: WebSocketHub) -> FastAPI:
     hub:
         A :class:`WebSocketHub` already connected to the bus.
     """
+    auth = _make_auth(api_key)
+
     app = FastAPI(
         title="TmuxAgentOrchestrator",
         description="REST + WebSocket API for the tmux agent orchestrator",
@@ -88,22 +111,22 @@ def create_app(orchestrator: Any, hub: WebSocketHub) -> FastAPI:
     # REST endpoints
     # ------------------------------------------------------------------
 
-    @app.post("/tasks", summary="Submit a new task")
+    @app.post("/tasks", summary="Submit a new task", dependencies=[Depends(auth)])
     async def submit_task(body: TaskSubmit) -> dict:
         task = await orchestrator.submit_task(
             body.prompt, priority=body.priority, metadata=body.metadata
         )
         return {"task_id": task.id, "prompt": task.prompt, "priority": task.priority}
 
-    @app.get("/tasks", summary="List pending tasks")
+    @app.get("/tasks", summary="List pending tasks", dependencies=[Depends(auth)])
     async def list_tasks() -> list[dict]:
         return orchestrator.list_tasks()
 
-    @app.get("/agents", summary="List agents and their status")
+    @app.get("/agents", summary="List agents and their status", dependencies=[Depends(auth)])
     async def list_agents() -> list[dict]:
         return orchestrator.list_agents()
 
-    @app.delete("/agents/{agent_id}", summary="Stop an agent")
+    @app.delete("/agents/{agent_id}", summary="Stop an agent", dependencies=[Depends(auth)])
     async def stop_agent(agent_id: str) -> AgentKillResponse:
         agent = orchestrator.get_agent(agent_id)
         if agent is None:
@@ -111,7 +134,7 @@ def create_app(orchestrator: Any, hub: WebSocketHub) -> FastAPI:
         await agent.stop()
         return AgentKillResponse(agent_id=agent_id, stopped=True)
 
-    @app.post("/agents/{agent_id}/message", summary="Send a message to an agent")
+    @app.post("/agents/{agent_id}/message", summary="Send a message to an agent", dependencies=[Depends(auth)])
     async def send_message(agent_id: str, body: SendMessage) -> dict:
         agent = orchestrator.get_agent(agent_id)
         if agent is None:
@@ -129,7 +152,7 @@ def create_app(orchestrator: Any, hub: WebSocketHub) -> FastAPI:
         await orchestrator.bus.publish(msg)
         return {"message_id": msg.id, "to_id": agent_id}
 
-    @app.post("/agents", summary="Spawn a sub-agent under a parent agent")
+    @app.post("/agents", summary="Spawn a sub-agent under a parent agent", dependencies=[Depends(auth)])
     async def spawn_agent(body: SpawnAgent) -> dict:
         parent = orchestrator.get_agent(body.parent_id)
         if parent is None:
@@ -149,7 +172,7 @@ def create_app(orchestrator: Any, hub: WebSocketHub) -> FastAPI:
         await orchestrator.bus.publish(msg)
         return {"status": "spawning", "parent_id": body.parent_id}
 
-    @app.post("/director/chat", summary="Send a message to the Director agent")
+    @app.post("/director/chat", summary="Send a message to the Director agent", dependencies=[Depends(auth)])
     async def director_chat(body: DirectorChat, wait: bool = False) -> dict:
         director = next(
             (a for a in orchestrator._agents.values() if getattr(a, "role", "worker") == "director"),
@@ -195,7 +218,10 @@ def create_app(orchestrator: Any, hub: WebSocketHub) -> FastAPI:
     # ------------------------------------------------------------------
 
     @app.websocket("/ws")
-    async def websocket_endpoint(websocket: WebSocket) -> None:
+    async def websocket_endpoint(websocket: WebSocket, key: str = "") -> None:
+        if api_key and key != api_key:
+            await websocket.close(code=1008)  # Policy Violation
+            return
         await hub.handle(websocket)
 
     # ------------------------------------------------------------------
@@ -203,8 +229,14 @@ def create_app(orchestrator: Any, hub: WebSocketHub) -> FastAPI:
     # ------------------------------------------------------------------
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-    async def web_ui() -> HTMLResponse:
-        return HTMLResponse(_HTML_UI)
+    async def web_ui(key: str = "") -> HTMLResponse:
+        if api_key and key != api_key:
+            return HTMLResponse(
+                "<h1>401 Unauthorized</h1>"
+                "<p>Open <code>http://host:port/?key=YOUR_API_KEY</code></p>",
+                status_code=401,
+            )
+        return HTMLResponse(_HTML_UI.replace("__API_KEY__", key))
 
     return app
 
@@ -547,6 +579,13 @@ _HTML_UI = """<!DOCTYPE html>
 
 <script>
 const API_BASE = '';
+const API_KEY = '__API_KEY__';
+
+function authFetch(url, options = {}) {
+  const headers = Object.assign({}, options.headers || {});
+  if (API_KEY) headers['X-API-Key'] = API_KEY;
+  return fetch(url, Object.assign({}, options, {headers}));
+}
 
 // pending chat task_ids waiting for RESULT
 const pendingChats = new Map(); // task_id -> bubble element
@@ -555,7 +594,8 @@ const pendingChats = new Map(); // task_id -> bubble element
 let ws;
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const wsUrl = `${proto}://${location.host}/ws` + (API_KEY ? `?key=${encodeURIComponent(API_KEY)}` : '');
+  ws = new WebSocket(wsUrl);
   ws.onopen = () => {
     document.getElementById('status-dot').classList.remove('disconnected');
     document.getElementById('conn-label').textContent = 'Connected';
@@ -595,7 +635,7 @@ function connectWS() {
 let directorId = null;
 
 function refreshAgents() {
-  fetch(`${API_BASE}/agents`)
+  authFetch(`${API_BASE}/agents`)
     .then(r => r.json())
     .then(agents => {
       document.getElementById('agent-count').textContent = agents.length;
@@ -633,7 +673,7 @@ function refreshAgents() {
 }
 
 function refreshTasks() {
-  fetch(`${API_BASE}/tasks`)
+  authFetch(`${API_BASE}/tasks`)
     .then(r => r.json())
     .then(tasks => {
       document.getElementById('task-count').textContent = tasks.length;
@@ -712,7 +752,7 @@ async function sendChat() {
   const thinkingBubble = addBubble('Thinking…', 'thinking');
 
   try {
-    const resp = await fetch(`${API_BASE}/director/chat`, {
+    const resp = await authFetch(`${API_BASE}/director/chat`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({message})
@@ -750,7 +790,7 @@ async function submitTask() {
   const pri = document.getElementById('priority-input');
   const prompt = inp.value.trim();
   if (!prompt) { inp.focus(); return; }
-  const resp = await fetch(`${API_BASE}/tasks`, {
+  const resp = await authFetch(`${API_BASE}/tasks`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({prompt, priority: parseInt(pri.value || '0', 10)})

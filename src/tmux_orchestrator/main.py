@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 import sys
 import urllib.error
 import urllib.request
@@ -143,8 +144,12 @@ def web(
         Path,
         typer.Option("--config", "-c", help="Path to YAML config file"),
     ] = Path("examples/basic_config.yaml"),
-    host: Annotated[str, typer.Option("--host", "-H")] = "0.0.0.0",
+    host: Annotated[str, typer.Option("--host", "-H")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", "-p")] = 8000,
+    api_key: Annotated[
+        Optional[str],
+        typer.Option("--api-key", "-k", help="API key for auth (auto-generated if omitted)"),
+    ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
 ) -> None:
     """Launch the FastAPI web server (REST + WebSocket + browser UI)."""
@@ -152,10 +157,13 @@ def web(
     from tmux_orchestrator.web.app import create_app
     from tmux_orchestrator.web.ws import WebSocketHub
 
+    if api_key is None:
+        api_key = secrets.token_urlsafe(24)
+
     orchestrator, bus, tmux = _build_system(config)
     _patch_web_url(orchestrator, host, port)
     hub = WebSocketHub(bus=bus)
-    fastapi_app = create_app(orchestrator=orchestrator, hub=hub)
+    fastapi_app = create_app(orchestrator=orchestrator, hub=hub, api_key=api_key)
 
     async def _startup() -> None:
         await orchestrator.start()
@@ -168,7 +176,9 @@ def web(
     fastapi_app.add_event_handler("startup", _startup)
     fastapi_app.add_event_handler("shutdown", _shutdown)
 
-    typer.echo(f"Starting web server at http://{host}:{port}")
+    display_host = "localhost" if host in ("0.0.0.0", "") else host
+    typer.echo(f"Web UI:  http://{display_host}:{port}/?key={api_key}")
+    typer.echo(f"API key: {api_key}")
     uvicorn.run(fastapi_app, host=host, port=port, log_level="warning")
 
 
@@ -224,6 +234,10 @@ def run(
 @app.command()
 def chat(
     url: Annotated[str, typer.Option("--url", "-u", help="Orchestrator web URL")] = "http://localhost:8000",
+    api_key: Annotated[
+        Optional[str],
+        typer.Option("--api-key", "-k", help="API key (required when server uses auth)"),
+    ] = None,
     message: Annotated[Optional[str], typer.Option("--message", "-m", help="Single message (non-interactive)")] = None,
     timeout: Annotated[int, typer.Option("--timeout", "-t", help="Response timeout in seconds")] = 300,
 ) -> None:
@@ -231,10 +245,13 @@ def chat(
 
     def send(msg: str) -> str:
         payload = json.dumps({"message": msg}).encode()
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if api_key:
+            headers["X-API-Key"] = api_key
         req = urllib.request.Request(
             f"{url}/director/chat?wait=true",
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         try:
