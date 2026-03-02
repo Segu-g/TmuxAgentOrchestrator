@@ -9,13 +9,15 @@
 5. [Configuration Reference](#5-configuration-reference)
 6. [Running Modes](#6-running-modes)
 7. [Agent Types](#7-agent-types)
-8. [Task Submission](#8-task-submission)
-9. [P2P Messaging](#9-p2p-messaging)
-10. [Sub-Agent Spawning](#10-sub-agent-spawning)
-11. [Git Worktree Isolation](#11-git-worktree-isolation)
-12. [Web UI & REST API](#12-web-ui--rest-api)
-13. [Slash Commands (for Claude Code Agents)](#13-slash-commands-for-claude-code-agents)
-14. [Troubleshooting](#14-troubleshooting)
+8. [Task Timeouts](#8-task-timeouts)
+9. [Agent Status Events](#9-agent-status-events)
+10. [Task Submission](#10-task-submission)
+11. [P2P Messaging](#11-p2p-messaging)
+12. [Sub-Agent Spawning](#12-sub-agent-spawning)
+13. [Git Worktree Isolation](#13-git-worktree-isolation)
+14. [Web UI & REST API](#14-web-ui--rest-api)
+15. [Slash Commands (for Claude Code Agents)](#15-slash-commands-for-claude-code-agents)
+16. [Troubleshooting](#16-troubleshooting)
 
 ---
 
@@ -127,7 +129,7 @@ tmux-orchestrator run --config myproject.yaml --prompt "Summarise the CLAUDE.md 
 | `session_name` | string | `"orchestrator"` | tmux session name to attach to or create |
 | `mailbox_dir` | string | `"~/.tmux_orchestrator"` | Root directory for file-based message storage |
 | `web_base_url` | string | `"http://localhost:8000"` | REST API base URL injected into agent context files |
-| `task_timeout` | integer | `120` | Metadata field (not currently enforced) |
+| `task_timeout` | integer | `120` | Seconds before a running task is forcibly cancelled (0 = no limit) |
 | `p2p_permissions` | list of pairs | `[]` | Agent ID pairs that are allowed to message each other |
 | `agents` | list | `[]` | Agent definitions (see below) |
 
@@ -146,7 +148,7 @@ tmux-orchestrator run --config myproject.yaml --prompt "Summarise the CLAUDE.md 
 session_name: dev-swarm
 mailbox_dir: ~/.tmux_orchestrator
 web_base_url: http://localhost:9000
-task_timeout: 300
+task_timeout: 300   # cancel task after 5 minutes; 0 = unlimited
 
 agents:
   - id: planner
@@ -264,9 +266,77 @@ for line in sys.stdin:
 
 **Working directory:** If `isolate: true`, the subprocess `cwd` is set to the agent's git worktree. If `isolate: false`, `cwd` is the main repo root.
 
+**Context file:** On startup the agent writes `__orchestrator_context__.json` to its working directory — the same format as `claude_code` agents — so any subprocess that needs to call back into the REST API or mailbox can discover the orchestrator's coordinates automatically.
+
 ---
 
-## 8. Task Submission
+## 8. Task Timeouts
+
+### Enforcement
+
+The `task_timeout` config value (default `120` seconds) is enforced per-task for every agent type. When a task exceeds the limit:
+
+1. The `_dispatch_task` coroutine is cancelled via `asyncio.wait_for`.
+2. A `RESULT` message with `error: "timeout"` is published to the bus.
+3. The agent returns to `IDLE` and is immediately eligible for the next task.
+
+```json
+{
+  "type": "RESULT",
+  "from_id": "worker-1",
+  "payload": {
+    "task_id": "3f8a2b…",
+    "error": "timeout",
+    "output": null
+  }
+}
+```
+
+### Setting a custom timeout
+
+```yaml
+task_timeout: 60     # 60 seconds
+task_timeout: 0      # no timeout (run forever)
+```
+
+### Limitation — CustomAgent
+
+For `custom` agents, `_dispatch_task` only writes the JSON line to stdin and returns immediately — actual processing happens asynchronously in `_read_loop`. A timeout therefore cancels the *delivery*, not the subprocess computation. If your script can run arbitrarily long, implement a timeout inside the script itself.
+
+---
+
+## 9. Agent Status Events
+
+The orchestrator publishes `STATUS` bus messages at every lifecycle transition. Clients connected via WebSocket receive these in real time.
+
+| `event` | When | Payload keys |
+|---|---|---|
+| `task_queued` | Task added to queue | `task_id`, `prompt` |
+| `agent_busy` | Agent starts executing a task | `agent_id`, `status`, `task_id` |
+| `agent_idle` | Agent finishes a task (success) | `agent_id`, `status`, `task_id` |
+| `agent_error` | Agent task threw an exception | `agent_id`, `status`, `task_id` |
+| `subagent_spawned` | Sub-agent created | `sub_agent_id`, `parent_id` |
+
+Example WebSocket message:
+
+```json
+{
+  "type": "STATUS",
+  "from_id": "worker-1",
+  "payload": {
+    "event": "agent_busy",
+    "agent_id": "worker-1",
+    "status": "BUSY",
+    "task_id": "3f8a2b…"
+  }
+}
+```
+
+Timeout results in an `agent_idle` event (the agent returns to IDLE); unhandled exceptions produce `agent_error`.
+
+---
+
+## 10. Task Submission
 
 ### Via TUI
 
@@ -322,7 +392,7 @@ curl -X POST http://localhost:8000/tasks \
 
 ---
 
-## 9. P2P Messaging
+## 11. P2P Messaging
 
 Agents can send messages directly to each other, gated by a permission table.
 
@@ -387,7 +457,7 @@ Messages are JSON files stored in the mailbox:
 
 ---
 
-## 10. Sub-Agent Spawning
+## 12. Sub-Agent Spawning
 
 An agent can request the orchestrator to spawn a new worker under its supervision. The orchestrator automatically grants P2P permission between parent and child.
 
@@ -457,7 +527,7 @@ Then watch for the STATUS message in your inbox, read the `sub_agent_id`, and de
 
 ---
 
-## 11. Git Worktree Isolation
+## 13. Git Worktree Isolation
 
 When running inside a git repository, each agent can be given its own isolated working tree. This prevents file conflicts when multiple agents work in parallel on the same codebase.
 
@@ -518,7 +588,7 @@ payload={
 
 ---
 
-## 12. Web UI & REST API
+## 14. Web UI & REST API
 
 Start the web server:
 
@@ -584,7 +654,7 @@ Connect to `ws://localhost:8000/ws` to receive a real-time stream of all bus eve
 
 ---
 
-## 13. Slash Commands (for Claude Code Agents)
+## 15. Slash Commands (for Claude Code Agents)
 
 When a Claude Code agent starts, the orchestrator writes `__orchestrator_context__.json` to its working directory. This file enables the following slash commands, available in every agent's Claude session:
 
@@ -600,7 +670,7 @@ Commands that call the REST API (`/send-message`, `/spawn-subagent`, `/list-agen
 
 ---
 
-## 14. Troubleshooting
+## 16. Troubleshooting
 
 ### Agent doesn't start
 
