@@ -73,7 +73,7 @@ def _build_system(config_path: Path) -> tuple[Orchestrator, Bus, TmuxInterface]:
                 isolate=agent_cfg.isolate,
                 session_name=config.session_name,
                 web_base_url=config.web_base_url,
-                task_timeout=config.task_timeout,
+                task_timeout=config.task_timeout or None,
             )
         else:
             typer.echo(f"[error] Unknown agent type: {agent_cfg.type!r}", err=True)

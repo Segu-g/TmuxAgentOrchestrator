@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 # Patterns that indicate Claude has finished and is waiting for input.
 # Adjust as the `claude` CLI evolves.
 _DONE_PATTERNS = [
-    re.compile(r"^\s*>\s*$", re.MULTILINE),          # bare prompt ">"
+    re.compile(r"^\s*❯\s*$", re.MULTILINE),           # claude interactive prompt "❯"
+    re.compile(r"^\s*>\s*$", re.MULTILINE),            # bare ">" prompt (older versions)
     re.compile(r"Human:\s*$", re.MULTILINE),           # Human: prompt
     re.compile(r"\$\s*$", re.MULTILINE),               # shell prompt fallback
 ]
@@ -43,7 +44,7 @@ class ClaudeCodeAgent(Agent):
         bus: "Bus",
         tmux: "TmuxInterface",
         *,
-        command: str = "claude --no-pager",
+        command: str = "env -u CLAUDECODE claude --dangerously-skip-permissions",
         mailbox: "Mailbox | None" = None,
         worktree_manager: "WorktreeManager | None" = None,
         isolate: bool = True,
@@ -81,6 +82,7 @@ class ClaudeCodeAgent(Agent):
         await loop.run_in_executor(None, self._tmux.send_keys, pane, launch)
         self._tmux.watch_pane(pane, self.id)
         self._tmux.start_watcher()
+        await self._wait_for_ready()
         self.status = AgentStatus.IDLE
         self._run_task = asyncio.create_task(self._run_loop(), name=f"{self.id}-loop")
         await self._start_message_loop()
@@ -118,6 +120,33 @@ class ClaudeCodeAgent(Agent):
         )
         # Poll until output settles and looks like a prompt
         await self._wait_for_completion(task)
+
+    async def _wait_for_ready(self) -> None:
+        """Poll pane until claude's initial prompt appears and settles.
+
+        Auto-accepts the workspace trust dialog if it appears.
+        """
+        settle = 0
+        prev = ""
+        while True:
+            await asyncio.sleep(_POLL_INTERVAL)
+            loop = asyncio.get_event_loop()
+            text = await loop.run_in_executor(None, self._tmux.capture_pane, self.pane)
+            # Auto-accept the workspace trust dialog ("Yes, I trust this folder")
+            if "I trust this folder" in text and "Enter to confirm" in text:
+                await loop.run_in_executor(
+                    None, self._tmux.send_keys, self.pane, ""
+                )
+                settle = 0
+                prev = ""
+                continue
+            if text == prev:
+                settle += 1
+            else:
+                settle = 0
+                prev = text
+            if settle >= _SETTLE_CYCLES and _looks_done(text):
+                return
 
     async def _wait_for_completion(self, task: Task) -> None:
         settle = 0

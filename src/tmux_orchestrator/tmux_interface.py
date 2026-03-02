@@ -65,13 +65,13 @@ class TmuxInterface:
         """
         if self._session is not None:
             return self._session
-        existing = self._server.find_where({"session_name": self.session_name})
+        existing = self._server.sessions.get(session_name=self.session_name, default=None)
         if existing:
             if self._confirm_kill is not None and not self._confirm_kill(self.session_name):
                 raise RuntimeError(
                     f"tmux session '{self.session_name}' already exists and was not replaced; aborting"
                 )
-            existing.kill_session()
+            existing.kill()
         self._session = self._server.new_session(session_name=self.session_name)
         return self._session
 
@@ -79,7 +79,7 @@ class TmuxInterface:
         """Kill the managed tmux session (call during orchestrator shutdown)."""
         if self._session is not None:
             try:
-                self._session.kill_session()
+                self._session.kill()
             except Exception:  # noqa: BLE001
                 pass
             self._session = None
@@ -88,7 +88,7 @@ class TmuxInterface:
         """Spawn a new pane in the managed session's first window."""
         session = self.ensure_session()
         window = session.windows[window_index]
-        pane: libtmux.Pane = window.split_window(attach=False)
+        pane: libtmux.Pane = window.split(attach=False)
         return pane
 
     def get_first_pane(self) -> libtmux.Pane:
@@ -148,7 +148,7 @@ class TmuxInterface:
                 items = list(self._watched.items())
             for pane_id, (agent_id, last_hash) in items:
                 try:
-                    pane = self._server.find_where({"pane_id": pane_id})
+                    pane = self._server.panes.get(pane_id=pane_id, default=None)
                     if pane is None:
                         continue
                     content = self.capture_pane(pane)

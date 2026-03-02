@@ -29,7 +29,7 @@ def test_hash_uses_md5():
 @patch("tmux_orchestrator.tmux_interface.libtmux.Server")
 def test_ensure_session_creates_new(mock_server_cls):
     mock_server = MagicMock()
-    mock_server.find_where.return_value = None
+    mock_server.sessions.get.return_value = None
     mock_session = MagicMock()
     mock_server.new_session.return_value = mock_session
     mock_server_cls.return_value = mock_server
@@ -47,14 +47,14 @@ def test_ensure_session_kills_existing_and_creates_fresh(mock_server_cls):
     mock_server = MagicMock()
     existing = MagicMock()
     fresh = MagicMock()
-    mock_server.find_where.return_value = existing
+    mock_server.sessions.get.return_value = existing
     mock_server.new_session.return_value = fresh
     mock_server_cls.return_value = mock_server
 
     iface = TmuxInterface(session_name="existing", confirm_kill=lambda _: True)
     session = iface.ensure_session()
 
-    existing.kill_session.assert_called_once()
+    existing.kill.assert_called_once()
     mock_server.new_session.assert_called_once_with(session_name="existing")
     assert session is fresh
 
@@ -64,14 +64,14 @@ def test_ensure_session_aborts_when_user_declines(mock_server_cls):
     """When the user declines the kill confirmation, a RuntimeError is raised."""
     mock_server = MagicMock()
     existing = MagicMock()
-    mock_server.find_where.return_value = existing
+    mock_server.sessions.get.return_value = existing
     mock_server_cls.return_value = mock_server
 
     iface = TmuxInterface(session_name="existing", confirm_kill=lambda _: False)
     with pytest.raises(RuntimeError, match="already exists"):
         iface.ensure_session()
 
-    existing.kill_session.assert_not_called()
+    existing.kill.assert_not_called()
 
 
 @patch("tmux_orchestrator.tmux_interface.libtmux.Server")
