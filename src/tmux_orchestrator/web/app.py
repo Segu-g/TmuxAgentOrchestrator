@@ -159,7 +159,17 @@ def create_app(orchestrator: Any, hub: WebSocketHub) -> FastAPI:
             raise HTTPException(status_code=404, detail="No director agent in this session")
 
         task_id = str(uuid.uuid4())
-        task = Task(id=task_id, prompt=body.message, priority=0)
+
+        # Prepend any buffered worker results so the Director sees them as context
+        pending = orchestrator._director_pending.copy()
+        orchestrator._director_pending.clear()
+        if pending:
+            notifications = "\n".join(f"  - {p}" for p in pending)
+            prompt = f"[Completed worker tasks since last message]\n{notifications}\n\n{body.message}"
+        else:
+            prompt = body.message
+
+        task = Task(id=task_id, prompt=prompt, priority=0)
 
         if wait:
             sub_id = f"__chat_{task_id[:8]}__"

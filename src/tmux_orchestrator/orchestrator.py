@@ -51,6 +51,8 @@ class Orchestrator:
         self._dispatch_task: asyncio.Task | None = None
         self._router_task: asyncio.Task | None = None
         self._bus_queue: asyncio.Queue[Message] | None = None
+        # Worker results waiting to be injected into the next Director chat turn
+        self._director_pending: list[str] = []
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -190,30 +192,24 @@ class Orchestrator:
             elif msg.type == MessageType.CONTROL and msg.to_id == "__orchestrator__":
                 asyncio.create_task(self._handle_control(msg))
             elif msg.type == MessageType.RESULT:
-                await self._notify_directors(msg)
+                self._buffer_director_result(msg)
             self._bus_queue.task_done()
 
-    async def _notify_directors(self, result_msg: Message) -> None:
-        """Forward task RESULT summaries to any director agents via PEER_MSG."""
-        directors = [
-            a for a in self._agents.values()
-            if getattr(a, "role", "worker") == "director"
-        ]
-        if not directors:
+    def _buffer_director_result(self, result_msg: Message) -> None:
+        """Buffer a worker RESULT to be injected into the next Director chat turn.
+
+        Avoids interrupting the Director's active conversation by pushing text
+        into its tmux pane mid-session.  Instead, the pending summaries are
+        prepended to the next message the user sends via POST /director/chat.
+        """
+        if not any(getattr(a, "role", "worker") == "director" for a in self._agents.values()):
             return
         summary = (
-            f"[Task complete] agent={result_msg.from_id} "
+            f"agent={result_msg.from_id} "
             f"task_id={result_msg.payload.get('task_id', '?')}"
         )
-        for director in directors:
-            notify = Message(
-                type=MessageType.PEER_MSG,
-                from_id="__orchestrator__",
-                to_id=director.id,
-                payload={"content": summary, "_forwarded": True},
-            )
-            await self.bus.publish(notify)
-            logger.debug("Notified director %s of result from %s", director.id, result_msg.from_id)
+        self._director_pending.append(summary)
+        logger.debug("Buffered worker result for director: %s", summary)
 
     async def route_message(self, msg: Message) -> None:
         """Forward a PEER_MSG if the sender/receiver pair is permitted.
