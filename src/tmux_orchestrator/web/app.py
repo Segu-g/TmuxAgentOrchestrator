@@ -248,7 +248,7 @@ _HTML_UI = """<!DOCTYPE html>
     flex: 1;
     display: grid;
     grid-template-columns: 1fr 1fr;
-    grid-template-rows: 180px 200px 200px;
+    grid-template-rows: 1fr 1.6fr;
     gap: 1px;
     background: #30363d;
     overflow: hidden;
@@ -521,7 +521,7 @@ _HTML_UI = """<!DOCTYPE html>
   </section>
 
   <!-- Agent Conversations panel -->
-  <section class="full-width">
+  <section>
     <div class="section-header">
       Agent Conversations
       <span id="conv-count" class="badge">0</span>
@@ -530,7 +530,7 @@ _HTML_UI = """<!DOCTYPE html>
   </section>
 
   <!-- Event Log panel -->
-  <section class="full-width">
+  <section>
     <div class="section-header">
       Event Log
       <button onclick="clearLog()" style="padding:2px 10px;font-size:0.75rem;background:#21262d;border:1px solid #30363d;border-radius:4px;color:#c9d1d9;">Clear</button>
@@ -623,12 +623,11 @@ function refreshAgents() {
         directorId = director.id;
         document.getElementById('director-id-badge').textContent = director.id;
         chatSection.style.display = 'flex';
-        // Insert director-chat row between agents/tasks and conversations
-        document.querySelector('main').style.gridTemplateRows = '180px 280px 200px 200px';
+        document.querySelector('main').style.gridTemplateRows = '1fr 280px 1.6fr';
       } else if (!director && directorId) {
         directorId = null;
         chatSection.style.display = 'none';
-        document.querySelector('main').style.gridTemplateRows = '180px 200px 200px';
+        document.querySelector('main').style.gridTemplateRows = '1fr 1.6fr';
       }
     }).catch(console.error);
 }
