@@ -276,6 +276,7 @@ class Orchestrator:
                 worktree_manager=effective_wm,
                 isolate=isolate,
                 cwd_override=cwd_override,
+                task_timeout=self.config.task_timeout,
             )
         elif agent_type == "claude_code":
             agent = ClaudeCodeAgent(
@@ -288,6 +289,7 @@ class Orchestrator:
                 cwd_override=cwd_override,
                 session_name=self.config.session_name,
                 web_base_url=self.config.web_base_url,
+                task_timeout=self.config.task_timeout,
             )
         else:
             logger.error("Unknown agent type for sub-agent: %s", agent_type)

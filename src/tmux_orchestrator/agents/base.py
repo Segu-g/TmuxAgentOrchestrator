@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from tmux_orchestrator.bus import Message, MessageType
 
 if TYPE_CHECKING:
     import libtmux
-    from pathlib import Path
 
     from tmux_orchestrator.bus import Bus
     from tmux_orchestrator.messaging import Mailbox
@@ -41,12 +44,19 @@ class Task:
 class Agent(ABC):
     """Lifecycle + messaging contract for all agent implementations."""
 
-    def __init__(self, agent_id: str, bus: "Bus") -> None:
+    def __init__(
+        self,
+        agent_id: str,
+        bus: "Bus",
+        *,
+        task_timeout: float | None = None,
+    ) -> None:
         self.id = agent_id
         self.bus = bus
         self.pane: "libtmux.Pane | None" = None
         self.mailbox: "Mailbox | None" = None
         self.status = AgentStatus.STOPPED
+        self.task_timeout = task_timeout
         self._task_queue: asyncio.Queue[Task] = asyncio.Queue()
         self._current_task: Task | None = None
         self._run_task: asyncio.Task | None = None
@@ -54,8 +64,8 @@ class Agent(ABC):
         # Worktree isolation (set by concrete subclasses after super().__init__)
         self._worktree_manager: "WorktreeManager | None" = None
         self._isolate: bool = True
-        self._cwd_override: "Path | None" = None
-        self.worktree_path: "Path | None" = None
+        self._cwd_override: Path | None = None
+        self.worktree_path: Path | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -119,39 +129,76 @@ class Agent(ABC):
                 q.task_done()
 
     async def _run_loop(self) -> None:
-        """Continuously dequeue and dispatch tasks."""
+        """Continuously dequeue and dispatch tasks, with optional timeout enforcement."""
         while self.status not in (AgentStatus.STOPPED, AgentStatus.ERROR):
             task = await self._task_queue.get()
             self._current_task = task
             self.status = AgentStatus.BUSY
+            await self._publish_status_event("agent_busy", task_id=task.id)
             logger.info("Agent %s starting task %s", self.id, task.id)
             try:
-                await self._dispatch_task(task)
+                if self.task_timeout is not None:
+                    await asyncio.wait_for(
+                        self._dispatch_task(task), timeout=self.task_timeout
+                    )
+                else:
+                    await self._dispatch_task(task)
+            except asyncio.TimeoutError:
+                logger.error(
+                    "Agent %s task %s timed out after %ss",
+                    self.id, task.id, self.task_timeout,
+                )
+                await self._handle_task_timeout(task)
             except Exception as exc:  # noqa: BLE001
                 logger.error("Agent %s task %s failed: %s", self.id, task.id, exc)
                 self.status = AgentStatus.ERROR
+                await self._publish_status_event("agent_error", task_id=task.id)
             finally:
                 self._task_queue.task_done()
+            if self.status == AgentStatus.IDLE:
+                await self._publish_status_event("agent_idle", task_id=task.id)
+
+    async def _handle_task_timeout(self, task: Task) -> None:
+        """Publish a RESULT with error=timeout and return the agent to IDLE."""
+        await self.bus.publish(Message(
+            type=MessageType.RESULT,
+            from_id=self.id,
+            payload={"task_id": task.id, "error": "timeout", "output": None},
+        ))
+        self._set_idle()
+
+    async def _publish_status_event(
+        self, event: str, task_id: str | None = None
+    ) -> None:
+        """Publish an agent status transition event to the bus."""
+        payload: dict[str, Any] = {
+            "event": event,
+            "agent_id": self.id,
+            "status": self.status.value,
+        }
+        if task_id is not None:
+            payload["task_id"] = task_id
+        await self.bus.publish(
+            Message(type=MessageType.STATUS, from_id=self.id, payload=payload)
+        )
 
     # ------------------------------------------------------------------
     # Worktree helpers
     # ------------------------------------------------------------------
 
-    async def _setup_worktree(self) -> "Path | None":
+    async def _setup_worktree(self) -> Path | None:
         """Set up the agent's working directory via worktree isolation.
 
         Returns the path to use as cwd, or ``None`` if no isolation is active.
         Priority: ``_cwd_override`` > ``_worktree_manager`` > None.
         """
-        from pathlib import Path as _Path  # noqa: PLC0415
-
         if self._cwd_override is not None:
             # Shared parent worktree — do not register or teardown.
             return self._cwd_override
         if self._worktree_manager is None:
             return None
         loop = asyncio.get_event_loop()
-        path: _Path = await loop.run_in_executor(
+        path: Path = await loop.run_in_executor(
             None,
             lambda: self._worktree_manager.setup(self.id, isolate=self._isolate),  # type: ignore[union-attr]
         )
@@ -165,6 +212,26 @@ class Agent(ABC):
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._worktree_manager.teardown, self.id)
         self.worktree_path = None
+
+    def _write_context_file(self, cwd: Path) -> None:
+        """Write ``__orchestrator_context__.json`` to the agent's working directory."""
+        if self.mailbox is not None:
+            # mailbox._root is {mailbox_dir}/{session_name}; parent recovers mailbox_dir
+            mailbox_dir = str(self.mailbox._root.parent)
+        else:
+            mailbox_dir = str(Path.home() / ".tmux_orchestrator")
+        ctx: dict[str, Any] = {
+            "agent_id": self.id,
+            "mailbox_dir": mailbox_dir,
+            "worktree_path": str(cwd),
+        }
+        ctx.update(self._context_extras())
+        (cwd / "__orchestrator_context__.json").write_text(json.dumps(ctx, indent=2))
+        logger.debug("Agent %s wrote context file to %s", self.id, cwd)
+
+    def _context_extras(self) -> dict[str, Any]:
+        """Return additional keys for the context file. Override in subclasses."""
+        return {}
 
     def _set_idle(self) -> None:
         self._current_task = None
