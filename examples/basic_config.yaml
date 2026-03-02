@@ -1,10 +1,7 @@
 # Basic TmuxAgentOrchestrator configuration
 # ==========================================
-# This example sets up two workers:
-#   - worker-1: a Claude Code agent (drives the `claude` CLI in a tmux pane)
-#   - worker-2: a custom echo agent (echoes task payloads back as results)
-#
-# P2P messaging is enabled between worker-1 and worker-2.
+# Two Claude Code workers with P2P messaging enabled.
+# Either worker can spawn the other as a sub-agent via CONTROL messages.
 
 session_name: orchestrator
 mailbox_dir: ~/.tmux_orchestrator
@@ -12,11 +9,9 @@ mailbox_dir: ~/.tmux_orchestrator
 agents:
   - id: worker-1
     type: claude_code
-    # command defaults to "claude --no-pager" inside ClaudeCodeAgent
 
   - id: worker-2
-    type: custom
-    command: "python3 -u examples/echo_agent.py"
+    type: claude_code
     isolate: false  # shares the main repo working tree (opt-out demo)
 
 p2p_permissions:

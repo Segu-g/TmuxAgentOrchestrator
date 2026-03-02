@@ -50,15 +50,27 @@ class TmuxInterface:
     # ------------------------------------------------------------------
 
     def ensure_session(self) -> libtmux.Session:
-        """Return the managed session, creating it if necessary."""
+        """Return the managed session, always creating a fresh one.
+
+        Any pre-existing session with the same name is killed first so that
+        the orchestrator never silently attaches to a leftover session.
+        """
         if self._session is not None:
             return self._session
         existing = self._server.find_where({"session_name": self.session_name})
         if existing:
-            self._session = existing
-        else:
-            self._session = self._server.new_session(session_name=self.session_name)
+            existing.kill_session()
+        self._session = self._server.new_session(session_name=self.session_name)
         return self._session
+
+    def kill_session(self) -> None:
+        """Kill the managed tmux session (call during orchestrator shutdown)."""
+        if self._session is not None:
+            try:
+                self._session.kill_session()
+            except Exception:  # noqa: BLE001
+                pass
+            self._session = None
 
     def new_pane(self, window_index: int = 0) -> libtmux.Pane:
         """Spawn a new pane in the managed session's first window."""

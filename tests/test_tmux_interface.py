@@ -42,17 +42,21 @@ def test_ensure_session_creates_new(mock_server_cls):
 
 
 @patch("tmux_orchestrator.tmux_interface.libtmux.Server")
-def test_ensure_session_attaches_existing(mock_server_cls):
+def test_ensure_session_kills_existing_and_creates_fresh(mock_server_cls):
+    """When a session with the same name already exists it is killed first."""
     mock_server = MagicMock()
     existing = MagicMock()
+    fresh = MagicMock()
     mock_server.find_where.return_value = existing
+    mock_server.new_session.return_value = fresh
     mock_server_cls.return_value = mock_server
 
     iface = TmuxInterface(session_name="existing")
     session = iface.ensure_session()
 
-    mock_server.new_session.assert_not_called()
-    assert session is existing
+    existing.kill_session.assert_called_once()
+    mock_server.new_session.assert_called_once_with(session_name="existing")
+    assert session is fresh
 
 
 @patch("tmux_orchestrator.tmux_interface.libtmux.Server")

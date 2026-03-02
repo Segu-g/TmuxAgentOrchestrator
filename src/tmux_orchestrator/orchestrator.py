@@ -12,7 +12,7 @@ from tmux_orchestrator.bus import BROADCAST, Bus, Message, MessageType
 from tmux_orchestrator.messaging import Mailbox
 
 if TYPE_CHECKING:
-    from tmux_orchestrator.config import OrchestratorConfig
+    from tmux_orchestrator.config import AgentConfig, OrchestratorConfig
     from tmux_orchestrator.tmux_interface import TmuxInterface
     from tmux_orchestrator.worktree import WorktreeManager
 
@@ -227,31 +227,37 @@ class Orchestrator:
         action = msg.payload.get("action")
         if action == "spawn_subagent":
             parent_id = msg.from_id
-            agent_type = msg.payload.get("agent_type", "custom")
-            command = msg.payload.get("command", "")
-            isolate = msg.payload.get("isolate", True)
+            template_id = msg.payload.get("template_id", "")
             share_parent = msg.payload.get("share_parent_worktree", False)
-            await self._spawn_subagent(
-                parent_id, agent_type, command,
-                isolate=isolate, share_parent=share_parent,
+            # Resolve the pre-configured agent definition.
+            template_cfg = next(
+                (a for a in self.config.agents if a.id == template_id), None
             )
+            if template_cfg is None:
+                logger.error(
+                    "spawn_subagent: template_id %r not found in config", template_id
+                )
+                return
+            await self._spawn_subagent(parent_id, template_cfg, share_parent=share_parent)
         else:
             logger.warning("Orchestrator received unknown CONTROL action: %s", action)
 
     async def _spawn_subagent(
         self,
         parent_id: str,
-        agent_type: str,
-        command: str,
+        template_cfg: "AgentConfig",
         *,
-        isolate: bool = True,
         share_parent: bool = False,
     ) -> "Agent | None":
-        """Create, register, and start a sub-agent; grant P2P with parent."""
+        """Create, register, and start a sub-agent from a pre-configured template.
+
+        The sub-agent is a new instance of *template_cfg* with a unique ID.
+        P2P messaging between the parent and the new sub-agent is automatically
+        granted.
+        """
         from pathlib import Path as _Path  # noqa: PLC0415
 
         from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent
-        from tmux_orchestrator.agents.custom import CustomAgent
 
         sub_id = f"{parent_id}-sub-{uuid.uuid4().hex[:6]}"
         mailbox = Mailbox(self.config.mailbox_dir, self.config.session_name)
@@ -266,34 +272,18 @@ class Orchestrator:
         # When cwd_override is provided, no worktree management is needed.
         effective_wm = self._worktree_manager if cwd_override is None else None
 
-        if agent_type == "custom":
-            agent: Agent = CustomAgent(
-                agent_id=sub_id,
-                bus=self.bus,
-                tmux=self.tmux,
-                command=command,
-                mailbox=mailbox,
-                worktree_manager=effective_wm,
-                isolate=isolate,
-                cwd_override=cwd_override,
-                task_timeout=self.config.task_timeout,
-            )
-        elif agent_type == "claude_code":
-            agent = ClaudeCodeAgent(
-                agent_id=sub_id,
-                bus=self.bus,
-                tmux=self.tmux,
-                mailbox=mailbox,
-                worktree_manager=effective_wm,
-                isolate=isolate,
-                cwd_override=cwd_override,
-                session_name=self.config.session_name,
-                web_base_url=self.config.web_base_url,
-                task_timeout=self.config.task_timeout,
-            )
-        else:
-            logger.error("Unknown agent type for sub-agent: %s", agent_type)
-            return None
+        agent: Agent = ClaudeCodeAgent(
+            agent_id=sub_id,
+            bus=self.bus,
+            tmux=self.tmux,
+            mailbox=mailbox,
+            worktree_manager=effective_wm,
+            isolate=template_cfg.isolate,
+            cwd_override=cwd_override,
+            session_name=self.config.session_name,
+            web_base_url=self.config.web_base_url,
+            task_timeout=self.config.task_timeout,
+        )
 
         self.register_agent(agent)
         self._p2p.add(frozenset({parent_id, sub_id}))

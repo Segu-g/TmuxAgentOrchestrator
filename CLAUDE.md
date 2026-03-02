@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**TmuxAgentOrchestrator** — orchestrates AI agents (Claude Code instances and custom scripts) inside tmux panes. An orchestrator process manages a pool of worker agents, dispatches tasks from a priority queue, and optionally permits peer-to-peer messaging between workers. The primary interface is a Textual TUI with a FastAPI/WebSocket web UI layer on top.
+**TmuxAgentOrchestrator** — orchestrates Claude Code agents inside tmux panes. An orchestrator process manages a pool of worker agents, dispatches tasks from a priority queue, and optionally permits peer-to-peer messaging between workers. The primary interface is a Textual TUI with a FastAPI/WebSocket web UI layer on top.
 
 ## Directory Layout
 
@@ -22,8 +22,7 @@ TmuxAgentOrchestrator/
 │       ├── orchestrator.py         # Task queue, agent registry, dispatch, P2P gating
 │       ├── agents/
 │       │   ├── base.py             # Abstract Agent (lifecycle, status, run loop)
-│       │   ├── claude_code.py      # Drives `claude` CLI in a tmux pane
-│       │   └── custom.py           # Arbitrary script via newline-delimited JSON stdio
+│       │   └── claude_code.py      # Drives `claude` CLI in a tmux pane
 │       ├── tui/
 │       │   ├── app.py              # Textual App root (keybindings: n/k/p/q)
 │       │   └── widgets.py          # AgentPanel, TaskQueuePanel, LogPanel, StatusBar
@@ -31,12 +30,12 @@ TmuxAgentOrchestrator/
 │           ├── app.py              # FastAPI app (REST + embedded browser UI)
 │           └── ws.py               # WebSocket hub (fans out bus events to browsers)
 ├── examples/
-│   ├── basic_config.yaml           # Two-worker example config
-│   └── echo_agent.py               # Minimal custom agent for testing
+│   └── basic_config.yaml           # Two-worker example config
 └── tests/
     ├── test_bus.py
     ├── test_orchestrator.py
-    └── test_tmux_interface.py
+    ├── test_tmux_interface.py
+    └── test_worktree.py
 ```
 
 ## Installation
@@ -72,14 +71,15 @@ pytest
 - **Bus** (`bus.py`): async pub/sub; `to_id="*"` = broadcast; `broadcast=True` subscriber receives all messages regardless of `to_id`. Used by web hub and TUI.
 - **Orchestrator** (`orchestrator.py`): `asyncio.PriorityQueue` for tasks; polls for idle agents every 0.2 s; P2P permission table is a `Set[frozenset[str]]`.
 - **ClaudeCodeAgent**: sends task via `send_keys`; polls pane output every 500 ms; declares completion when output settles for 3 consecutive cycles and matches a prompt pattern.
-- **CustomAgent**: newline-delimited JSON over subprocess stdin/stdout. Input: `{"task_id": "…", "prompt": "…"}`. Output: `{"task_id": "…", "result": "…"}`.
 - **Web UI**: single-page HTML served from `GET /`; auto-reconnecting WebSocket at `ws://host/ws`; polls REST endpoints every 3 s for agent/task table refresh.
 
 ## Key Decisions
 
 - `libtmux` is the sole tmux binding; pane watcher runs in a daemon thread, uses `asyncio.run_coroutine_threadsafe` to publish to the async bus.
+- `TmuxInterface.ensure_session()` always creates a **fresh** tmux session, killing any pre-existing session with the same name. `kill_session()` is called on orchestrator shutdown to clean up.
 - Textual TUI and FastAPI web server are two separate CLI commands (`tui` vs `web`) that share the same core components.
 - P2P routing is bidirectional per permission entry — stored as `frozenset` pairs.
+- Sub-agent spawning via CONTROL message requires a `template_id` matching an agent defined in the YAML config — arbitrary commands cannot be injected at runtime.
 
 ---
 
@@ -143,7 +143,7 @@ The orchestrator enforces P2P permissions. Your message is silently dropped if t
 | `/check-inbox` | `/check-inbox` | List unread messages (ID, from, type, payload preview) |
 | `/read-message` | `/read-message <msg_id>` | Read a message in full, mark it as read |
 | `/send-message` | `/send-message <agent_id> <text>` | Send a PEER_MSG to another agent |
-| `/spawn-subagent` | `/spawn-subagent <type> [cmd]` | Spawn a sub-agent; P2P auto-granted |
+| `/spawn-subagent` | `/spawn-subagent <template_id>` | Spawn a pre-configured sub-agent; P2P auto-granted |
 | `/list-agents` | `/list-agents` | Show all agents and their IDLE/BUSY/ERROR status |
 
 All commands require `__orchestrator_context__.json` in your cwd.
@@ -151,10 +151,13 @@ Commands that use REST (`/send-message`, `/spawn-subagent`, `/list-agents`) requ
 
 ### Spawning Sub-Agents
 
-Use `/spawn-subagent <type> [command]` to create a helper agent:
+Use `/spawn-subagent <template_id>` to create a helper agent, where `template_id` is the `id` of an agent already defined in the YAML config:
 
-- `claude_code` — new Claude instance in a dedicated tmux pane (isolated worktree)
-- `custom python3 scripts/worker.py` — subprocess speaking newline-delimited JSON
+```
+/spawn-subagent worker-2
+```
+
+The orchestrator instantiates a new `ClaudeCodeAgent` based on that config entry (inheriting its `isolate` setting), assigns it a unique ID like `worker-1-sub-a3f2c1`, and auto-grants P2P between you and the sub-agent.
 
 After spawning, the orchestrator sends you a STATUS message:
 ```json

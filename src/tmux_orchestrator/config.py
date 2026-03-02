@@ -11,8 +11,7 @@ from typing import Literal
 @dataclass
 class AgentConfig:
     id: str
-    type: Literal["claude_code", "custom"]
-    command: str | None = None  # required for type=custom
+    type: Literal["claude_code"]
     isolate: bool = True  # False → share main repo working tree
 
 
@@ -35,7 +34,6 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         AgentConfig(
             id=a["id"],
             type=a["type"],
-            command=a.get("command"),
             isolate=a.get("isolate", True),
         )
         for a in data.get("agents", [])

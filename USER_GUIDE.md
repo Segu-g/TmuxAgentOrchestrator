@@ -23,10 +23,7 @@
 
 ## 1. Overview
 
-TmuxAgentOrchestrator runs a pool of AI agents inside tmux panes and dispatches work to them from a priority queue. Each agent is either:
-
-- A **Claude Code agent** — a `claude --no-pager` process in a dedicated tmux pane, driven by keyboard input and pane-output polling.
-- A **Custom agent** — an arbitrary script communicating over newline-delimited JSON on stdin/stdout.
+TmuxAgentOrchestrator runs a pool of Claude Code agents inside tmux panes and dispatches work to them from a priority queue. Each agent is a `claude --no-pager` process in a dedicated tmux pane, driven by keyboard input and pane-output polling.
 
 A central **orchestrator** process manages the queue, routes peer-to-peer (P2P) messages between permitted agent pairs, and optionally isolates each agent in its own git worktree.
 
@@ -78,15 +75,7 @@ tmux-orchestrator --help
 
 ## 4. Quick Start
 
-### Step 1 — Start a tmux session
-
-The orchestrator requires a running tmux server. Start one if you don't have one:
-
-```bash
-tmux new-session -s mywork -d
-```
-
-### Step 2 — Write a config file
+### Step 1 — Write a config file
 
 ```yaml
 # myproject.yaml
@@ -95,17 +84,16 @@ mailbox_dir: ~/.tmux_orchestrator
 
 agents:
   - id: worker-1
-    type: claude_code   # drives `claude --no-pager`
+    type: claude_code
 
   - id: worker-2
-    type: custom
-    command: "python3 examples/echo_agent.py"
+    type: claude_code
 
 p2p_permissions:
   - [worker-1, worker-2]   # allow these two to message each other
 ```
 
-### Step 3 — Launch
+### Step 2 — Launch
 
 ```bash
 # TUI (recommended for interactive use)
@@ -126,7 +114,7 @@ tmux-orchestrator run --config myproject.yaml --prompt "Summarise the CLAUDE.md 
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `session_name` | string | `"orchestrator"` | tmux session name to attach to or create |
+| `session_name` | string | `"orchestrator"` | tmux session name; any pre-existing session with this name is replaced on start |
 | `mailbox_dir` | string | `"~/.tmux_orchestrator"` | Root directory for file-based message storage |
 | `web_base_url` | string | `"http://localhost:8000"` | REST API base URL injected into agent context files |
 | `task_timeout` | integer | `120` | Seconds before a running task is forcibly cancelled (0 = no limit) |
@@ -138,8 +126,7 @@ tmux-orchestrator run --config myproject.yaml --prompt "Summarise the CLAUDE.md 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `id` | string | required | Unique agent identifier |
-| `type` | `claude_code` \| `custom` | required | Agent implementation to use |
-| `command` | string | `null` | Shell command for `custom` agents (required); ignored for `claude_code` |
+| `type` | `claude_code` | required | Agent implementation to use (currently only `claude_code`) |
 | `isolate` | boolean | `true` | Whether to create a dedicated git worktree for this agent |
 
 ### Complete example
@@ -159,14 +146,13 @@ agents:
     type: claude_code
     isolate: true
 
-  - id: tester
-    type: custom
-    command: "python3 scripts/test_runner_agent.py"
+  - id: reviewer
+    type: claude_code
     isolate: false         # shares the main repo working tree
 
 p2p_permissions:
   - [planner, coder]
-  - [coder, tester]
+  - [coder, reviewer]
 ```
 
 ---
@@ -229,44 +215,14 @@ Drives the `claude --no-pager` CLI in a dedicated tmux pane.
 **Lifecycle:**
 
 ```
-start()  →  create pane  →  write context file  →  cd {worktree} && claude --no-pager
+start()  →  new tmux pane  →  write context file  →  cd {worktree} && claude --no-pager
 stop()   →  send "q"  →  unwatch pane  →  remove worktree
+shutdown →  kill tmux session
 ```
 
-**Inbox notifications:** When a message arrives for a `claude_code` agent, the orchestrator types `__MSG__:{msg_id}` into the pane. The agent can then use `/check-inbox` to read it.
+**Context file:** On startup the orchestrator writes `__orchestrator_context__.json` to the agent's working directory. The agent can read this file to discover its `agent_id`, mailbox path, and REST API URL.
 
-### `custom`
-
-Runs an arbitrary script as a subprocess communicating over newline-delimited JSON.
-
-**Protocol:**
-
-```
-stdin  ← {"task_id": "<uuid>", "prompt": "<task text>"}
-stdout → {"task_id": "<uuid>", "result": "<result text>"}
-```
-
-Each line is one complete JSON object. The script must flush stdout after each response.
-
-**Example — `examples/echo_agent.py`:**
-
-```python
-import json, sys
-
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    task = json.loads(line)
-    print(json.dumps({
-        "task_id": task["task_id"],
-        "result": f"Echo: {task['prompt']}"
-    }), flush=True)
-```
-
-**Working directory:** If `isolate: true`, the subprocess `cwd` is set to the agent's git worktree. If `isolate: false`, `cwd` is the main repo root.
-
-**Context file:** On startup the agent writes `__orchestrator_context__.json` to its working directory — the same format as `claude_code` agents — so any subprocess that needs to call back into the REST API or mailbox can discover the orchestrator's coordinates automatically.
+**Inbox notifications:** When a message arrives for the agent, the orchestrator types `__MSG__:{msg_id}` into the pane. The agent can then use `/check-inbox` to read it.
 
 ---
 
@@ -298,10 +254,6 @@ The `task_timeout` config value (default `120` seconds) is enforced per-task for
 task_timeout: 60     # 60 seconds
 task_timeout: 0      # no timeout (run forever)
 ```
-
-### Limitation — CustomAgent
-
-For `custom` agents, `_dispatch_task` only writes the JSON line to stdin and returns immediately — actual processing happens asynchronously in `_read_loop`. A timeout therefore cancels the *delivery*, not the subprocess computation. If your script can run arbitrarily long, implement a timeout inside the script itself.
 
 ---
 
@@ -461,6 +413,8 @@ Messages are JSON files stored in the mailbox:
 
 An agent can request the orchestrator to spawn a new worker under its supervision. The orchestrator automatically grants P2P permission between parent and child.
 
+Sub-agents are always based on a **pre-configured agent** defined in the YAML config. You provide the `template_id` (the config `id` of the agent to clone), and the orchestrator creates a new instance with a unique ID. This ensures only agents explicitly approved in the config can be spawned at runtime.
+
 ### Via REST API
 
 ```bash
@@ -468,8 +422,7 @@ curl -s -X POST http://localhost:8000/agents \
   -H "Content-Type: application/json" \
   -d '{
     "parent_id": "worker-1",
-    "agent_type": "custom",
-    "command": "python3 scripts/helper.py"
+    "template_id": "worker-2"
   }'
 ```
 
@@ -499,22 +452,20 @@ await bus.publish(Message(
     to_id="__orchestrator__",
     payload={
         "action": "spawn_subagent",
-        "agent_type": "custom",
-        "command": "python3 scripts/helper.py",
-        "isolate": True,              # give it its own worktree (default)
-        "share_parent_worktree": False,  # or True to reuse parent's cwd
+        "template_id": "worker-2",          # must match an agent id in config
+        "share_parent_worktree": False,      # True to reuse parent's cwd
     }
 ))
 ```
 
 ### Sub-agent ID format
 
-Sub-agent IDs are auto-generated: `{parent_id}-sub-{6 hex chars}`, e.g., `worker-1-sub-a3f2c1`.
+Sub-agent IDs are auto-generated: `{parent_id}-sub-{6 hex chars}`, e.g., `worker-1-sub-a3f2c1`. The sub-agent inherits the `isolate` setting of the template config entry.
 
 ### From a Claude Code agent
 
 ```
-/spawn-subagent custom python3 scripts/helper.py
+/spawn-subagent worker-2
 ```
 
 Then watch for the STATUS message in your inbox, read the `sub_agent_id`, and delegate tasks:
@@ -552,12 +503,11 @@ repo/
 ```yaml
 agents:
   - id: read-only-agent
-    type: custom
-    command: "python3 scripts/reader.py"
+    type: claude_code
     isolate: false   # runs directly in the main working tree
 ```
 
-Use this for agents that only read files or for simple scripts that don't need isolation.
+Use this for agents that only read files or don't need an isolated branch.
 
 ### Non-git directories
 
@@ -580,8 +530,7 @@ When spawning a sub-agent, pass `share_parent_worktree: true` to have the sub-ag
 ```python
 payload={
     "action": "spawn_subagent",
-    "agent_type": "custom",
-    "command": "python3 scripts/validator.py",
+    "template_id": "worker-2",
     "share_parent_worktree": True,
 }
 ```
@@ -634,7 +583,7 @@ Note: REST messages are sent with `from_id = "__user__"` and always bypass P2P p
 ```bash
 curl -X POST http://localhost:8000/agents \
   -H "Content-Type: application/json" \
-  -d '{"parent_id": "worker-1", "agent_type": "custom", "command": "python3 scripts/worker.py"}'
+  -d '{"parent_id": "worker-1", "template_id": "worker-2"}'
 ```
 
 ### WebSocket
@@ -663,7 +612,7 @@ When a Claude Code agent starts, the orchestrator writes `__orchestrator_context
 | `/check-inbox` | `/check-inbox` | List unread messages (ID, from, type, payload preview) |
 | `/read-message` | `/read-message <msg_id>` | Read full message content, mark as read |
 | `/send-message` | `/send-message <agent_id> <text>` | Send a PEER_MSG to another agent |
-| `/spawn-subagent` | `/spawn-subagent <type> [cmd]` | Spawn a sub-agent with auto P2P |
+| `/spawn-subagent` | `/spawn-subagent <template_id>` | Spawn a pre-configured sub-agent with auto P2P |
 | `/list-agents` | `/list-agents` | Show all agents with status |
 
 Commands that call the REST API (`/send-message`, `/spawn-subagent`, `/list-agents`) require the orchestrator to be running in `web` mode. Commands that use the mailbox files directly (`/check-inbox`, `/read-message`) work in all modes.
@@ -674,8 +623,8 @@ Commands that call the REST API (`/send-message`, `/spawn-subagent`, `/list-agen
 
 ### Agent doesn't start
 
-- Verify tmux is running: `tmux list-sessions`
-- Check the session name in your config matches an existing session, or let the orchestrator create it.
+- The orchestrator creates its own fresh tmux session on startup — no pre-existing session is required.
+- If a session with the same `session_name` already exists it will be killed and replaced.
 - Run with `--verbose` for debug logs.
 
 ### Task never completes (ClaudeCodeAgent stuck)

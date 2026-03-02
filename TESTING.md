@@ -5,25 +5,23 @@
 1. [Overview](#1-overview)
 2. [Running the Tests](#2-running-the-tests)
 3. [Test Architecture](#3-test-architecture)
-4. [test_agents.py — Agent Behaviour (1 test)](#4-test_agentspy--agent-behaviour-1-test)
-5. [test_bus.py — Message Bus (6 tests)](#5-test_buspy--message-bus-6-tests)
-6. [test_messaging.py — Mailbox (10 tests)](#6-test_messagingpy--mailbox-10-tests)
-7. [test_orchestrator.py — Task Dispatch, P2P & Timeouts (11 tests)](#7-test_orchestratorpy--task-dispatch-p2p--timeouts-11-tests)
-8. [test_tmux_interface.py — tmux Wrapper (7 tests)](#8-test_tmux_interfacepy--tmux-wrapper-7-tests)
-9. [test_worktree.py — Git Worktree Manager (9 tests)](#9-test_worktreepy--git-worktree-manager-9-tests)
-10. [Test Infrastructure](#10-test-infrastructure)
-11. [Coverage & Gaps](#11-coverage--gaps)
-12. [Adding New Tests](#12-adding-new-tests)
+4. [test_bus.py — Message Bus (6 tests)](#4-test_buspy--message-bus-6-tests)
+5. [test_messaging.py — Mailbox (10 tests)](#5-test_messagingpy--mailbox-10-tests)
+6. [test_orchestrator.py — Task Dispatch, P2P & Timeouts (11 tests)](#6-test_orchestratorpy--task-dispatch-p2p--timeouts-11-tests)
+7. [test_tmux_interface.py — tmux Wrapper (7 tests)](#7-test_tmux_interfacepy--tmux-wrapper-7-tests)
+8. [test_worktree.py — Git Worktree Manager (9 tests)](#8-test_worktreepy--git-worktree-manager-9-tests)
+9. [Test Infrastructure](#9-test-infrastructure)
+10. [Coverage & Gaps](#10-coverage--gaps)
+11. [Adding New Tests](#11-adding-new-tests)
 
 ---
 
 ## 1. Overview
 
-The suite has **43 tests** across 6 files. Every public behaviour of the core library modules is covered. Integration with real external processes (tmux server, `claude` CLI) is avoided entirely — those are replaced with mocks or temporary real git repositories.
+The suite has **42 tests** across 5 files. Every public behaviour of the core library modules is covered. Integration with real external processes (tmux server, `claude` CLI) is avoided entirely — those are replaced with mocks or temporary real git repositories.
 
 ```
 tests/
-├── test_agents.py          1 test   — agent-level behaviour (context file)
 ├── test_bus.py             6 tests  — async pub/sub message bus
 ├── test_messaging.py      10 tests  — file-based mailbox (4 classes)
 ├── test_orchestrator.py   11 tests  — task queue, dispatch, P2P routing, timeouts, events
@@ -34,7 +32,7 @@ tests/
 **Run result:**
 
 ```
-43 passed in ~3.4 s
+42 passed in ~3.4 s
 ```
 
 ---
@@ -89,7 +87,7 @@ This removes the need for `@pytest.mark.asyncio` decorators.
 
 **`DummyAgent`** (in `test_orchestrator.py`):
 
-A minimal `Agent` subclass used instead of `ClaudeCodeAgent` or `CustomAgent`. It:
+A minimal `Agent` subclass used instead of `ClaudeCodeAgent`. It:
 - Sets status to `IDLE` on `start()` and launches `_run_loop`.
 - Appends each received task to `self.dispatched` in `_dispatch_task`, then calls `_set_idle()`.
 - Implements no-op `stop()`, `handle_output()`, `notify_stdin()`.
@@ -98,26 +96,7 @@ This lets orchestrator tests verify dispatch logic without requiring a live tmux
 
 ---
 
-## 4. `test_agents.py` — Agent Behaviour (1 test)
-
-Tests agent-level behaviour that does not require a live tmux session.
-
-### `test_custom_agent_writes_context_file`
-
-**What it tests:** `CustomAgent` writes `__orchestrator_context__.json` to its working directory during `start()` when `cwd_override` is provided.
-
-**Setup:** A `CustomAgent` is started with `cwd_override=tmp_path` and `command="cat"` (a no-op subprocess that reads stdin and produces no output). After `start()`, the context file is read and parsed.
-
-**Assertions:**
-- `__orchestrator_context__.json` exists in `tmp_path`.
-- `ctx["agent_id"] == "ctx-test"`.
-- `ctx["worktree_path"] == str(tmp_path)`.
-
-**Why this matters:** Custom agents that need to call back into the REST API or mailbox (e.g. to read messages or spawn sub-agents) rely on this file to discover the orchestrator's coordinates. This test ensures the file is consistently written regardless of agent type, and that the `cwd_override` path is recorded correctly.
-
----
-
-## 5. `test_bus.py` — Message Bus (6 tests)
+## 4. `test_bus.py` — Message Bus (6 tests)
 
 Tests `Bus`, `Message`, and `MessageType` from `tmux_orchestrator.bus`.
 
@@ -208,7 +187,7 @@ A fresh `Bus` instance per test; no shared state.
 
 ---
 
-## 6. `test_messaging.py` — Mailbox (10 tests)
+## 5. `test_messaging.py` — Mailbox (10 tests)
 
 Tests the `Mailbox` class from `tmux_orchestrator.messaging`.
 
@@ -299,7 +278,7 @@ Calls `mark_read("agent-b", "nonexistent-id")` on an empty mailbox. Asserts no e
 
 ---
 
-## 7. `test_orchestrator.py` — Task Dispatch, P2P & Timeouts (11 tests)
+## 6. `test_orchestrator.py` — Task Dispatch, P2P & Timeouts (11 tests)
 
 Tests `Orchestrator` from `tmux_orchestrator.orchestrator` using `DummyAgent` and `SlowDummyAgent`.
 
@@ -434,7 +413,7 @@ Tests `Orchestrator` from `tmux_orchestrator.orchestrator` using `DummyAgent` an
 
 ---
 
-## 8. `test_tmux_interface.py` — tmux Wrapper (7 tests)
+## 7. `test_tmux_interface.py` — tmux Wrapper (7 tests)
 
 Tests `TmuxInterface` and the `_hash` helper from `tmux_orchestrator.tmux_interface`. All tests that touch the tmux server mock `libtmux.Server`.
 
@@ -460,13 +439,13 @@ Computes the expected MD5 hex digest of `"test content"` using the stdlib and as
 
 ---
 
-### `test_ensure_session_attaches_existing`
+### `test_ensure_session_kills_existing_and_creates_fresh`
 
 **Scenario:** A session with the given name already exists.
 
 **Mock setup:** `mock_server.find_where.return_value = existing_mock`.
 
-**Assertions:** `new_session` is *not* called; the existing session is returned.
+**Assertions:** `existing.kill_session()` is called once; `new_session` is then called to create a fresh session; the new session is returned.
 
 ---
 
@@ -502,7 +481,7 @@ Verifies the newline-join logic that converts libtmux's list-of-lines format int
 
 ---
 
-## 9. `test_worktree.py` — Git Worktree Manager (9 tests)
+## 8. `test_worktree.py` — Git Worktree Manager (9 tests)
 
 Tests `WorktreeManager` from `tmux_orchestrator.worktree`. All tests use a **real git repository** created in pytest's `tmp_path`.
 
@@ -619,7 +598,7 @@ Calls `wm.setup("agent-5")` twice.
 
 ---
 
-## 10. Test Infrastructure
+## 9. Test Infrastructure
 
 ### `pyproject.toml` configuration
 
@@ -650,7 +629,7 @@ Several orchestrator tests use `await asyncio.sleep(N)` to wait for the backgrou
 
 ---
 
-## 11. Coverage & Gaps
+## 10. Coverage & Gaps
 
 ### What is covered
 
@@ -659,17 +638,15 @@ Several orchestrator tests use `await asyncio.sleep(N)` to wait for the backgrou
 | `bus.py` | All public methods; queue-full edge case |
 | `messaging.py` | All CRUD operations; missing-file edge cases |
 | `orchestrator.py` | Dispatch, requeue, P2P allow/block, pause/resume, list, task timeout, status events |
-| `tmux_interface.py` | Session create/attach, watch/unwatch, send_keys, capture, hash |
+| `tmux_interface.py` | Session create/kill-existing/create-fresh, watch/unwatch, send_keys, capture, hash |
 | `worktree.py` | Setup, teardown, isolate=false, gitignore, non-git, duplicate setup |
-| `agents/base.py` | `_write_context_file` (via test_agents), timeout enforcement, status events |
-| `agents/custom.py` | Context file written on start (test_agents) |
+| `agents/base.py` | Timeout enforcement, status events |
 
 ### Known gaps (not tested)
 
 | Area | Reason |
 |---|---|
 | `ClaudeCodeAgent` end-to-end | Requires a live tmux session and `claude` binary |
-| `CustomAgent` subprocess I/O | Requires a live subprocess; integration test territory |
 | `_patch_web_url` (main.py) | Tests would mock ClaudeCodeAgent attributes; not yet added |
 | TUI widgets (`tui/`) | Textual requires a display; tested manually |
 | Web server (`web/`) | FastAPI TestClient could cover this; not yet added |
@@ -678,7 +655,7 @@ Several orchestrator tests use `await asyncio.sleep(N)` to wait for the backgrou
 
 ---
 
-## 12. Adding New Tests
+## 11. Adding New Tests
 
 ### Async test
 

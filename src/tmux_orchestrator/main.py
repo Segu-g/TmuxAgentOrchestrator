@@ -41,7 +41,6 @@ _logger = logging.getLogger(__name__)
 def _build_system(config_path: Path) -> tuple[Orchestrator, Bus, TmuxInterface]:
     """Instantiate all core components from a config file."""
     from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent
-    from tmux_orchestrator.agents.custom import CustomAgent
 
     config = load_config(config_path)
     bus = Bus()
@@ -67,23 +66,6 @@ def _build_system(config_path: Path) -> tuple[Orchestrator, Bus, TmuxInterface]:
                 isolate=agent_cfg.isolate,
                 session_name=config.session_name,
                 web_base_url=config.web_base_url,
-                task_timeout=config.task_timeout,
-            )
-        elif agent_cfg.type == "custom":
-            if not agent_cfg.command:
-                typer.echo(
-                    f"[error] Agent {agent_cfg.id!r} has type=custom but no command",
-                    err=True,
-                )
-                raise typer.Exit(1)
-            agent = CustomAgent(
-                agent_id=agent_cfg.id,
-                bus=bus,
-                tmux=tmux,
-                command=agent_cfg.command,
-                mailbox=mailbox,
-                worktree_manager=wm,
-                isolate=agent_cfg.isolate,
                 task_timeout=config.task_timeout,
             )
         else:
@@ -139,6 +121,7 @@ def tui(
         finally:
             await orchestrator.stop()
             tmux.stop_watcher()
+            tmux.kill_session()
 
     asyncio.run(_main())
 
@@ -169,6 +152,7 @@ def web(
     async def _shutdown() -> None:
         await orchestrator.stop()
         tmux.stop_watcher()
+        tmux.kill_session()
 
     fastapi_app.add_event_handler("startup", _startup)
     fastapi_app.add_event_handler("shutdown", _shutdown)
@@ -218,6 +202,7 @@ def run(
                 pass
         await orchestrator.stop()
         tmux.stop_watcher()
+        tmux.kill_session()
 
     try:
         asyncio.run(_main())
