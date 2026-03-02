@@ -103,6 +103,7 @@ class Orchestrator:
                 "id": a.id,
                 "status": a.status.value,
                 "current_task": a._current_task.id if a._current_task else None,
+                "role": getattr(a, "role", "worker"),
             }
             for a in self._agents.values()
         ]
@@ -169,7 +170,7 @@ class Orchestrator:
 
     def _find_idle_agent(self) -> Agent | None:
         for agent in self._agents.values():
-            if agent.status == AgentStatus.IDLE:
+            if agent.status == AgentStatus.IDLE and getattr(agent, "role", "worker") == "worker":
                 return agent
         return None
 
@@ -188,7 +189,31 @@ class Orchestrator:
                 await self.route_message(msg)
             elif msg.type == MessageType.CONTROL and msg.to_id == "__orchestrator__":
                 asyncio.create_task(self._handle_control(msg))
+            elif msg.type == MessageType.RESULT:
+                await self._notify_directors(msg)
             self._bus_queue.task_done()
+
+    async def _notify_directors(self, result_msg: Message) -> None:
+        """Forward task RESULT summaries to any director agents via PEER_MSG."""
+        directors = [
+            a for a in self._agents.values()
+            if getattr(a, "role", "worker") == "director"
+        ]
+        if not directors:
+            return
+        summary = (
+            f"[Task complete] agent={result_msg.from_id} "
+            f"task_id={result_msg.payload.get('task_id', '?')}"
+        )
+        for director in directors:
+            notify = Message(
+                type=MessageType.PEER_MSG,
+                from_id="__orchestrator__",
+                to_id=director.id,
+                payload={"content": summary, "_forwarded": True},
+            )
+            await self.bus.publish(notify)
+            logger.debug("Notified director %s of result from %s", director.id, result_msg.from_id)
 
     async def route_message(self, msg: Message) -> None:
         """Forward a PEER_MSG if the sender/receiver pair is permitted.

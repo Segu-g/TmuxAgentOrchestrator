@@ -100,8 +100,19 @@ class TmuxInterface:
     # ------------------------------------------------------------------
 
     def send_keys(self, pane: libtmux.Pane, text: str, enter: bool = True) -> None:
-        """Send *text* to *pane*, optionally followed by Enter."""
-        pane.send_keys(text, enter=enter)
+        """Send *text* to *pane*, optionally followed by Enter.
+
+        Multi-line text triggers Claude CLI's paste-preview mode, which
+        absorbs the trailing newline that ``send_keys(enter=True)`` appends.
+        We therefore send Enter as a *separate* keypress after a brief pause.
+        """
+        if "\n" in text:
+            pane.send_keys(text, enter=False)
+            if enter:
+                time.sleep(0.15)  # let paste-preview settle
+                pane.send_keys("", enter=True)
+        else:
+            pane.send_keys(text, enter=enter)
 
     def capture_pane(self, pane: libtmux.Pane) -> str:
         """Return the current visible text of *pane*."""

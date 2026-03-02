@@ -1,0 +1,37 @@
+# Director + Workers configuration
+# ==================================
+# One Director agent that the user converses with to plan the project,
+# plus worker agents that the Director coordinates via the REST API.
+#
+# Usage:
+#   tmux-orchestrator web --config examples/director_config.yaml --port 8000
+#   tmux attach -t orchestrator:director   # ← talk to the Director here
+#
+# The Director will:
+#   1. Discuss goals with you
+#   2. Break work into subtasks
+#   3. Submit tasks to workers via: POST http://localhost:8000/tasks
+#   4. Report back when workers complete
+
+session_name: orchestrator
+web_base_url: http://localhost:8000
+task_timeout: 0
+
+agents:
+  - id: director
+    type: claude_code
+    role: director      # ← conversations with the user, never receives queue tasks
+    isolate: false      # shares the main working tree
+
+  - id: worker-1
+    type: claude_code
+    isolate: false
+
+  - id: worker-2
+    type: claude_code
+    isolate: false
+
+p2p_permissions:
+  - [director, worker-1]
+  - [director, worker-2]
+  - [worker-1, worker-2]

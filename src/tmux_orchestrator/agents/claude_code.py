@@ -52,6 +52,7 @@ class ClaudeCodeAgent(Agent):
         session_name: str = "orchestrator",
         web_base_url: str = "http://localhost:8000",
         task_timeout: float | None = None,
+        role: str = "worker",
     ) -> None:
         super().__init__(agent_id, bus, task_timeout=task_timeout)
         self.mailbox = mailbox
@@ -64,6 +65,7 @@ class ClaudeCodeAgent(Agent):
         self._cwd_override = cwd_override
         self._session_name = session_name
         self._web_base_url = web_base_url
+        self.role = role
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -84,12 +86,38 @@ class ClaudeCodeAgent(Agent):
         self._tmux.start_watcher()
         await self._wait_for_ready()
         self.status = AgentStatus.IDLE
+        if self.role == "director":
+            await loop.run_in_executor(
+                None, self._tmux.send_keys, pane, self._director_startup_prompt()
+            )
         self._run_task = asyncio.create_task(self._run_loop(), name=f"{self.id}-loop")
         await self._start_message_loop()
-        logger.info("ClaudeCodeAgent %s started in pane %s", self.id, pane.id)
+        logger.info("ClaudeCodeAgent %s started in pane %s (role=%s)", self.id, pane.id, self.role)
 
     def _context_extras(self) -> dict[str, Any]:
         return {"session_name": self._session_name, "web_base_url": self._web_base_url}
+
+    def _director_startup_prompt(self) -> str:
+        api = self._web_base_url
+        return (
+            f"You are the Director agent for this TmuxAgentOrchestrator session.\n"
+            f"Your role: have a conversation with the user to understand the project goals, "
+            f"decide on a plan together, then coordinate worker agents to carry it out.\n\n"
+            f"Orchestrator API: {api}\n"
+            f"  Check agents:  curl -s {api}/agents\n"
+            f"  Submit task:   curl -s -X POST {api}/tasks "
+            f"-H 'Content-Type: application/json' "
+            f"-d '{{\"prompt\":\"<task>\",\"priority\":0}}'\n"
+            f"  Check queue:   curl -s {api}/tasks\n\n"
+            f"Your session context is in __orchestrator_context__.json "
+            f"(read it with the Read tool for agent IDs and details).\n"
+            f"Incoming worker results will appear as mailbox notifications (__MSG__:<id>).\n\n"
+            f"Wait for the user. When they describe what they want built:\n"
+            f"1. Ask clarifying questions if needed\n"
+            f"2. Break the work into concrete subtasks\n"
+            f"3. Submit each subtask to a worker via the API above\n"
+            f"4. Monitor progress and report back to the user"
+        )
 
     async def stop(self) -> None:
         self.status = AgentStatus.STOPPED

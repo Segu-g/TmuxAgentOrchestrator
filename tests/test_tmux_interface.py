@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -103,6 +103,21 @@ def test_send_keys_delegates(mock_server_cls):
     iface.send_keys(mock_pane, "echo hello")
 
     mock_pane.send_keys.assert_called_once_with("echo hello", enter=True)
+
+
+@patch("tmux_orchestrator.tmux_interface.time.sleep")
+@patch("tmux_orchestrator.tmux_interface.libtmux.Server")
+def test_send_keys_multiline_sends_enter_separately(mock_server_cls, mock_sleep):
+    """Multi-line text must be followed by a separate Enter to escape paste-preview."""
+    mock_server_cls.return_value = MagicMock()
+    mock_pane = MagicMock()
+    iface = TmuxInterface(session_name="s")
+    iface.send_keys(mock_pane, "line1\nline2")
+
+    calls = mock_pane.send_keys.call_args_list
+    assert calls[0] == call("line1\nline2", enter=False)
+    assert calls[1] == call("", enter=True)
+    mock_sleep.assert_called_once()
 
 
 @patch("tmux_orchestrator.tmux_interface.libtmux.Server")

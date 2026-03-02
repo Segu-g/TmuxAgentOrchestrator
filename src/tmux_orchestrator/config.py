@@ -13,6 +13,7 @@ class AgentConfig:
     id: str
     type: Literal["claude_code"]
     isolate: bool = True  # False → share main repo working tree
+    role: str = "worker"  # "worker" | "director"
 
 
 @dataclass
@@ -35,6 +36,7 @@ def load_config(path: str | Path) -> OrchestratorConfig:
             id=a["id"],
             type=a["type"],
             isolate=a.get("isolate", True),
+            role=a.get("role", "worker"),
         )
         for a in data.get("agents", [])
     ]

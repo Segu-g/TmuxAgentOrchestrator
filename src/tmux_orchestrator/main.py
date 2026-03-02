@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -74,6 +77,7 @@ def _build_system(config_path: Path) -> tuple[Orchestrator, Bus, TmuxInterface]:
                 session_name=config.session_name,
                 web_base_url=config.web_base_url,
                 task_timeout=config.task_timeout or None,
+                role=agent_cfg.role,
             )
         else:
             typer.echo(f"[error] Unknown agent type: {agent_cfg.type!r}", err=True)
@@ -215,6 +219,57 @@ def run(
         asyncio.run(_main())
     except KeyboardInterrupt:
         pass
+
+
+@app.command()
+def chat(
+    url: Annotated[str, typer.Option("--url", "-u", help="Orchestrator web URL")] = "http://localhost:8000",
+    message: Annotated[Optional[str], typer.Option("--message", "-m", help="Single message (non-interactive)")] = None,
+    timeout: Annotated[int, typer.Option("--timeout", "-t", help="Response timeout in seconds")] = 300,
+) -> None:
+    """Chat with the Director agent via the web API."""
+
+    def send(msg: str) -> str:
+        payload = json.dumps({"message": msg}).encode()
+        req = urllib.request.Request(
+            f"{url}/director/chat?wait=true",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read()).get("response", "")
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")
+            raise typer.BadParameter(f"HTTP {e.code}: {body}") from e
+        except urllib.error.URLError as e:
+            raise typer.BadParameter(f"Cannot reach {url}: {e.reason}") from e
+
+    if message:
+        typer.echo(send(message))
+        return
+
+    typer.echo(f"Director Chat at {url}  (Ctrl-C or empty line × 2 to exit)\n")
+    empty_count = 0
+    while True:
+        try:
+            msg = typer.prompt("You")
+        except (KeyboardInterrupt, EOFError):
+            break
+        if not msg.strip():
+            empty_count += 1
+            if empty_count >= 2:
+                break
+            continue
+        empty_count = 0
+        typer.echo("Director: ", nl=False)
+        try:
+            response = send(msg)
+            typer.echo(response)
+        except typer.BadParameter as e:
+            typer.echo(f"[error] {e}", err=True)
+        typer.echo()
 
 
 # ---------------------------------------------------------------------------
