@@ -3,13 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
+import secrets
+import time
 import uuid
 from typing import Any
 
+import webauthn
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
+from webauthn.helpers.structs import (
+    AuthenticationCredential,
+    AuthenticatorAttachment,
+    AuthenticatorSelectionCriteria,
+    PublicKeyCredentialDescriptor,
+    RegistrationCredential,
+    ResidentKeyRequirement,
+    UserVerificationRequirement,
+)
 
 from tmux_orchestrator.agents.base import Task
 from tmux_orchestrator.bus import Message, MessageType
@@ -50,29 +64,71 @@ class DirectorChat(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Factory
+# Module-level auth state
+# ---------------------------------------------------------------------------
+
+_credentials: dict[str, bytes] = {}    # b64url(cred_id) → public_key bytes
+_sign_counts: dict[str, int] = {}      # b64url(cred_id) → sign_count
+_sessions: dict[str, float] = {}       # session_token  → expiry (unix ts)
+_pending_challenge: bytes | None = None
+_SESSION_TTL = 86_400  # 24 h
+
+
+def _new_session() -> str:
+    token = secrets.token_urlsafe(32)
+    _sessions[token] = time.time() + _SESSION_TTL
+    return token
+
+
+def _valid_session(token: str | None) -> bool:
+    if not token:
+        return False
+    expiry = _sessions.get(token)
+    return expiry is not None and expiry > time.time()
+
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _b64url_decode(s: str) -> bytes:
+    padding = 4 - len(s) % 4
+    if padding != 4:
+        s += "=" * padding
+    return base64.urlsafe_b64decode(s)
+
+
+# ---------------------------------------------------------------------------
+# Auth dependencies
 # ---------------------------------------------------------------------------
 
 
-def _make_auth(api_key: str):
-    """Return a FastAPI dependency that validates X-API-Key header or ?key= param.
+def _make_session_auth():
+    async def _check(request: Request) -> None:
+        if not _valid_session(request.cookies.get("session")):
+            raise HTTPException(401, "Authentication required")
+    return _check
 
-    If *api_key* is empty the dependency is a no-op (auth disabled).
-    """
-    if not api_key:
-        async def _no_auth() -> None:
-            pass
-        return _no_auth
 
-    async def _verify(request: Request) -> None:
-        provided = (
-            request.headers.get("X-API-Key", "")
-            or request.query_params.get("key", "")
-        )
-        if provided != api_key:
-            raise HTTPException(status_code=401, detail="Invalid or missing API key")
+def _make_combined_auth(api_key: str):
+    """Session cookie OR X-API-Key/query param; both accepted."""
+    async def _check(request: Request) -> None:
+        if _valid_session(request.cookies.get("session")):
+            return
+        if api_key:
+            provided = (
+                request.headers.get("X-API-Key", "")
+                or request.query_params.get("key", "")
+            )
+            if provided == api_key:
+                return
+        raise HTTPException(401, "Authentication required")
+    return _check
 
-    return _verify
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
 
 
 def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> FastAPI:
@@ -85,7 +141,7 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
     hub:
         A :class:`WebSocketHub` already connected to the bus.
     """
-    auth = _make_auth(api_key)
+    auth = _make_combined_auth(api_key)
 
     app = FastAPI(
         title="TmuxAgentOrchestrator",
@@ -106,6 +162,121 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
     async def _shutdown() -> None:
         await hub.stop()
         logger.info("WebSocket hub stopped")
+
+    # ------------------------------------------------------------------
+    # Auth endpoints (no auth dependency — public)
+    # ------------------------------------------------------------------
+
+    @app.get("/auth/status", include_in_schema=False)
+    async def auth_status(request: Request) -> dict:
+        return {
+            "registered": bool(_credentials),
+            "authenticated": _valid_session(request.cookies.get("session")),
+        }
+
+    @app.post("/auth/register-options", include_in_schema=False)
+    async def auth_register_options(request: Request) -> JSONResponse:
+        global _pending_challenge
+        rp_id = request.url.hostname
+        options = webauthn.generate_registration_options(
+            rp_id=rp_id,
+            rp_name="TmuxAgentOrchestrator",
+            user_id=b"admin",
+            user_name="admin",
+            authenticator_selection=AuthenticatorSelectionCriteria(
+                resident_key=ResidentKeyRequirement.REQUIRED,
+                user_verification=UserVerificationRequirement.REQUIRED,
+                authenticator_attachment=AuthenticatorAttachment.PLATFORM,
+            ),
+        )
+        _pending_challenge = options.challenge
+        return JSONResponse(json.loads(webauthn.options_to_json(options)))
+
+    @app.post("/auth/register", include_in_schema=False)
+    async def auth_register(request: Request) -> JSONResponse:
+        global _pending_challenge
+        if _pending_challenge is None:
+            raise HTTPException(400, "No pending challenge")
+        rp_id = request.url.hostname
+        origin = f"{request.url.scheme}://{request.url.netloc}"
+        try:
+            body = await request.body()
+            credential = RegistrationCredential.parse_raw(body)
+            verification = webauthn.verify_registration_response(
+                credential=credential,
+                expected_challenge=_pending_challenge,
+                expected_rp_id=rp_id,
+                expected_origin=origin,
+            )
+        except Exception as exc:
+            logger.warning("Registration failed: %s", exc)
+            raise HTTPException(400, f"Registration failed: {exc}")
+        cred_key = _b64url_encode(verification.credential_id)
+        _credentials[cred_key] = verification.credential_public_key
+        _sign_counts[cred_key] = verification.sign_count
+        _pending_challenge = None
+        token = _new_session()
+        resp = JSONResponse({"status": "ok"})
+        resp.set_cookie("session", token, httponly=True, samesite="lax", path="/")
+        return resp
+
+    @app.post("/auth/authenticate-options", include_in_schema=False)
+    async def auth_authenticate_options(request: Request) -> JSONResponse:
+        global _pending_challenge
+        rp_id = request.url.hostname
+        allow_credentials = [
+            PublicKeyCredentialDescriptor(id=_b64url_decode(k))
+            for k in _credentials
+        ]
+        options = webauthn.generate_authentication_options(
+            rp_id=rp_id,
+            allow_credentials=allow_credentials,
+            user_verification=UserVerificationRequirement.REQUIRED,
+        )
+        _pending_challenge = options.challenge
+        return JSONResponse(json.loads(webauthn.options_to_json(options)))
+
+    @app.post("/auth/authenticate", include_in_schema=False)
+    async def auth_authenticate(request: Request) -> JSONResponse:
+        global _pending_challenge
+        if _pending_challenge is None:
+            raise HTTPException(400, "No pending challenge")
+        rp_id = request.url.hostname
+        origin = f"{request.url.scheme}://{request.url.netloc}"
+        try:
+            body = await request.body()
+            credential = AuthenticationCredential.parse_raw(body)
+            cred_key = _b64url_encode(credential.raw_id)
+            if cred_key not in _credentials:
+                raise HTTPException(401, "Unknown credential")
+            verification = webauthn.verify_authentication_response(
+                credential=credential,
+                expected_challenge=_pending_challenge,
+                expected_rp_id=rp_id,
+                expected_origin=origin,
+                credential_public_key=_credentials[cred_key],
+                credential_current_sign_count=_sign_counts[cred_key],
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("Authentication failed: %s", exc)
+            raise HTTPException(400, f"Authentication failed: {exc}")
+        _sign_counts[cred_key] = verification.new_sign_count
+        _pending_challenge = None
+        token = _new_session()
+        resp = JSONResponse({"status": "ok"})
+        resp.set_cookie("session", token, httponly=True, samesite="lax", path="/")
+        return resp
+
+    @app.post("/auth/logout", include_in_schema=False)
+    async def auth_logout(request: Request) -> JSONResponse:
+        token = request.cookies.get("session")
+        if token:
+            _sessions.pop(token, None)
+        resp = JSONResponse({"status": "ok"})
+        resp.delete_cookie("session", path="/")
+        return resp
 
     # ------------------------------------------------------------------
     # REST endpoints
@@ -214,29 +385,25 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
             return {"task_id": task_id}
 
     # ------------------------------------------------------------------
-    # WebSocket
+    # WebSocket — session cookie OR API key query param
     # ------------------------------------------------------------------
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket, key: str = "") -> None:
-        if api_key and key != api_key:
+        session_ok = _valid_session(websocket.cookies.get("session"))
+        key_ok = bool(api_key) and key == api_key
+        if not session_ok and not key_ok:
             await websocket.close(code=1008)  # Policy Violation
             return
         await hub.handle(websocket)
 
     # ------------------------------------------------------------------
-    # Browser UI (single-page)
+    # Browser UI — unconditional; JS handles auth gate
     # ------------------------------------------------------------------
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-    async def web_ui(key: str = "") -> HTMLResponse:
-        if api_key and key != api_key:
-            return HTMLResponse(
-                "<h1>401 Unauthorized</h1>"
-                "<p>Open <code>http://host:port/?key=YOUR_API_KEY</code></p>",
-                status_code=401,
-            )
-        return HTMLResponse(_HTML_UI.replace("__API_KEY__", key))
+    async def web_ui() -> HTMLResponse:
+        return HTMLResponse(_HTML_UI)
 
     return app
 
@@ -245,7 +412,7 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
 # Embedded single-page browser UI
 # ---------------------------------------------------------------------------
 
-_HTML_UI = """<!DOCTYPE html>
+_HTML_UI = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
@@ -502,14 +669,50 @@ _HTML_UI = """<!DOCTYPE html>
   .conv-to   { font-weight: 700; flex-shrink: 0; }
   .conv-sep  { color: #6e7681; flex-shrink: 0; }
   .conv-content { color: #c9d1d9; word-break: break-word; flex: 1; min-width: 0; }
+
+  /* ── Auth Overlay ── */
+  #auth-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(13, 17, 23, 0.97);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+  #auth-box {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    padding: 40px 48px;
+    text-align: center;
+    max-width: 360px;
+    width: 100%;
+  }
+  #auth-box h2 { color: #58a6ff; margin-bottom: 12px; font-size: 1.3rem; }
+  #auth-box > p { color: #8b949e; font-size: 0.9rem; margin-bottom: 24px; }
+  #auth-error { color: #f85149; font-size: 0.85rem; margin-top: 12px; min-height: 1.2em; }
+  .auth-btn { display: block; width: 100%; margin-bottom: 12px; padding: 10px 20px; font-size: 0.95rem; }
 </style>
 </head>
 <body>
+
+<!-- Auth overlay (shown when unauthenticated) -->
+<div id="auth-overlay" style="display:none">
+  <div id="auth-box">
+    <h2>TmuxAgentOrchestrator</h2>
+    <p id="auth-msg">Authenticating…</p>
+    <button id="btn-register" class="auth-btn" onclick="registerPasskey()" style="display:none">Register Passkey</button>
+    <button id="btn-authenticate" class="auth-btn" onclick="authenticatePasskey()" style="display:none">Sign in with Passkey</button>
+    <p id="auth-error"></p>
+  </div>
+</div>
 
 <header>
   <div id="status-dot" class="disconnected"></div>
   <h1>TmuxAgentOrchestrator</h1>
   <span id="conn-label" style="font-size:0.8rem;color:#8b949e">Connecting…</span>
+  <button id="btn-signout" onclick="signOut()" style="margin-left:auto;padding:4px 12px;font-size:0.8rem;background:#21262d;border:1px solid #30363d;color:#c9d1d9;display:none">Sign Out</button>
 </header>
 
 <main>
@@ -579,22 +782,139 @@ _HTML_UI = """<!DOCTYPE html>
 
 <script>
 const API_BASE = '';
-const API_KEY = '__API_KEY__';
 
-function authFetch(url, options = {}) {
-  const headers = Object.assign({}, options.headers || {});
-  if (API_KEY) headers['X-API-Key'] = API_KEY;
-  return fetch(url, Object.assign({}, options, {headers}));
+// ── Base64url helpers ──
+function b64urlToBuffer(s) {
+  const b = s.replace(/-/g, '+').replace(/_/g, '/')
+    .padEnd(s.length + (4 - s.length % 4) % 4, '=');
+  return Uint8Array.from(atob(b), c => c.charCodeAt(0)).buffer;
+}
+function bufferToB64url(buf) {
+  return btoa(String.fromCharCode(...new Uint8Array(buf)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+
+// ── Auth ──
+let _pollInterval = null;
+
+async function checkAuth() {
+  const status = await fetch('/auth/status').then(r => r.json());
+  const overlay = document.getElementById('auth-overlay');
+  const btnReg = document.getElementById('btn-register');
+  const btnAuth = document.getElementById('btn-authenticate');
+  const btnSignout = document.getElementById('btn-signout');
+  document.getElementById('auth-error').textContent = '';
+
+  if (status.authenticated) {
+    overlay.style.display = 'none';
+    btnSignout.style.display = 'inline-block';
+    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+      connectWS();
+    }
+    refreshAgents();
+    refreshTasks();
+    if (!_pollInterval) {
+      _pollInterval = setInterval(() => { refreshAgents(); refreshTasks(); }, 3000);
+    }
+  } else {
+    overlay.style.display = 'flex';
+    btnSignout.style.display = 'none';
+    if (_pollInterval) { clearInterval(_pollInterval); _pollInterval = null; }
+    if (!status.registered) {
+      document.getElementById('auth-msg').textContent = 'No passkey registered yet.';
+      btnReg.style.display = 'block';
+      btnAuth.style.display = 'none';
+    } else {
+      document.getElementById('auth-msg').textContent = 'Sign in with your passkey.';
+      btnReg.style.display = 'none';
+      btnAuth.style.display = 'block';
+    }
+  }
+}
+
+async function registerPasskey() {
+  document.getElementById('auth-error').textContent = '';
+  try {
+    const opts = await fetch('/auth/register-options', {method: 'POST'}).then(r => r.json());
+    opts.challenge = b64urlToBuffer(opts.challenge);
+    opts.user.id = b64urlToBuffer(opts.user.id);
+    const cred = await navigator.credentials.create({publicKey: opts});
+    const body = JSON.stringify({
+      id: cred.id,
+      rawId: bufferToB64url(cred.rawId),
+      type: cred.type,
+      response: {
+        clientDataJSON: bufferToB64url(cred.response.clientDataJSON),
+        attestationObject: bufferToB64url(cred.response.attestationObject),
+      },
+    });
+    const resp = await fetch('/auth/register', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body,
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({detail: resp.statusText}));
+      document.getElementById('auth-error').textContent = err.detail || 'Registration failed';
+      return;
+    }
+    await checkAuth();
+  } catch (e) {
+    document.getElementById('auth-error').textContent = e.message || String(e);
+  }
+}
+
+async function authenticatePasskey() {
+  document.getElementById('auth-error').textContent = '';
+  try {
+    const opts = await fetch('/auth/authenticate-options', {method: 'POST'}).then(r => r.json());
+    opts.challenge = b64urlToBuffer(opts.challenge);
+    if (opts.allowCredentials) {
+      opts.allowCredentials = opts.allowCredentials.map(c => ({...c, id: b64urlToBuffer(c.id)}));
+    }
+    const cred = await navigator.credentials.get({publicKey: opts});
+    const body = JSON.stringify({
+      id: cred.id,
+      rawId: bufferToB64url(cred.rawId),
+      type: cred.type,
+      response: {
+        clientDataJSON: bufferToB64url(cred.response.clientDataJSON),
+        authenticatorData: bufferToB64url(cred.response.authenticatorData),
+        signature: bufferToB64url(cred.response.signature),
+        userHandle: cred.response.userHandle ? bufferToB64url(cred.response.userHandle) : null,
+      },
+    });
+    const resp = await fetch('/auth/authenticate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body,
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({detail: resp.statusText}));
+      document.getElementById('auth-error').textContent = err.detail || 'Authentication failed';
+      return;
+    }
+    await checkAuth();
+  } catch (e) {
+    document.getElementById('auth-error').textContent = e.message || String(e);
+  }
+}
+
+async function signOut() {
+  await fetch('/auth/logout', {method: 'POST'});
+  if (ws) { ws.close(); ws = null; }
+  if (_pollInterval) { clearInterval(_pollInterval); _pollInterval = null; }
+  await checkAuth();
 }
 
 // pending chat task_ids waiting for RESULT
 const pendingChats = new Map(); // task_id -> bubble element
 
-// --- WebSocket ---
+// ── WebSocket ──
 let ws;
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const wsUrl = `${proto}://${location.host}/ws` + (API_KEY ? `?key=${encodeURIComponent(API_KEY)}` : '');
+  const wsUrl = `${proto}://${location.host}/ws`;
   ws = new WebSocket(wsUrl);
   ws.onopen = () => {
     document.getElementById('status-dot').classList.remove('disconnected');
@@ -604,7 +924,9 @@ function connectWS() {
   ws.onclose = () => {
     document.getElementById('status-dot').classList.add('disconnected');
     document.getElementById('conn-label').textContent = 'Disconnected — retrying…';
-    setTimeout(connectWS, 3000);
+    if (_pollInterval) {  // only retry while authenticated (polling is active)
+      setTimeout(connectWS, 3000);
+    }
   };
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
@@ -631,13 +953,17 @@ function connectWS() {
   };
 }
 
-// --- Polling ---
+// ── Polling ──
 let directorId = null;
 
 function refreshAgents() {
-  authFetch(`${API_BASE}/agents`)
-    .then(r => r.json())
+  fetch(`${API_BASE}/agents`)
+    .then(r => {
+      if (r.status === 401) { checkAuth(); return null; }
+      return r.json();
+    })
     .then(agents => {
+      if (!agents) return;
       document.getElementById('agent-count').textContent = agents.length;
       const body = document.getElementById('agents-body');
       if (agents.length === 0) {
@@ -673,9 +999,13 @@ function refreshAgents() {
 }
 
 function refreshTasks() {
-  authFetch(`${API_BASE}/tasks`)
-    .then(r => r.json())
+  fetch(`${API_BASE}/tasks`)
+    .then(r => {
+      if (r.status === 401) { checkAuth(); return null; }
+      return r.json();
+    })
     .then(tasks => {
+      if (!tasks) return;
       document.getElementById('task-count').textContent = tasks.length;
       const body = document.getElementById('tasks-body');
       if (tasks.length === 0) {
@@ -690,7 +1020,7 @@ function refreshTasks() {
     }).catch(console.error);
 }
 
-// --- Agent Conversations ---
+// ── Agent Conversations ──
 let convTotal = 0;
 
 function agentColor(id) {
@@ -722,7 +1052,7 @@ function addConversationEntry(msg) {
   list.scrollTop = list.scrollHeight;
 }
 
-// --- Director Chat ---
+// ── Director Chat ──
 function scrollChat() {
   const h = document.getElementById('chat-history');
   h.scrollTop = h.scrollHeight;
@@ -752,7 +1082,7 @@ async function sendChat() {
   const thinkingBubble = addBubble('Thinking…', 'thinking');
 
   try {
-    const resp = await authFetch(`${API_BASE}/director/chat`, {
+    const resp = await fetch(`${API_BASE}/director/chat`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({message})
@@ -782,15 +1112,16 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('task-input').addEventListener('keydown', e => {
     if (e.key === 'Enter') submitTask();
   });
+  checkAuth();
 });
 
-// --- Worker Task submit ---
+// ── Worker Task submit ──
 async function submitTask() {
   const inp = document.getElementById('task-input');
   const pri = document.getElementById('priority-input');
   const prompt = inp.value.trim();
   if (!prompt) { inp.focus(); return; }
-  const resp = await authFetch(`${API_BASE}/tasks`, {
+  const resp = await fetch(`${API_BASE}/tasks`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({prompt, priority: parseInt(pri.value || '0', 10)})
@@ -799,7 +1130,7 @@ async function submitTask() {
   else alert('Failed: ' + resp.statusText);
 }
 
-// --- Log ---
+// ── Log ──
 const MAX_LOG = 200;
 function logEntry(msg) {
   const list = document.getElementById('log-list');
@@ -818,12 +1149,6 @@ function clearLog() { document.getElementById('log-list').innerHTML = ''; }
 function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
-
-// --- Init ---
-connectWS();
-refreshAgents();
-refreshTasks();
-setInterval(() => { refreshAgents(); refreshTasks(); }, 3000);
 </script>
 </body>
 </html>

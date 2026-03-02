@@ -177,8 +177,8 @@ def web(
     fastapi_app.add_event_handler("shutdown", _shutdown)
 
     display_host = "localhost" if host in ("0.0.0.0", "") else host
-    typer.echo(f"Web UI:  http://{display_host}:{port}/?key={api_key}")
-    typer.echo(f"API key: {api_key}")
+    typer.echo(f"Web UI:  http://{display_host}:{port}/")
+    typer.echo(f"API key: {api_key}  (for CLI / agents)")
     uvicorn.run(fastapi_app, host=host, port=port, log_level="warning")
 
 
