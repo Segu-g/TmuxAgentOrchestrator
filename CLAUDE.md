@@ -70,7 +70,7 @@ pytest
 
 - **Bus** (`bus.py`): async pub/sub; `to_id="*"` = broadcast; `broadcast=True` subscriber receives all messages regardless of `to_id`. Used by web hub and TUI.
 - **Orchestrator** (`orchestrator.py`): `asyncio.PriorityQueue` for tasks; polls for idle agents every 0.2 s; P2P permission table is a `Set[frozenset[str]]`.
-- **ClaudeCodeAgent**: sends task via `send_keys`; polls pane output every 500 ms; declares completion when output settles for 3 consecutive cycles and matches a prompt pattern.
+- **ClaudeCodeAgent**: launches `claude --dangerously-skip-permissions` (with `CLAUDECODE` stripped so it works inside a Claude Code session); waits for the initial `❯` prompt (`_wait_for_ready`) before marking IDLE; sends task via `send_keys`; polls pane output every 500 ms; declares completion when output settles for 3 consecutive cycles and matches a prompt pattern (`❯`, `$`, `>`, or `Human:`).
 - **Web UI**: single-page HTML served from `GET /`; auto-reconnecting WebSocket at `ws://host/ws`; polls REST endpoints every 3 s for agent/task table refresh.
 
 ## Key Decisions
@@ -169,8 +169,9 @@ Retrieve it with `/check-inbox` → `/read-message`, then delegate with `/send-m
 
 The orchestrator detects task completion by polling your pane output. It declares you done when the output **has not changed for 3 consecutive 500 ms polls** and the last line matches one of:
 
+- `❯` — Claude interactive prompt (current default)
 - `$` or `$ ` — shell prompt
-- `>` — bare Claude prompt
+- `>` — bare prompt (older Claude versions)
 - `Human:` — Claude conversation prompt
 
 Ensure your final output settles at a recognisable prompt. Do not leave the pane in the middle of streaming output when you are finished.

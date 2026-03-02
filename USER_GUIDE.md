@@ -23,7 +23,7 @@
 
 ## 1. Overview
 
-TmuxAgentOrchestrator runs a pool of Claude Code agents inside tmux panes and dispatches work to them from a priority queue. Each agent is a `claude --no-pager` process in a dedicated tmux pane, driven by keyboard input and pane-output polling.
+TmuxAgentOrchestrator runs a pool of Claude Code agents inside tmux panes and dispatches work to them from a priority queue. Each agent is a `claude --dangerously-skip-permissions` process in a dedicated tmux pane, driven by keyboard input and pane-output polling.
 
 A central **orchestrator** process manages the queue, routes peer-to-peer (P2P) messages between permitted agent pairs, and optionally isolates each agent in its own git worktree.
 
@@ -206,16 +206,19 @@ Starts all agents, submits the prompt as a task, waits for the result, prints it
 
 ### `claude_code`
 
-Drives the `claude --no-pager` CLI in a dedicated tmux pane.
+Drives `claude --dangerously-skip-permissions` in a dedicated tmux pane. The `CLAUDECODE` environment variable is stripped before launch so agents can run inside an existing Claude Code session without conflict.
 
 **How tasks are delivered:** The orchestrator calls `send_keys` to type the task prompt into the pane, just as a human would.
 
-**How completion is detected:** The orchestrator polls the pane output every 500 ms. When the output has not changed for 3 consecutive polls *and* the last visible line matches a prompt pattern (`$`, `>`, or `Human:`), the task is considered complete and the captured text is published as the result.
+**Startup sequence:** After launching `claude`, the agent polls the pane until the initial `❯` prompt appears and settles (3 × 500 ms unchanged). It auto-accepts the workspace trust dialog if it appears. Only then is the agent marked IDLE and eligible to receive tasks.
+
+**How completion is detected:** The orchestrator polls the pane output every 500 ms. When the output has not changed for 3 consecutive polls *and* the last visible line matches a prompt pattern (`❯`, `$`, `>`, or `Human:`), the task is considered complete and the captured text is published as the result.
 
 **Lifecycle:**
 
 ```
-start()  →  new tmux pane  →  write context file  →  cd {worktree} && claude --no-pager
+start()  →  new tmux pane  →  write context file  →  cd {worktree} && claude --dangerously-skip-permissions
+         →  wait for ❯ prompt  →  IDLE
 stop()   →  send "q"  →  unwatch pane  →  remove worktree
 shutdown →  kill tmux session
 ```
@@ -629,10 +632,10 @@ Commands that call the REST API (`/send-message`, `/spawn-subagent`, `/list-agen
 
 ### Task never completes (ClaudeCodeAgent stuck)
 
-The orchestrator waits for pane output to settle and end with `$`, `>`, or `Human:`. If `claude` is still streaming or the prompt is not recognised:
+The orchestrator waits for pane output to settle and end with `❯`, `$`, `>`, or `Human:`. If `claude` is still streaming or the prompt is not recognised:
 
 - Increase `_SETTLE_CYCLES` in `claude_code.py` (default 3 × 500 ms = 1.5 s).
-- Check the `_DONE_PATTERNS` list matches your version of the `claude` CLI.
+- Check `_DONE_PATTERNS` in `claude_code.py` — add a pattern matching your version's prompt character.
 - Attach to the tmux pane to observe the state: `tmux attach -t {session_name}`.
 
 ### P2P message not delivered
@@ -673,6 +676,10 @@ The `/send-message`, `/spawn-subagent`, and `/list-agents` commands call the RES
 1. The orchestrator was started with `tmux-orchestrator web` (not `tui`).
 2. The `web_base_url` in your config matches the actual host:port.
 3. No firewall blocks the port.
+
+### Agent pane shows "Claude Code cannot be launched inside another Claude Code session"
+
+The `CLAUDECODE` environment variable is set when you run the orchestrator from inside a Claude Code session. The default agent command strips it automatically (`env -u CLAUDECODE claude …`), so this should not occur with the default config. If you supply a custom `command` in the config, prepend `env -u CLAUDECODE` to it.
 
 ### Mailbox directory not found
 
