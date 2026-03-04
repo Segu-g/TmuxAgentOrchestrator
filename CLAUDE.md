@@ -73,6 +73,25 @@ pytest
 - **ClaudeCodeAgent**: launches `claude --dangerously-skip-permissions` (with `CLAUDECODE` stripped so it works inside a Claude Code session); waits for the initial `❯` prompt (`_wait_for_ready`) before marking IDLE; sends task via `send_keys`; polls pane output every 500 ms; declares completion when output settles for 3 consecutive cycles and matches a prompt pattern (`❯`, `$`, `>`, or `Human:`).
 - **Web UI**: single-page HTML served from `GET /`; auto-reconnecting WebSocket at `ws://host/ws`; polls REST endpoints every 3 s for agent/task table refresh.
 
+## Development Process (Claude Code autonomous development)
+
+When developing this project autonomously, follow this cycle:
+
+1. **Research before implementing** — Collect references (books, papers, patterns) before each
+   improvement iteration. Record findings in `DESIGN.md` with citations.
+2. **E2E demonstration required** — Unit tests alone are insufficient. After completing a
+   feature set, create a demonstration in `~/Demonstration/<version>/` that exercises the
+   full application stack. Document results in `build-log.md`.
+3. **Demo feedback drives improvement** — Bugs found in demonstrations must be fixed before
+   the next research cycle. Record root cause and fix in `build-log.md`.
+4. **Commit in logical units** — Each version bump is one commit + push + tag.
+5. **GitHub Issues for questions** — Open an issue when a design decision requires user input.
+   Check issues for user replies at the start of each session.
+6. **DESIGN.md is the source of truth** — Record all design decisions, references, and
+   implementation history there. `§10.5` lists next iteration candidates (priority order).
+7. **Iterate continuously** — After each version, update `§10.5` with new candidates from
+   research and demo findings, then begin the next iteration.
+
 ## Key Decisions
 
 - `libtmux` is the sole tmux binding; pane watcher runs in a daemon thread, uses `asyncio.run_coroutine_threadsafe` to publish to the async bus.
