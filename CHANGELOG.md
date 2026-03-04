@@ -6,6 +6,27 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.6.0] — 2026-03-05
+
+### Added / Refactored
+
+**SystemFactory extraction (Layered Architecture)**
+- New `src/tmux_orchestrator/factory.py` — `build_system()` and `patch_web_url()`
+  separated from CLI entry point (`main.py`)
+- `build_system(config_path, *, confirm_kill=None)` is now independently importable
+  and testable without any `typer` dependency — injectable `confirm_kill` callback
+  (default `None`) decouples interactive I/O from wiring logic
+- `patch_web_url(orchestrator, host, port)` fixed to use `orchestrator.registry.all_agents()`
+  instead of the previously broken `orchestrator._agents` reference
+- `main.py` reduced to CLI adapter: thin `_build_system()` wrapper that supplies the
+  `typer.confirm` callback and translates `ValueError` → `typer.Exit(1)`
+- New `tests/test_factory.py` — 6 unit tests covering wiring, agent registration,
+  unknown-type error, callback forwarding, and `patch_web_url` behaviour
+
+### Test count: 123 (up from 117)
+
+---
+
 ## [0.5.0] — 2026-03-05
 
 ### Added / Refactored

@@ -15,12 +15,7 @@ from typing import Annotated, Optional
 import typer
 import uvicorn
 
-from tmux_orchestrator.bus import Bus
-from tmux_orchestrator.config import load_config
-from tmux_orchestrator.messaging import Mailbox
-from tmux_orchestrator.orchestrator import Orchestrator
-from tmux_orchestrator.tmux_interface import TmuxInterface
-from tmux_orchestrator.worktree import WorktreeManager
+from tmux_orchestrator.factory import build_system, patch_web_url
 
 app = typer.Typer(
     name="tmux-orchestrator",
@@ -42,75 +37,19 @@ def _setup_logging(verbose: bool) -> None:
 _logger = logging.getLogger(__name__)
 
 
-def _build_system(config_path: Path) -> tuple[Orchestrator, Bus, TmuxInterface]:
+def _build_system(config_path: Path):  # type: ignore[return]
     """Instantiate all core components from a config file."""
-    from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent
-
-    config = load_config(config_path)
-    bus = Bus()
-
     def _confirm_kill(session_name: str) -> bool:
         return typer.confirm(
             f"tmux session '{session_name}' already exists. Kill it and start fresh?",
             default=False,
         )
 
-    tmux = TmuxInterface(session_name=config.session_name, bus=bus, confirm_kill=_confirm_kill)
-    mailbox = Mailbox(root_dir=config.mailbox_dir, session_name=config.session_name)
-
     try:
-        wm: WorktreeManager | None = WorktreeManager(Path.cwd())
-    except RuntimeError:
-        _logger.warning("Not inside a git repository; worktree isolation disabled")
-        wm = None
-
-    orchestrator = Orchestrator(bus=bus, tmux=tmux, config=config, worktree_manager=wm)
-
-    for agent_cfg in config.agents:
-        if agent_cfg.type == "claude_code":
-            effective_timeout = (
-                agent_cfg.task_timeout if agent_cfg.task_timeout is not None
-                else (config.task_timeout or None)
-            )
-            agent = ClaudeCodeAgent(
-                agent_id=agent_cfg.id,
-                bus=bus,
-                tmux=tmux,
-                mailbox=mailbox,
-                worktree_manager=wm,
-                isolate=agent_cfg.isolate,
-                session_name=config.session_name,
-                web_base_url=config.web_base_url,
-                task_timeout=effective_timeout,
-                role=agent_cfg.role,
-                command=agent_cfg.command or "env -u CLAUDECODE claude --dangerously-skip-permissions",
-                system_prompt=agent_cfg.system_prompt,
-                context_files=agent_cfg.context_files,
-            )
-        else:
-            typer.echo(f"[error] Unknown agent type: {agent_cfg.type!r}", err=True)
-            raise typer.Exit(1)
-
-        orchestrator.register_agent(agent)
-
-    return orchestrator, bus, tmux
-
-
-def _patch_web_url(orchestrator: Orchestrator, host: str, port: int) -> None:
-    """Update the web_base_url on all ClaudeCodeAgents to match the actual listen address.
-
-    When ``--port`` differs from the config default, or ``--host`` is ``0.0.0.0``,
-    the stored URL would be wrong.  This corrects every registered agent in-place
-    so that the ``__orchestrator_context__.json`` re-written on the next task will
-    reflect the real address.
-    """
-    from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent  # noqa: PLC0415
-
-    display_host = "localhost" if host in ("0.0.0.0", "") else host
-    url = f"http://{display_host}:{port}"
-    for agent in orchestrator._agents.values():
-        if isinstance(agent, ClaudeCodeAgent):
-            agent._web_base_url = url
+        return build_system(config_path, confirm_kill=_confirm_kill)
+    except ValueError as exc:
+        typer.echo(f"[error] {exc}", err=True)
+        raise typer.Exit(1) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +107,7 @@ def web(
         api_key = secrets.token_urlsafe(24)
 
     orchestrator, bus, tmux = _build_system(config)
-    _patch_web_url(orchestrator, host, port)
+    patch_web_url(orchestrator, host, port)
     hub = WebSocketHub(bus=bus)
     fastapi_app = create_app(orchestrator=orchestrator, hub=hub, api_key=api_key)
 

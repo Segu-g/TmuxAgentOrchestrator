@@ -1,3 +1,3 @@
 """TmuxAgentOrchestrator — orchestrate AI agents inside tmux panes."""
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
