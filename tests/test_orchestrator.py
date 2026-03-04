@@ -615,13 +615,14 @@ async def test_circuit_breaker_blocks_errored_agent() -> None:
     orch.register_agent(agent)
 
     # Manually trip the circuit breaker
+    cb = orch.registry.get_breaker("cb-worker")
     for _ in range(config.circuit_breaker_threshold):
-        orch._breakers["cb-worker"].record_failure()
+        cb.record_failure()
 
-    assert not orch._breakers["cb-worker"].is_allowed()
-    # _find_idle_agent should skip this agent
+    assert not cb.is_allowed()
+    # find_idle_worker should skip this agent
     agent.status = AgentStatus.IDLE
-    found = orch._find_idle_agent()
+    found = orch.registry.find_idle_worker()
     assert found is None
 
 
@@ -636,7 +637,7 @@ async def test_circuit_breaker_closes_after_success() -> None:
     agent = DummyAgent("cb-w2", bus)
     orch.register_agent(agent)
 
-    cb = orch._breakers["cb-w2"]
+    cb = orch.registry.get_breaker("cb-w2")
     cb.record_failure()  # OPEN (recovery=300s so still blocked)
     assert not cb.is_allowed()  # OPEN, timeout not elapsed
 

@@ -1,4 +1,4 @@
-"""Central orchestrator: task queue, agent registry, dispatch, and P2P routing."""
+"""Central orchestrator: task queue, agent lifecycle, dispatch, and P2P routing."""
 
 from __future__ import annotations
 
@@ -7,11 +7,10 @@ import logging
 import uuid
 from typing import TYPE_CHECKING
 
-from tmux_orchestrator.agents.base import Agent, AgentStatus, Task
-from tmux_orchestrator.bus import BROADCAST, Bus, Message, MessageType
-from tmux_orchestrator.circuit_breaker import CircuitBreaker
-from tmux_orchestrator.config import AgentRole
+from tmux_orchestrator.agents.base import Agent, Task
+from tmux_orchestrator.bus import Bus, Message, MessageType
 from tmux_orchestrator.messaging import Mailbox
+from tmux_orchestrator.registry import AgentRegistry
 
 if TYPE_CHECKING:
     from tmux_orchestrator.config import AgentConfig, OrchestratorConfig
@@ -26,9 +25,9 @@ class Orchestrator:
 
     Responsibilities:
     - Maintain a priority task queue.
-    - Register / deregister agents.
+    - Delegate agent-state management to ``AgentRegistry``.
     - Dispatch tasks to idle agents.
-    - Gate peer-to-peer messages via a configurable permission table.
+    - Gate peer-to-peer messages via the registry's permission table.
     - Forward bus events to any attached observers (TUI, web hub).
     """
 
@@ -43,22 +42,20 @@ class Orchestrator:
         self.tmux = tmux
         self.config = config
         self._worktree_manager = worktree_manager
-        self._agents: dict[str, Agent] = {}
-        # agent_id → parent_id (only set for dynamically spawned sub-agents)
-        self._agent_parents: dict[str, str] = {}
+        # All agent-related state lives in the registry (DDD Aggregate pattern)
+        self.registry = AgentRegistry(
+            p2p_permissions=config.p2p_permissions,
+            circuit_breaker_threshold=config.circuit_breaker_threshold,
+            circuit_breaker_recovery=config.circuit_breaker_recovery,
+        )
         # Priority queue: (priority, task) — lower priority value = dispatched first
         self._task_queue: asyncio.PriorityQueue[tuple[int, Task]] = asyncio.PriorityQueue()
-        self._p2p: set[frozenset[str]] = {
-            frozenset(pair) for pair in config.p2p_permissions
-        }
         self._paused = False
         self._dispatch_task: asyncio.Task | None = None
         self._router_task: asyncio.Task | None = None
         self._bus_queue: asyncio.Queue[Message] | None = None
         # Worker results waiting to be injected into the next Director chat turn
         self._director_pending: list[str] = []
-        # Per-agent circuit breakers (keyed by agent id)
-        self._breakers: dict[str, CircuitBreaker] = {}
         # Dead letter queue: tasks that could not be dispatched after max retries
         self._dlq: list[dict] = []
 
@@ -71,7 +68,7 @@ class Orchestrator:
         self._bus_queue = await self.bus.subscribe(
             "__orchestrator__", broadcast=True
         )
-        for agent in self._agents.values():
+        for agent in self.registry.all_agents().values():
             await agent.start()
         self._dispatch_task = asyncio.create_task(
             self._dispatch_loop(), name="orchestrator-dispatch"
@@ -79,7 +76,7 @@ class Orchestrator:
         self._router_task = asyncio.create_task(
             self._route_loop(), name="orchestrator-router"
         )
-        logger.info("Orchestrator started with %d agents", len(self._agents))
+        logger.info("Orchestrator started with %d agents", len(self.registry.all_agents()))
 
     async def stop(self) -> None:
         """Stop dispatch, routing, and all agents."""
@@ -87,62 +84,34 @@ class Orchestrator:
             self._dispatch_task.cancel()
         if self._router_task:
             self._router_task.cancel()
-        for agent in list(self._agents.values()):
+        for agent in list(self.registry.all_agents().values()):
             await agent.stop()
         if self._bus_queue:
             await self.bus.unsubscribe("__orchestrator__")
         logger.info("Orchestrator stopped")
 
     # ------------------------------------------------------------------
-    # Agent registry
+    # Agent registry (thin delegators to AgentRegistry)
     # ------------------------------------------------------------------
 
     def register_agent(self, agent: Agent, *, parent_id: str | None = None) -> None:
-        self._agents[agent.id] = agent
-        if parent_id is not None:
-            self._agent_parents[agent.id] = parent_id
-        self._breakers[agent.id] = CircuitBreaker(
-            agent.id,
-            failure_threshold=self.config.circuit_breaker_threshold,
-            recovery_timeout=self.config.circuit_breaker_recovery,
-        )
-        logger.debug("Registered agent %s (parent=%s)", agent.id, parent_id)
+        self.registry.register(agent, parent_id=parent_id)
 
     def unregister_agent(self, agent_id: str) -> None:
-        self._agents.pop(agent_id, None)
-        self._breakers.pop(agent_id, None)
+        self.registry.unregister(agent_id)
 
     def get_agent(self, agent_id: str) -> Agent | None:
-        return self._agents.get(agent_id)
+        return self.registry.get(agent_id)
 
     def list_agents(self) -> list[dict]:
-        drop_counts = self.bus.get_drop_counts()
-        return [
-            {
-                "id": a.id,
-                "status": a.status.value,
-                "current_task": a._current_task.id if a._current_task else None,
-                "role": getattr(a, "role", AgentRole.WORKER),
-                "parent_id": self._agent_parents.get(a.id),
-                "bus_drops": drop_counts.get(a.id, 0),
-                "circuit_breaker": self._breakers[a.id].state.value if a.id in self._breakers else None,
-            }
-            for a in self._agents.values()
-        ]
+        return self.registry.list_all(self.bus.get_drop_counts())
 
     def get_director(self) -> "Agent | None":
         """Return the director agent, or None if no director is registered."""
-        return next(
-            (a for a in self._agents.values() if getattr(a, "role", "") == AgentRole.DIRECTOR),
-            None,
-        )
+        return self.registry.get_director()
 
     def flush_director_pending(self) -> list[str]:
-        """Atomically read and clear pending director results.
-
-        Returns all buffered worker result summaries and empties the buffer.
-        Calling this from the HTTP layer avoids direct access to _director_pending.
-        """
+        """Atomically read and clear pending director results."""
         items = self._director_pending.copy()
         self._director_pending.clear()
         return items
@@ -161,12 +130,11 @@ class Orchestrator:
             metadata=metadata or {},
         )
         await self._task_queue.put((priority, task))
-        msg = Message(
+        await self.bus.publish(Message(
             type=MessageType.STATUS,
             from_id="__orchestrator__",
             payload={"event": "task_queued", "task_id": task.id, "prompt": prompt},
-        )
-        await self.bus.publish(msg)
+        ))
         logger.info("Task %s queued (priority=%d)", task.id, priority)
         return task
 
@@ -196,9 +164,8 @@ class Orchestrator:
             except asyncio.CancelledError:
                 break
 
-            agent = self._find_idle_agent()
+            agent = self.registry.find_idle_worker()
             if agent is None:
-                # No idle agent — track retry count and re-queue or dead-letter
                 retry_count = task.metadata.get("_retry_count", 0) + 1
                 task.metadata["_retry_count"] = retry_count
                 if retry_count >= self.config.dlq_max_retries:
@@ -215,15 +182,14 @@ class Orchestrator:
     async def _dead_letter(self, task: Task, reason: str) -> None:
         """Move *task* to the dead letter queue and publish a STATUS event."""
         retry_count = task.metadata.get("_retry_count", 0)
-        entry = {
+        self._dlq.append({
             "task_id": task.id,
             "prompt": task.prompt,
             "priority": task.priority,
             "retry_count": retry_count,
             "reason": reason,
             "trace_id": task.trace_id,
-        }
-        self._dlq.append(entry)
+        })
         self._task_queue.task_done()
         await self.bus.publish(Message(
             type=MessageType.STATUS,
@@ -244,16 +210,6 @@ class Orchestrator:
         """Return the dead letter queue contents (snapshot)."""
         return list(self._dlq)
 
-    def _find_idle_agent(self) -> Agent | None:
-        for agent in self._agents.values():
-            if (
-                agent.status == AgentStatus.IDLE
-                and getattr(agent, "role", AgentRole.WORKER) == AgentRole.WORKER
-                and self._breakers.get(agent.id, CircuitBreaker(agent.id)).is_allowed()
-            ):
-                return agent
-        return None
-
     # ------------------------------------------------------------------
     # Message router (P2P gating)
     # ------------------------------------------------------------------
@@ -271,23 +227,14 @@ class Orchestrator:
                 asyncio.create_task(self._handle_control(msg))
             elif msg.type == MessageType.RESULT:
                 self._buffer_director_result(msg)
-                # Update circuit breaker for the originating agent
-                from_id = msg.from_id
-                if from_id in self._breakers:
-                    if msg.payload.get("error"):
-                        self._breakers[from_id].record_failure()
-                    else:
-                        self._breakers[from_id].record_success()
+                self.registry.record_result(
+                    msg.from_id, error=bool(msg.payload.get("error"))
+                )
             self._bus_queue.task_done()
 
     def _buffer_director_result(self, result_msg: Message) -> None:
-        """Buffer a worker RESULT to be injected into the next Director chat turn.
-
-        Avoids interrupting the Director's active conversation by pushing text
-        into its tmux pane mid-session.  Instead, the pending summaries are
-        prepended to the next message the user sends via POST /director/chat.
-        """
-        if not any(getattr(a, "role", AgentRole.WORKER) == AgentRole.DIRECTOR for a in self._agents.values()):
+        """Buffer a worker RESULT for injection into the next Director chat turn."""
+        if self.registry.get_director() is None:
             return
         payload = result_msg.payload
         agent_id = result_msg.from_id
@@ -299,8 +246,6 @@ class Orchestrator:
             output = payload.get("output") or ""
             lines = output.splitlines()
             total_lines = len(lines)
-            # Take the final 40 lines (typically contains conclusion + prompt)
-            # rather than hard-cutting at a character boundary
             TAIL_LINES = 40
             if len(lines) > TAIL_LINES:
                 tail = "\n".join(lines[-TAIL_LINES:])
@@ -310,58 +255,11 @@ class Orchestrator:
         self._director_pending.append(summary)
         logger.debug("Buffered worker result for director: agent=%s task=%s", agent_id, task_id)
 
-    def _is_hierarchy_permitted(self, from_id: str, to_id: str) -> bool:
-        """Return True when *from_id* and *to_id* are in a natural hierarchy relationship.
-
-        Permitted relationships (both agents must be registered):
-        - **Parent → child**: from_id is the registered parent of to_id
-        - **Child → parent**: to_id is the registered parent of from_id
-        - **Siblings**: both agents share the same parent (including both being
-          root-level agents with no recorded parent, i.e. defined in the YAML config)
-        """
-        if from_id not in self._agents or to_id not in self._agents:
-            return False
-        from_parent = self._agent_parents.get(from_id)  # None → root-level agent
-        to_parent = self._agent_parents.get(to_id)      # None → root-level agent
-        # Parent → child
-        if from_id == to_parent:
-            return True
-        # Child → parent
-        if to_id == from_parent:
-            return True
-        # Siblings (including both root-level: from_parent == to_parent == None)
-        if from_parent == to_parent:
-            return True
-        return False
-
     async def route_message(self, msg: Message) -> None:
-        """Forward a PEER_MSG if the sender/receiver pair is permitted.
-
-        Permission is granted when ANY of the following holds:
-        1. ``from_id == "__user__"`` — Web API always reaches any agent.
-        2. The pair is listed in ``p2p_permissions`` (explicit cross-hierarchy override).
-        3. The agents are in a natural hierarchy relationship: parent↔child or siblings
-           (agents sharing the same parent, including root-level agents).
-
-        The hierarchy rules cover the common case without requiring every pair to be
-        declared in the config.  The explicit table is an escape hatch for lateral
-        or cross-branch communication.
-        """
-        if msg.from_id == "__user__":
-            permitted = True
-            reason = "user"
-        elif frozenset({msg.from_id, msg.to_id}) in self._p2p:
-            permitted = True
-            reason = "explicit"
-        elif self._is_hierarchy_permitted(msg.from_id, msg.to_id):
-            permitted = True
-            reason = "hierarchy"
-        else:
-            permitted = False
-            reason = "blocked"
+        """Forward a PEER_MSG if the sender/receiver pair is permitted."""
+        permitted, reason = self.registry.is_p2p_permitted(msg.from_id, msg.to_id)
 
         if permitted:
-            # Mark as forwarded so the route loop doesn't re-process it.
             routed = Message(
                 type=MessageType.PEER_MSG,
                 from_id=msg.from_id,
@@ -388,7 +286,6 @@ class Orchestrator:
             parent_id = msg.from_id
             template_id = msg.payload.get("template_id", "")
             share_parent = msg.payload.get("share_parent_worktree", False)
-            # Resolve the pre-configured agent definition.
             template_cfg = next(
                 (a for a in self.config.agents if a.id == template_id), None
             )
@@ -408,12 +305,7 @@ class Orchestrator:
         *,
         share_parent: bool = False,
     ) -> "Agent | None":
-        """Create, register, and start a sub-agent from a pre-configured template.
-
-        The sub-agent is a new instance of *template_cfg* with a unique ID.
-        P2P messaging between the parent and the new sub-agent is automatically
-        granted.
-        """
+        """Create, register, and start a sub-agent from a pre-configured template."""
         from pathlib import Path as _Path  # noqa: PLC0415
 
         from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent
@@ -421,18 +313,13 @@ class Orchestrator:
         sub_id = f"{parent_id}-sub-{uuid.uuid4().hex[:6]}"
         mailbox = Mailbox(self.config.mailbox_dir, self.config.session_name)
 
-        # Resolve parent agent once for both cwd_override and parent_pane
-        parent_agent = self._agents.get(parent_id)
+        parent_agent = self.registry.get(parent_id)
 
-        # Determine cwd_override for share_parent_worktree option.
         cwd_override: _Path | None = None
         if share_parent and parent_agent is not None:
             cwd_override = parent_agent.worktree_path
 
-        # When cwd_override is provided, no worktree management is needed.
         effective_wm = self._worktree_manager if cwd_override is None else None
-
-        # Sub-agent shares its parent's tmux window (pane-level hierarchy)
         parent_pane = parent_agent.pane if parent_agent is not None else None
 
         agent: Agent = ClaudeCodeAgent(
@@ -453,13 +340,12 @@ class Orchestrator:
             context_files=template_cfg.context_files,
         )
 
-        self.register_agent(agent, parent_id=parent_id)
-        # Explicit P2P is no longer needed for parent↔child (auto-permitted by hierarchy),
-        # but we add it for robustness and backward compatibility.
-        self._p2p.add(frozenset({parent_id, sub_id}))
+        self.registry.register(agent, parent_id=parent_id)
+        # Explicit P2P is auto-permitted by hierarchy, but added for robustness.
+        self.registry.grant_p2p(parent_id, sub_id)
         await agent.start()
 
-        status_msg = Message(
+        await self.bus.publish(Message(
             type=MessageType.STATUS,
             from_id="__orchestrator__",
             to_id=parent_id,
@@ -468,8 +354,7 @@ class Orchestrator:
                 "sub_agent_id": sub_id,
                 "parent_id": parent_id,
             },
-        )
-        await self.bus.publish(status_msg)
+        ))
         logger.info("Sub-agent %s spawned (parent=%s)", sub_id, parent_id)
         return agent
 

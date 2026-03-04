@@ -120,8 +120,8 @@ class HeadlessOrchestrator(Orchestrator):
             role=template_cfg.role,
             mailbox=mailbox,
         )
-        self.register_agent(agent, parent_id=parent_id)
-        self._p2p.add(frozenset({parent_id, sub_id}))
+        self.registry.register(agent, parent_id=parent_id)
+        self.registry.grant_p2p(parent_id, sub_id)
         await agent.start()
         self.spawned_sub_agents.append(agent)
 
@@ -437,7 +437,7 @@ async def test_subagent_spawning_via_control(tmp_path):
 
         # Sub-agent should be registered
         assert orch.get_agent(sub_id) is not None
-        assert orch._agent_parents.get(sub_id) == "parent-agent"
+        assert orch.registry._agent_parents.get(sub_id) == "parent-agent"
 
         # P2P between parent and sub-agent should be granted
         assert len(orch.spawned_sub_agents) == 1

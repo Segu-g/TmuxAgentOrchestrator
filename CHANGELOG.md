@@ -6,6 +6,32 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.5.0] — 2026-03-05
+
+### Added / Refactored
+
+**AgentRegistry extraction (DDD Aggregate pattern)**
+- New `src/tmux_orchestrator/registry.py` — `AgentRegistry` class encapsulates all
+  agent-related state: `_agents`, `_agent_parents`, `_p2p` permissions, `_breakers`
+- `Orchestrator` becomes a thin coordinator: delegates registration, lookup, P2P
+  permission checks, and circuit-breaker updates to the registry
+- Public API unchanged — `register_agent()`, `get_agent()`, `list_agents()`, etc.
+  are preserved as thin delegators on `Orchestrator`
+- `AgentRegistry.is_p2p_permitted()` returns `(bool, reason: str)` with explicit
+  reason codes: `"user"`, `"explicit"`, `"hierarchy"`, `"blocked"`
+
+**New test module: `tests/test_registry.py`**
+- 20 unit tests for `AgentRegistry` in isolation (no `Orchestrator` or tmux)
+- Uses `StubAgent` — minimal in-process agent
+- Coverage: registration, parent tracking, unregistration, lookup (`get`, `get_director`,
+  `find_idle_worker`), P2P permission rules (user bypass, explicit, hierarchy siblings,
+  parent↔child, cross-branch blocked, `grant_p2p`), circuit-breaker recording,
+  `list_all` with drop counts
+
+### Test count: 117 (up from 97)
+
+---
+
 ## [0.4.0] — 2026-03-05
 
 ### Added
