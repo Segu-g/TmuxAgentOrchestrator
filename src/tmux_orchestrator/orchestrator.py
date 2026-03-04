@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,7 @@ from tmux_orchestrator.agents.base import Agent, Task
 from tmux_orchestrator.bus import Bus, Message, MessageType
 from tmux_orchestrator.messaging import Mailbox
 from tmux_orchestrator.registry import AgentRegistry
+from tmux_orchestrator.supervision import supervised_task
 
 if TYPE_CHECKING:
     from tmux_orchestrator.config import AgentConfig, OrchestratorConfig
@@ -55,6 +57,7 @@ class Orchestrator:
         self._paused = False
         self._dispatch_task: asyncio.Task | None = None
         self._router_task: asyncio.Task | None = None
+        self._watchdog_task: asyncio.Task | None = None
         self._bus_queue: asyncio.Queue[Message] | None = None
         # Worker results waiting to be injected into the next Director chat turn
         self._director_pending: list[str] = []
@@ -62,6 +65,11 @@ class Orchestrator:
         self._dlq: list[dict] = []
         # Set of task IDs that have completed successfully (used for depends_on checks)
         self._completed_tasks: set[str] = set()
+        # Idempotency deduplication: key → task_id, with expiry timestamps
+        _IKEY_TTL = 3600.0
+        self._idempotency_keys: dict[str, str] = {}
+        self._ikey_timestamps: dict[str, float] = {}
+        self._ikey_ttl: float = _IKEY_TTL
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -75,16 +83,26 @@ class Orchestrator:
         for agent in self.registry.all_agents().values():
             await agent.start()
         self._dispatch_task = asyncio.create_task(
-            self._dispatch_loop(), name="orchestrator-dispatch"
+            supervised_task(self._dispatch_loop, "orchestrator-dispatch",
+                            on_permanent_failure=self._on_internal_failure),
+            name="orchestrator-dispatch",
         )
         self._router_task = asyncio.create_task(
-            self._route_loop(), name="orchestrator-router"
+            supervised_task(self._route_loop, "orchestrator-router",
+                            on_permanent_failure=self._on_internal_failure),
+            name="orchestrator-router",
+        )
+        self._watchdog_task = asyncio.create_task(
+            self._watchdog_loop(poll=self.config.watchdog_poll),
+            name="orchestrator-watchdog",
         )
         logger.info("Orchestrator started with %d agents", len(self.registry.all_agents()))
 
     async def stop(self) -> None:
-        """Stop dispatch, routing, and all agents."""
-        internal_tasks = [t for t in [self._dispatch_task, self._router_task] if t]
+        """Stop dispatch, routing, watchdog, and all agents."""
+        internal_tasks = [
+            t for t in [self._dispatch_task, self._router_task, self._watchdog_task] if t
+        ]
         for t in internal_tasks:
             t.cancel()
         if internal_tasks:
@@ -132,7 +150,17 @@ class Orchestrator:
         priority: int = 0,
         metadata: dict | None = None,
         depends_on: list[str] | None = None,
+        idempotency_key: str | None = None,
     ) -> Task:
+        # Idempotency deduplication: return existing task for duplicate keys.
+        if idempotency_key is not None:
+            existing_id = self._idempotency_keys.get(idempotency_key)
+            if existing_id is not None:
+                logger.info(
+                    "submit_task: duplicate idempotency_key=%r → existing task %s",
+                    idempotency_key, existing_id,
+                )
+                return Task(id=existing_id, prompt=prompt)
         if self._task_queue.full():
             raise RuntimeError(
                 f"Task queue is full (maxsize={self.config.task_queue_maxsize})"
@@ -144,6 +172,10 @@ class Orchestrator:
             metadata=metadata or {},
             depends_on=depends_on or [],
         )
+        if idempotency_key is not None:
+            self._idempotency_keys[idempotency_key] = task.id
+            self._ikey_timestamps[idempotency_key] = time.monotonic()
+            self._cleanup_expired_ikeys()
         await self._task_queue.put((priority, task))
         await self.bus.publish(Message(
             type=MessageType.STATUS,
@@ -152,6 +184,14 @@ class Orchestrator:
         ))
         logger.info("Task %s queued (priority=%d)", task.id, priority)
         return task
+
+    def _cleanup_expired_ikeys(self) -> None:
+        """Remove idempotency entries older than _ikey_ttl."""
+        cutoff = time.monotonic() - self._ikey_ttl
+        expired = [k for k, t in self._ikey_timestamps.items() if t < cutoff]
+        for k in expired:
+            self._idempotency_keys.pop(k, None)
+            self._ikey_timestamps.pop(k, None)
 
     def list_tasks(self) -> list[dict]:
         """Return a snapshot of the pending task queue (non-destructive)."""
@@ -205,6 +245,7 @@ class Orchestrator:
                 continue
 
             logger.info("Dispatching task %s → agent %s", task.id, agent.id)
+            self.registry.record_busy(agent.id)
             await agent.send_task(task)
             self._task_queue.task_done()
 
@@ -238,6 +279,53 @@ class Orchestrator:
     def list_dlq(self) -> list[dict]:
         """Return the dead letter queue contents (snapshot)."""
         return list(self._dlq)
+
+    # ------------------------------------------------------------------
+    # Watchdog loop
+    # ------------------------------------------------------------------
+
+    async def _watchdog_loop(self, *, poll: float = 10.0) -> None:
+        """Periodically detect agents stuck BUSY beyond 1.5× task_timeout.
+
+        Publishes a synthetic RESULT with ``error="watchdog_timeout"`` so the
+        existing ``_route_loop`` → ``registry.record_result`` → circuit-breaker
+        path handles recovery without special-casing.
+
+        Reference: Nygard "Release It!" (2018) Ch. 5 — Stability Patterns.
+        """
+        while True:
+            try:
+                await asyncio.sleep(poll)
+            except asyncio.CancelledError:
+                break
+            timed_out = self.registry.find_timed_out_agents(self.config.task_timeout)
+            for agent_id in timed_out:
+                agent = self.registry.get(agent_id)
+                if agent is None:
+                    continue
+                task = agent._current_task
+                task_id = task.id if task else "unknown"
+                logger.warning(
+                    "Watchdog: agent %s has been BUSY for >%.0fs on task %s — injecting timeout",
+                    agent_id, self.config.task_timeout * 1.5, task_id,
+                )
+                await self.bus.publish(Message(
+                    type=MessageType.RESULT,
+                    from_id=agent_id,
+                    payload={"task_id": task_id, "error": "watchdog_timeout", "output": None},
+                ))
+
+    # ------------------------------------------------------------------
+    # Supervision callback
+    # ------------------------------------------------------------------
+
+    async def _on_internal_failure(self, name: str, exc: Exception) -> None:
+        """Called when a supervised internal task exhausts all restart attempts."""
+        await self.bus.publish(Message(
+            type=MessageType.STATUS,
+            from_id="__orchestrator__",
+            payload={"event": "internal_failure", "task_name": name, "error": str(exc)},
+        ))
 
     # ------------------------------------------------------------------
     # Message router (P2P gating)

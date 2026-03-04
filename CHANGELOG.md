@@ -6,6 +6,56 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.10.0] — 2026-03-05
+
+### Added
+
+**Task supervision (`supervision.py`)**
+- New `src/tmux_orchestrator/supervision.py` — `supervised_task(coro_factory, name, *,
+  max_restarts=5, on_permanent_failure=None)`: wraps an async coroutine factory and
+  restarts it on unexpected exceptions with pre-defined backoff levels
+  `[0.1, 0.5, 1.0, 5.0, 30.0]` seconds
+- `CancelledError` is never caught — cancellation propagates immediately
+- `Orchestrator._dispatch_loop` and `_route_loop` are now wrapped with
+  `supervised_task`; `_on_internal_failure` publishes a STATUS event when retries
+  are exhausted
+
+**Watchdog loop for stuck agents**
+- `AgentRegistry._busy_since: dict[str, float]` — tracks monotonic timestamp of
+  when each agent was dispatched; cleared on `record_result()`
+- `AgentRegistry.record_busy(agent_id)` — called by dispatch loop when sending a task
+- `AgentRegistry.find_timed_out_agents(task_timeout) → list[str]` — returns agents
+  BUSY for more than 1.5× `task_timeout` (the internal `asyncio.wait_for` gets
+  first chance; the watchdog is the backstop)
+- `Orchestrator._watchdog_loop(poll)` — polls every `config.watchdog_poll` seconds
+  (default 10 s); publishes synthetic `RESULT(error="watchdog_timeout")` for stuck
+  agents so the existing circuit-breaker path handles recovery
+- `OrchestratorConfig.watchdog_poll: float = 10.0`
+- `Orchestrator.stop()` now also cancels and awaits `_watchdog_task`
+
+**Idempotency keys on `submit_task`**
+- `submit_task(idempotency_key=...)` — if the same key is submitted twice, the
+  second call returns a stub pointing at the original `task_id` without enqueueing
+- `Orchestrator._idempotency_keys / _ikey_timestamps` — in-process dict with 1-hour
+  TTL; lazy expiry on each new keyed submission
+- Pattern: Idempotent Receiver (Hohpe & Woolf, EIP 2004, p. 349)
+
+**Stateful property tests — `BusStateMachine`**
+- New `tests/test_bus_stateful.py` — `BusStateMachine(RuleBasedStateMachine)` tests
+  Bus invariants across arbitrary sequences of subscribe / broadcast-publish /
+  directed-publish / unsubscribe operations
+- 200 examples × 30 steps per example; invariants checked after every step:
+  drop counts non-negative, local mirror == bus internal table, directed messages
+  reach only the target
+
+### Test count: 156 (up from 144)
+
+Reference: Erlang OTP supervisor (Ericsson, 1996); Hattingh "Using Asyncio in Python"
+           (O'Reilly, 2020) Ch. 4; Hohpe & Woolf EIP (2004) p. 349;
+           Claessen & Hughes QuickCheck (ICFP, 2000); DESIGN.md §10.6 (2026-03-05)
+
+---
+
 ## [0.9.0] — 2026-03-05
 
 ### Fixed

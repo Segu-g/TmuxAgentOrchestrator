@@ -665,3 +665,119 @@ async def test_list_agents_includes_bus_drops() -> None:
 
     agents = orch.list_agents()
     assert agents[0]["bus_drops"] == 5
+
+
+# ---------------------------------------------------------------------------
+# Idempotency keys
+# ---------------------------------------------------------------------------
+
+
+async def test_idempotency_key_deduplicates() -> None:
+    """Submitting the same idempotency_key twice returns the original task_id."""
+    bus = Bus()
+    tmux = make_tmux_mock()
+    config = make_config()
+    orch = Orchestrator(bus=bus, tmux=tmux, config=config)
+
+    t1 = await orch.submit_task("hello", idempotency_key="ikey-1")
+    t2 = await orch.submit_task("hello again", idempotency_key="ikey-1")
+    assert t1.id == t2.id  # deduplicated — same task
+
+
+async def test_different_idempotency_keys_are_distinct() -> None:
+    """Different idempotency_keys produce distinct tasks."""
+    bus = Bus()
+    tmux = make_tmux_mock()
+    config = make_config()
+    orch = Orchestrator(bus=bus, tmux=tmux, config=config)
+
+    t1 = await orch.submit_task("a", idempotency_key="key-a")
+    t2 = await orch.submit_task("b", idempotency_key="key-b")
+    assert t1.id != t2.id
+
+
+async def test_no_idempotency_key_never_deduplicates() -> None:
+    """Without idempotency_key, every submit_task creates a new task."""
+    bus = Bus()
+    tmux = make_tmux_mock()
+    config = make_config()
+    orch = Orchestrator(bus=bus, tmux=tmux, config=config)
+
+    t1 = await orch.submit_task("hello")
+    t2 = await orch.submit_task("hello")
+    assert t1.id != t2.id
+
+
+# ---------------------------------------------------------------------------
+# Watchdog loop
+# ---------------------------------------------------------------------------
+
+
+async def test_watchdog_publishes_result_for_stuck_agent(tmp_path) -> None:
+    """Watchdog fires a RESULT with error='watchdog_timeout' for a stuck agent."""
+    from tests.integration.test_orchestration import HeadlessOrchestrator
+
+    bus = Bus()
+    # task_timeout=0.05s → watchdog threshold = 0.075s; poll every 0.05s
+    config = make_config(
+        task_timeout=0.05,
+        watchdog_poll=0.05,
+        mailbox_dir=str(tmp_path),
+    )
+    orch = HeadlessOrchestrator(bus, config)
+
+    # StuckAgent never finishes (doesn't call _set_idle)
+    class StuckAgent(DummyAgent):
+        async def _dispatch_task(self, task: Task) -> None:
+            # Record dispatch but never complete
+            self.dispatched.append(task)
+            self.dispatched_event.set()
+            await asyncio.sleep(9999)
+
+    worker = StuckAgent("stuck-1", bus)
+    orch.register_agent(worker)
+    await orch.start()
+
+    results_q = await bus.subscribe("__watchdog_test__", broadcast=True)
+    try:
+        task = await orch.submit_task("stuck task")
+        await asyncio.wait_for(worker.dispatched_event.wait(), timeout=2.0)
+
+        # Wait for watchdog to fire (poll=0.05s, threshold=0.075s, so <0.5s total)
+        deadline = asyncio.get_running_loop().time() + 2.0
+        watchdog_fired = False
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                msg = await asyncio.wait_for(results_q.get(), timeout=0.1)
+                results_q.task_done()
+                if (
+                    msg.type == MessageType.RESULT
+                    and msg.payload.get("error") == "watchdog_timeout"
+                    and msg.payload.get("task_id") == task.id
+                ):
+                    watchdog_fired = True
+                    break
+            except asyncio.TimeoutError:
+                pass
+        assert watchdog_fired, "Watchdog did not fire within deadline"
+    finally:
+        await bus.unsubscribe("__watchdog_test__")
+        await orch.stop()
+
+
+# ---------------------------------------------------------------------------
+# Supervised internal tasks
+# ---------------------------------------------------------------------------
+
+
+async def test_orchestrator_stop_awaits_all_three_tasks() -> None:
+    """stop() cancels and awaits dispatch, router, AND watchdog tasks."""
+    bus = Bus()
+    tmux = make_tmux_mock()
+    config = make_config()
+    orch = Orchestrator(bus=bus, tmux=tmux, config=config)
+    await orch.start()
+    await orch.stop()
+    assert orch._dispatch_task is not None and orch._dispatch_task.done()
+    assert orch._router_task is not None and orch._router_task.done()
+    assert orch._watchdog_task is not None and orch._watchdog_task.done()

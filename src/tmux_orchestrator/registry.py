@@ -16,6 +16,7 @@ Reference: Evans "Domain-Driven Design" (2003) Ch. 6 — Aggregates;
 from __future__ import annotations
 
 import logging
+import time
 from typing import TYPE_CHECKING
 
 from tmux_orchestrator.agents.base import Agent, AgentStatus
@@ -50,6 +51,8 @@ class AgentRegistry:
         self._breakers: dict[str, CircuitBreaker] = {}
         self._cb_threshold = circuit_breaker_threshold
         self._cb_recovery = circuit_breaker_recovery
+        # Watchdog tracking: agent_id → monotonic timestamp of when dispatch started
+        self._busy_since: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Registration
@@ -182,8 +185,26 @@ class AgentRegistry:
     # Circuit breaker interface
     # ------------------------------------------------------------------
 
+    def record_busy(self, agent_id: str) -> None:
+        """Record that *agent_id* started executing a task (for watchdog tracking)."""
+        self._busy_since[agent_id] = time.monotonic()
+
+    def find_timed_out_agents(self, task_timeout: float) -> list[str]:
+        """Return agent IDs that have been BUSY for more than 1.5× *task_timeout*.
+
+        The 1.5× multiplier gives the per-agent ``asyncio.wait_for`` timeout a
+        chance to fire first; the watchdog is a belt-and-suspenders backstop.
+        """
+        deadline = task_timeout * 1.5
+        now = time.monotonic()
+        return [
+            aid for aid, t in self._busy_since.items()
+            if now - t > deadline
+        ]
+
     def record_result(self, agent_id: str, *, error: bool) -> None:
         """Update the circuit breaker for *agent_id* based on a task outcome."""
+        self._busy_since.pop(agent_id, None)  # clear watchdog timestamp
         cb = self._breakers.get(agent_id)
         if cb is None:
             return
