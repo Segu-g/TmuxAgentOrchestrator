@@ -58,6 +58,8 @@ class Orchestrator:
         self._director_pending: list[str] = []
         # Dead letter queue: tasks that could not be dispatched after max retries
         self._dlq: list[dict] = []
+        # Set of task IDs that have completed successfully (used for depends_on checks)
+        self._completed_tasks: set[str] = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -121,13 +123,19 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     async def submit_task(
-        self, prompt: str, *, priority: int = 0, metadata: dict | None = None
+        self,
+        prompt: str,
+        *,
+        priority: int = 0,
+        metadata: dict | None = None,
+        depends_on: list[str] | None = None,
     ) -> Task:
         task = Task(
             id=str(uuid.uuid4()),
             prompt=prompt,
             priority=priority,
             metadata=metadata or {},
+            depends_on=depends_on or [],
         )
         await self._task_queue.put((priority, task))
         await self.bus.publish(Message(
@@ -163,6 +171,20 @@ class Orchestrator:
                 continue
             except asyncio.CancelledError:
                 break
+
+            # Check task dependency graph: re-queue if any dependency is not yet done.
+            unmet = [dep for dep in task.depends_on if dep not in self._completed_tasks]
+            if unmet:
+                retry_count = task.metadata.get("_retry_count", 0) + 1
+                task.metadata["_retry_count"] = retry_count
+                if retry_count >= self.config.dlq_max_retries:
+                    await self._dead_letter(
+                        task, f"unmet dependencies {unmet} after {retry_count} retries"
+                    )
+                else:
+                    await self._task_queue.put((task.priority, task))
+                    await asyncio.sleep(0.2)
+                continue
 
             agent = self.registry.find_idle_worker()
             if agent is None:
@@ -227,9 +249,12 @@ class Orchestrator:
                 asyncio.create_task(self._handle_control(msg))
             elif msg.type == MessageType.RESULT:
                 self._buffer_director_result(msg)
-                self.registry.record_result(
-                    msg.from_id, error=bool(msg.payload.get("error"))
-                )
+                error = msg.payload.get("error")
+                self.registry.record_result(msg.from_id, error=bool(error))
+                if not error:
+                    task_id = msg.payload.get("task_id")
+                    if task_id:
+                        self._completed_tasks.add(task_id)
             self._bus_queue.task_done()
 
     def _buffer_director_result(self, result_msg: Message) -> None:

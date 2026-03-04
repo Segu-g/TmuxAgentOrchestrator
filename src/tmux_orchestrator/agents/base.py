@@ -39,6 +39,7 @@ class Task:
     priority: int = 0  # lower = higher priority
     metadata: dict[str, Any] = field(default_factory=dict)
     trace_id: str = field(default_factory=lambda: secrets.token_hex(8))
+    depends_on: list[str] = field(default_factory=list)  # task IDs that must complete first
 
     def __lt__(self, other: "Task") -> bool:
         return self.priority < other.priority

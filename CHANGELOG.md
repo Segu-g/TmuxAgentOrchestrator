@@ -6,6 +6,39 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.8.0] — 2026-03-05
+
+### Added
+
+**Task dependency graph (`depends_on`) + Workflow primitive**
+- `Task.depends_on: list[str]` — task IDs that must complete successfully before
+  this task is dispatched
+- `Orchestrator._completed_tasks: set[str]` — set of task IDs completed without error;
+  updated by `_route_loop` when a RESULT without `error` is received
+- `Orchestrator._dispatch_loop` checks unmet dependencies before dispatching; re-queues
+  the task (counted toward `dlq_max_retries`) until all deps are resolved
+- `Orchestrator.submit_task()` gains `depends_on: list[str] | None` parameter
+- New `src/tmux_orchestrator/workflow.py` — `Workflow` builder with `step()` / `run()`
+  API; `_topological_sort()` (Kahn's algorithm) orders steps before submission;
+  raises `ValueError` on cycles or foreign dependencies
+- New `tests/test_workflow.py` — 10 tests: `Task.depends_on`, topo sort (linear,
+  diamond, cycle, foreign dep), submit with deps, dispatch blocking integration test,
+  `Workflow.run()` end-to-end
+
+**Agent lifecycle principle documented**
+- `CLAUDE.md` updated: workers are ephemeral (spawn per task/phase, not reused);
+  system prompt and `CLAUDE.md` are immutable during the agent's lifetime
+- `DESIGN.md` §11 updated: Issue #4 (CLAUDE.md dynamic update) closed — not needed
+  given the ephemeral-agent principle
+- GitHub Issue #4 closed with design rationale
+
+### Test count: 143 (up from 133)
+
+Reference: Richardson "Microservices Patterns" (2018) Ch. 4 (Saga pattern);
+           DESIGN.md §10.5 (2026-03-05)
+
+---
+
 ## [0.7.0] — 2026-03-05
 
 ### Added

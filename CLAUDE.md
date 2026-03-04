@@ -149,6 +149,13 @@ The orchestrator enforces P2P permissions. Your message is silently dropped if t
 All commands require `__orchestrator_context__.json` in your cwd.
 Commands that use REST (`/send-message`, `/spawn-subagent`, `/list-agents`) require the orchestrator to have been started with `tmux-orchestrator web`.
 
+### Agent Lifecycle Principle
+
+**Workers are ephemeral** — spawn one per task or phase, not reused across different task types.
+Each agent is created with a specific role (via `system_prompt`) and should complete its purpose then stop.
+The orchestrator context (`CLAUDE.md`, `__orchestrator_context__.json`) is written at startup and
+is intentionally immutable during the agent's lifetime. If your task scope changes, spawn a new sub-agent.
+
 ### Spawning Sub-Agents
 
 Use `/spawn-subagent <template_id>` to create a helper agent, where `template_id` is the `id` of an agent already defined in the YAML config:
