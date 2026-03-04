@@ -6,6 +6,50 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.9.0] — 2026-03-05
+
+### Fixed
+
+**`Orchestrator.stop()` task leakage**
+- `stop()` now awaits cancelled internal tasks with
+  `asyncio.gather(*tasks, return_exceptions=True)` instead of fire-and-forget
+  `.cancel()`; prevents background tasks from outliving the orchestrator in tests
+  and production shutdown sequences
+
+**`TaskResultPayload.error` coercion**
+- `schemas.py` `TaskResultPayload.error` was typed `str | None`; malformed
+  messages with non-string error values (e.g. `0`) raised `ValidationError`
+- Added `@field_validator("error", mode="before")` that coerces any non-None
+  non-string value to `str`, keeping the public type `str | None`
+- Found and confirmed by Hypothesis (`test_parse_result_payload_never_raises`)
+
+### Added
+
+**Bounded task queue (`task_queue_maxsize`)**
+- `OrchestratorConfig.task_queue_maxsize: int = 0` — `0` means unbounded (default,
+  backward-compatible); positive value caps `asyncio.PriorityQueue(maxsize=...)`
+- `submit_task()` raises `RuntimeError` immediately when the queue is full
+  rather than blocking the caller
+
+**OpenAPI schema contract regression test**
+- New `tests/test_openapi_schema.py` + `tests/fixtures/openapi_schema.json`
+  snapshot; fails on divergence, regenerated with `UPDATE_SNAPSHOTS=1`
+
+**Deterministic test synchronisation**
+- `DummyAgent.dispatched_event: asyncio.Event` — set in `_dispatch_task` when
+  a task is accepted; replaces `asyncio.sleep(0.3)` barriers in
+  `test_orchestrator.py` with `asyncio.wait_for(event.wait(), timeout=2.0)`
+- P2P tests: `route_message` is awaited directly → removed all `asyncio.sleep(0.1)`
+  stalls in routing tests (message is in subscriber queue after the `await`)
+- Net reduction: 10 `asyncio.sleep` barriers eliminated; 2 reduced (0.3 → 0.1 s)
+
+### Test count: 144 (up from 143)
+
+Reference: Martin Fowler "Patterns of Enterprise Application Architecture" (2002);
+           asyncio docs § "Synchronisation Primitives"; DESIGN.md §10.5
+
+---
+
 ## [0.8.0] — 2026-03-05
 
 ### Added

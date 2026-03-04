@@ -49,7 +49,9 @@ class Orchestrator:
             circuit_breaker_recovery=config.circuit_breaker_recovery,
         )
         # Priority queue: (priority, task) — lower priority value = dispatched first
-        self._task_queue: asyncio.PriorityQueue[tuple[int, Task]] = asyncio.PriorityQueue()
+        self._task_queue: asyncio.PriorityQueue[tuple[int, Task]] = asyncio.PriorityQueue(
+            maxsize=config.task_queue_maxsize
+        )
         self._paused = False
         self._dispatch_task: asyncio.Task | None = None
         self._router_task: asyncio.Task | None = None
@@ -82,10 +84,11 @@ class Orchestrator:
 
     async def stop(self) -> None:
         """Stop dispatch, routing, and all agents."""
-        if self._dispatch_task:
-            self._dispatch_task.cancel()
-        if self._router_task:
-            self._router_task.cancel()
+        internal_tasks = [t for t in [self._dispatch_task, self._router_task] if t]
+        for t in internal_tasks:
+            t.cancel()
+        if internal_tasks:
+            await asyncio.gather(*internal_tasks, return_exceptions=True)
         for agent in list(self.registry.all_agents().values()):
             await agent.stop()
         if self._bus_queue:
@@ -130,6 +133,10 @@ class Orchestrator:
         metadata: dict | None = None,
         depends_on: list[str] | None = None,
     ) -> Task:
+        if self._task_queue.full():
+            raise RuntimeError(
+                f"Task queue is full (maxsize={self.config.task_queue_maxsize})"
+            )
         task = Task(
             id=str(uuid.uuid4()),
             prompt=prompt,

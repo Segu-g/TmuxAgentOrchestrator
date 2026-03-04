@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +78,16 @@ class TaskResultPayload(_BasePayload):
     task_id: str
     output: str | None = None
     error: str | None = None
+
+    @field_validator("error", mode="before")
+    @classmethod
+    def coerce_error_to_str(cls, v: Any) -> str | None:
+        """Coerce non-string error values to str for robustness against malformed messages."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return v
+        return str(v)
 
 
 # ---------------------------------------------------------------------------

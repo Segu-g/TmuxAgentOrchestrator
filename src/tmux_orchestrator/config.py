@@ -41,6 +41,7 @@ class OrchestratorConfig:
     circuit_breaker_threshold: int = 3
     circuit_breaker_recovery: float = 60.0
     dlq_max_retries: int = 50  # re-queue attempts before dead-lettering a task
+    task_queue_maxsize: int = 0  # 0 = unbounded; >0 = bounded (submit_task raises when full)
 
 
 def load_config(path: str | Path) -> OrchestratorConfig:

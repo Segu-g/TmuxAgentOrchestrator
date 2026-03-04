@@ -24,6 +24,7 @@ class DummyAgent(Agent):
     def __init__(self, agent_id: str, bus: Bus) -> None:
         super().__init__(agent_id, bus)
         self.dispatched: list[Task] = []
+        self.dispatched_event: asyncio.Event = asyncio.Event()
 
     async def start(self) -> None:
         self.status = AgentStatus.IDLE
@@ -38,7 +39,8 @@ class DummyAgent(Agent):
 
     async def _dispatch_task(self, task: Task) -> None:
         self.dispatched.append(task)
-        await asyncio.sleep(0)  # yield
+        self.dispatched_event.set()
+        await asyncio.sleep(0)  # yield — _set_idle() publishes agent_idle after this
         self._set_idle()
 
     async def handle_output(self, text: str) -> None:
@@ -92,8 +94,7 @@ async def test_submit_and_dispatch() -> None:
     await orch.start()
     try:
         task = await orch.submit_task("hello world")
-        # Give the dispatch loop time to run
-        await asyncio.sleep(0.3)
+        await asyncio.wait_for(agent.dispatched_event.wait(), timeout=2.0)
         assert any(t.id == task.id for t in agent.dispatched)
     finally:
         await orch.stop()
@@ -114,7 +115,7 @@ async def test_no_idle_agent_requeues() -> None:
     agent.status = AgentStatus.BUSY
     try:
         await orch.submit_task("queued task")
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.1)
         # Task should still be in queue (agent is busy)
         assert len(agent.dispatched) == 0
     finally:
@@ -138,7 +139,6 @@ async def test_p2p_allowed() -> None:
             payload={"data": "ping"},
         )
         await orch.route_message(peer_msg)
-        await asyncio.sleep(0.1)
         assert q_a2.qsize() == 1
         received = q_a2.get_nowait()
         assert received.payload["data"] == "ping"
@@ -164,7 +164,6 @@ async def test_p2p_blocked() -> None:
             payload={"data": "should not arrive"},
         )
         await orch.route_message(blocked_msg)
-        await asyncio.sleep(0.1)
         assert q_b.qsize() == 0
     finally:
         await orch.stop()
@@ -192,7 +191,6 @@ async def test_p2p_siblings_auto_permitted() -> None:
             payload={"data": "hello sibling"},
         )
         await orch.route_message(msg)
-        await asyncio.sleep(0.1)
         assert q_a2.qsize() == 1
         received = q_a2.get_nowait()
         assert received.payload["data"] == "hello sibling"
@@ -228,7 +226,6 @@ async def test_p2p_parent_child_auto_permitted() -> None:
             from_id="child", to_id="parent",
             payload={"dir": "up"},
         ))
-        await asyncio.sleep(0.1)
         assert q_child.qsize() == 1
         assert q_parent.qsize() == 1
     finally:
@@ -258,7 +255,6 @@ async def test_p2p_cross_branch_blocked_without_explicit() -> None:
             from_id="branch-a", to_id="branch-b",
             payload={"test": "sibling via root"},
         ))
-        await asyncio.sleep(0.1)
         # branch-a and branch-b share parent "root" → siblings → allowed
         assert q_b.qsize() == 1
     finally:
@@ -292,7 +288,6 @@ async def test_p2p_cross_branch_deep_blocked() -> None:
             from_id="leaf-a", to_id="leaf-b",
             payload={"cross": "branch"},
         ))
-        await asyncio.sleep(0.1)
         assert q_leaf_b.qsize() == 0
     finally:
         await orch.stop()
@@ -325,7 +320,6 @@ async def test_p2p_cross_branch_explicit_override() -> None:
             from_id="leaf-a", to_id="leaf-b",
             payload={"cross": "explicit"},
         ))
-        await asyncio.sleep(0.1)
         assert q_leaf_b.qsize() == 1
         received = q_leaf_b.get_nowait()
         assert received.payload["cross"] == "explicit"
@@ -348,12 +342,12 @@ async def test_pause_and_resume() -> None:
         orch.pause()
         assert orch.is_paused
         await orch.submit_task("paused task")
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.1)
         assert len(agent.dispatched) == 0  # not dispatched while paused
 
         orch.resume()
         assert not orch.is_paused
-        await asyncio.sleep(0.5)
+        await asyncio.wait_for(agent.dispatched_event.wait(), timeout=2.0)
         assert len(agent.dispatched) == 1  # dispatched after resume
     finally:
         await orch.stop()
@@ -470,7 +464,7 @@ async def test_agent_busy_event_published() -> None:
 
     task = Task(id="t-busy", prompt="hello")
     await agent.send_task(task)
-    await asyncio.sleep(0.3)
+    await asyncio.wait_for(agent.dispatched_event.wait(), timeout=2.0)
 
     events = []
     while not events_q.empty():
@@ -497,7 +491,9 @@ async def test_agent_idle_event_published() -> None:
 
     task = Task(id="t-idle-ev", prompt="hello")
     await agent.send_task(task)
-    await asyncio.sleep(0.3)
+    # dispatched_event fires before _set_idle(); yield once more to let idle event publish
+    await asyncio.wait_for(agent.dispatched_event.wait(), timeout=2.0)
+    await asyncio.sleep(0)
 
     events = []
     while not events_q.empty():
