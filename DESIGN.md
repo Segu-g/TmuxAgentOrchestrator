@@ -370,6 +370,35 @@ AI エージェントにとって TDD は「ガードレール」として機能
 | R8 | `/healthz`, `/readyz`エンドポイント | 低 | `web/app.py` |
 | R9 | `AgentStatus`イベント駆動dispatch (sleep 0.2 → Event) | 中 | `orchestrator.py` |
 
+### 10.4 実装済み改善 (v0.3.0 / v0.4.0)
+
+| 実装内容 | バージョン | 根拠 |
+|----------|-----------|------|
+| `AgentRole(str, Enum)` — ユビキタス言語 | v0.3.0 | DDD原則 |
+| サーキットブレーカー (CLOSED→OPEN→HALF_OPEN) | v0.3.0 | Martin Fowler "Release It!" Ch.5 |
+| バスQueueFull → drop_count記録 | v0.3.0 | オブザーバビリティ |
+| `/healthz`, `/readyz`ヘルスプローブ | v0.3.0 | SRE ベストプラクティス |
+| `Task.trace_id` — クロスエージェント相関 | v0.3.0 | 分散トレーシング原則 |
+| `get_director()`, `flush_director_pending()` | v0.3.0 | Clean Architecture (ヘキサゴナル境界) |
+| `_buffer_director_result()` テール抽出 (最終40行) | v0.3.0 | コンテキストエンジニアリング |
+| `_set_idle()` 常に `agent_idle` STATUS発行 | v0.3.0 | イベント一貫性 |
+| デッドレターキュー (`dlq_max_retries`) | v0.4.0 | SRE DLQパターン |
+| Pydantic型付きペイロードスキーマ (`schemas.py`) | v0.4.0 | 型安全性・ドキュメント化 |
+| Hypothesis property-based tests | v0.4.0 | 形式的テスト手法 (TLA+精神) |
+
+### 10.5 次回イテレーション候補 (v0.5.0)
+
+優先度順:
+
+| 改善内容 | 優先度 | 根拠 |
+|----------|--------|------|
+| `AgentRegistry`抽出 — Orchestratorのゴッドオブジェクト解消 | 高 | DDD Aggregate原則、研究調査 |
+| `SystemFactory`抽出 — main.pyのワイヤリング分離 | 高 | Layered Architecture |
+| 構造化JSONログ (trace_idコンテキスト付き) | 中 | SREオブザーバビリティ (分散トレーシング) |
+| タスク依存関係 (`depends_on`) + Workflow原始型 | 中 | Saga/ワークフローパターン |
+| `ProcessAdapter`ポート — ClaudeCodeAgentのtmux抽象化 | 低 (大規模) | ヘキサゴナルアーキテクチャ |
+
+
 ---
 
 ## 11. 今後の課題
