@@ -324,7 +324,55 @@ AI エージェントにとって TDD は「ガードレール」として機能
 
 ---
 
-## 10. 今後の課題
+## 10. 調査記録 (2026-03-05)
+
+> 自律開発における調査の根拠を記録する。
+> 本セクションは調査のたびに追記・更新する。
+
+### 10.1 参考文献・調査観点
+
+以下の観点から4エージェント並行調査を実施（2026-03-05）:
+
+| 観点 | 主要参考文献 |
+|------|------------|
+| LLMマルチエージェントのベストプラクティス | arXiv 2503.13657 (Why Do Multi-Agent LLM Systems Fail?), Augment Code, Azure AI Agent Design Patterns |
+| DDD / クリーンアーキテクチャ | Evans "Domain-Driven Design" (2003), Martin "Clean Architecture" (2017) |
+| 形式的手法 / 型安全 | TLA+ (Lamport), Lean 4, Rust ownership model, Python Hypothesis |
+| オブザーバビリティ / SRE | Google SRE Book, AWS exponential backoff guide (Polly-style jitter), Prometheus text format |
+
+### 10.2 主要な知見と対応
+
+| 知見 | 根拠 | 実装方針 |
+|------|------|----------|
+| マルチエージェント障害の41.8%は仕様の曖昧さが原因 | arXiv 2503.13657 | `AgentRole` enum化、`TaskSpec`のメタデータ構造化 |
+| メッセージの型安全性がない→CONTROL誤送信時サイレント失敗 | Pydantic既存、bus.pyのpayloadがdict | `schemas.py`でPydantic型定義 |
+| `_set_idle()`が必ずしもSTATUSイベントを発行しない | `base.py`コード確認 | `_set_idle()`内で常に`agent_idle`発行 |
+| Directorへの結果バッファリングが文字数カット | `orchestrator.py:_buffer_director_result()` | テール抽出（最終N行）に変更 |
+| ERRORエージェントに自動リカバリなし | Issue #3 | サーキットブレーカー + リカバリループ実装 |
+| バスのキュー溢れがサイレント | `bus.py:91-95` | STATUS/queue_overflowイベント発行 |
+| `AgentRole`が`str`で型安全性なし | DDD「ユビキタス言語」 | `AgentRole(str, Enum)`定義 |
+| OrchestratorのプライベートフィールドをWeb層が直接アクセス | ヘキサゴナルアーキテクチャ違反 | `flush_director_pending()`, `get_director()`メソッド追加 |
+| BUSY状態のエージェントに無制限タイムアウトが発生しうる | 完了検知のパターン不一致 | `max_settle_wait`デッドライン追加 |
+
+### 10.3 実装計画 (v0.3.0)
+
+**イテレーション1 — 即座に改善効果が高いもの（全てv0.3.0対象）:**
+
+| # | 改善内容 | 複雑度 | 変更ファイル |
+|---|----------|--------|------------|
+| R1 | `AgentRole` enum化 | 低 | `config.py`, 各消費箇所 |
+| R2 | `_set_idle()`で常に`agent_idle` STATUS発行 | 低 | `agents/base.py` |
+| R3 | `_buffer_director_result()`テール抽出 | 低 | `orchestrator.py` |
+| R4 | バスQueueFullをSTATUSイベントとして発行 | 低 | `bus.py`, `orchestrator.py` |
+| R5 | Orchestratorに`flush_director_pending()`, `get_director()` | 低 | `orchestrator.py`, `web/app.py` |
+| R6 | サーキットブレーカー (`circuit_breaker.py`) | 中 | 新規 + `orchestrator.py`, `config.py` |
+| R7 | `Task.trace_id`フィールド追加 | 低 | `agents/base.py` |
+| R8 | `/healthz`, `/readyz`エンドポイント | 低 | `web/app.py` |
+| R9 | `AgentStatus`イベント駆動dispatch (sleep 0.2 → Event) | 中 | `orchestrator.py` |
+
+---
+
+## 11. 今後の課題
 
 ### 機能
 

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from tmux_orchestrator.agents.base import Agent, AgentStatus, Task
 from tmux_orchestrator.bus import Message, MessageType
+from tmux_orchestrator.config import AgentRole
 
 if TYPE_CHECKING:
     import libtmux
@@ -52,7 +53,7 @@ class ClaudeCodeAgent(Agent):
         session_name: str = "orchestrator",
         web_base_url: str = "http://localhost:8000",
         task_timeout: float | None = None,
-        role: str = "worker",
+        role: AgentRole | str = AgentRole.WORKER,
         parent_pane: "libtmux.Pane | None" = None,
         # --- Context engineering ---
         system_prompt: str | None = None,
@@ -69,7 +70,8 @@ class ClaudeCodeAgent(Agent):
         self._cwd_override = cwd_override
         self._session_name = session_name
         self._web_base_url = web_base_url
-        self.role = role
+        # Normalise role to AgentRole enum for consistent comparisons
+        self.role: AgentRole = AgentRole(role) if isinstance(role, str) else role
         # When set, the agent is a sub-agent and shares its parent's tmux window
         self._parent_pane: "libtmux.Pane | None" = parent_pane
         # Context engineering: per-agent context localization
@@ -104,7 +106,7 @@ class ClaudeCodeAgent(Agent):
         self._tmux.start_watcher()
         await self._wait_for_ready()
         self.status = AgentStatus.IDLE
-        if self.role == "director":
+        if self.role == AgentRole.DIRECTOR:
             await loop.run_in_executor(
                 None, self._tmux.send_keys, pane, self._director_startup_prompt()
             )
@@ -141,7 +143,7 @@ class ClaudeCodeAgent(Agent):
         )
 
         role_desc = {
-            "director": (
+            AgentRole.DIRECTOR: (
                 "You are the **Director** agent. Your responsibilities:\n"
                 "- Discuss project goals with the user via the web UI chat\n"
                 "- Break goals into concrete subtasks\n"
@@ -149,7 +151,7 @@ class ClaudeCodeAgent(Agent):
                 "- Aggregate worker results and report back to the user\n"
                 "- Use `/plan` before starting complex coordination work"
             ),
-            "worker": (
+            AgentRole.WORKER: (
                 "You are a **Worker** agent. Your responsibilities:\n"
                 "- Receive tasks from the orchestrator queue or from your parent agent\n"
                 "- Implement tasks using TDD: write tests first, then implement\n"
@@ -157,7 +159,7 @@ class ClaudeCodeAgent(Agent):
                 "- Report completion via `/progress` when done\n"
                 "- Spawn sub-agents via `/spawn-subagent` if the task is parallelisable"
             ),
-        }.get(self.role, f"You are a **{self.role}** agent.")
+        }.get(self.role, f"You are a **{self.role.value}** agent.")
 
         context_files_section = ""
         if self._context_files:

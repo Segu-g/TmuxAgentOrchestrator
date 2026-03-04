@@ -6,6 +6,69 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.3.0] — 2026-03-05
+
+### Added
+
+**Reliability: Circuit Breaker (closes Issue #3)**
+- New `src/tmux_orchestrator/circuit_breaker.py` — `CircuitBreaker` class with
+  CLOSED → OPEN → HALF_OPEN state machine; implements Martin Fowler's
+  "Release It!" stability pattern
+- Per-agent circuit breakers (`Orchestrator._breakers`) created at agent registration
+- `_find_idle_agent()` skips agents whose circuit is OPEN — prevents repeated
+  dispatch to unhealthy agents
+- `_route_loop()` calls `record_success()`/`record_failure()` on each RESULT message
+- Config: `OrchestratorConfig.circuit_breaker_threshold` (default: 3) and
+  `circuit_breaker_recovery` (default: 60.0 s)
+
+**Observability: Bus Drop Count Tracking**
+- `Bus._drop_counts: dict[str, int]` records messages dropped per subscriber
+  when queue is full (was silent)
+- `Bus.get_drop_counts()` returns a snapshot of all drop counts
+- `Orchestrator.list_agents()` now includes `"bus_drops"` and `"circuit_breaker"`
+  fields per agent
+
+**Health Probes**
+- `GET /healthz` — liveness probe: returns 200 + timestamp if event loop is alive
+- `GET /readyz` — readiness probe: checks dispatch loop, worker availability, and
+  paused state; returns 503 with `checks` dict when not ready
+
+**DDD Ubiquitous Language**
+- `AgentRole(str, Enum)` in `config.py` — replaces `role: str` everywhere; values
+  `WORKER` and `DIRECTOR`; serialises as plain string for backward compatibility
+
+**Orchestrator Use-Case Methods (Hexagonal boundary)**
+- `Orchestrator.get_director() → Agent | None` — encapsulates director lookup
+- `Orchestrator.flush_director_pending() → list[str]` — atomic read-and-clear of
+  buffered worker results; web layer no longer accesses `_director_pending` directly
+
+**Context Engineering**
+- `Task.trace_id: str` — 8-byte hex token auto-generated per task; enables
+  correlation across agent boundaries for post-hoc debugging
+- `_buffer_director_result()` now extracts the final 40 lines of output
+  (tail-based, semantic) instead of hard-cutting at 2 000 characters
+
+**Agent Lifecycle**
+- `Agent._set_idle()` now always publishes `agent_idle` STATUS event, regardless
+  of which code path triggers the IDLE transition; previously only `_run_loop`
+  path emitted this event
+
+### Changed
+
+- `AgentConfig.role` type: `str` → `AgentRole` (backward-compatible via `str` mixin)
+- `OrchestratorConfig` gains `circuit_breaker_threshold` and `circuit_breaker_recovery`
+- `web/app.py` `director_chat` endpoint uses `get_director()` / `flush_director_pending()`
+
+### Tests
+
+- 85 total (64 → 85), all passing
+- New: `tests/test_circuit_breaker.py` — 10 circuit breaker state machine tests
+- New: orchestrator tests for AgentRole enum, Task.trace_id, circuit breaker dispatch
+  integration, `get_director()`, `flush_director_pending()`, bus drop counts
+- New: web app tests for `/healthz` and `/readyz` endpoints
+
+---
+
 ## [0.2.0] — 2026-03-04
 
 ### Added

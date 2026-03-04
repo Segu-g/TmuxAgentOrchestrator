@@ -27,6 +27,7 @@ from webauthn.helpers.structs import (
 
 from tmux_orchestrator.agents.base import Task
 from tmux_orchestrator.bus import Message, MessageType
+from tmux_orchestrator.config import AgentRole
 from tmux_orchestrator.web.ws import WebSocketHub
 
 logger = logging.getLogger(__name__)
@@ -343,18 +344,14 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
 
     @app.post("/director/chat", summary="Send a message to the Director agent", dependencies=[Depends(auth)])
     async def director_chat(body: DirectorChat, wait: bool = False) -> dict:
-        director = next(
-            (a for a in orchestrator._agents.values() if getattr(a, "role", "worker") == "director"),
-            None,
-        )
+        director = orchestrator.get_director()
         if director is None:
             raise HTTPException(status_code=404, detail="No director agent in this session")
 
         task_id = str(uuid.uuid4())
 
         # Prepend any buffered worker results so the Director sees them as context
-        pending = orchestrator._director_pending.copy()
-        orchestrator._director_pending.clear()
+        pending = orchestrator.flush_director_pending()
         if pending:
             notifications = "\n".join(f"  - {p}" for p in pending)
             prompt = f"[Completed worker tasks since last message]\n{notifications}\n\n{body.message}"
@@ -381,6 +378,53 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
         else:
             await director.send_task(task)
             return {"task_id": task_id}
+
+    # ------------------------------------------------------------------
+    # Health probes (no auth required for infrastructure compatibility)
+    # ------------------------------------------------------------------
+
+    @app.get("/healthz", include_in_schema=False)
+    async def liveness() -> dict:
+        """Liveness probe: returns 200 if the event loop is responsive."""
+        return {"status": "ok", "ts": time.time()}
+
+    @app.get("/readyz", include_in_schema=False)
+    async def readiness():
+        """Readiness probe: 200 when the system can accept and dispatch tasks."""
+        checks: dict = {}
+        ready = True
+
+        # Dispatch loop running?
+        dispatch_alive = (
+            orchestrator._dispatch_task is not None
+            and not orchestrator._dispatch_task.done()
+        )
+        checks["dispatch_loop"] = {"ready": dispatch_alive}
+        if not dispatch_alive:
+            ready = False
+
+        # At least one non-error worker?
+        agents = orchestrator.list_agents()
+        workers = [a for a in agents if a.get("role", AgentRole.WORKER) == AgentRole.WORKER]
+        error_workers = [a for a in workers if a["status"] == "ERROR"]
+        agent_ready = len(workers) > 0 and len(error_workers) < len(workers)
+        checks["agents"] = {
+            "ready": agent_ready,
+            "total": len(workers),
+            "error": len(error_workers),
+        }
+        if not agent_ready:
+            ready = False
+
+        # Dispatch not paused?
+        if orchestrator.is_paused:
+            checks["dispatch_paused"] = {"ready": False}
+            ready = False
+
+        return JSONResponse(
+            content={"ready": ready, "checks": checks},
+            status_code=200 if ready else 503,
+        )
 
     # ------------------------------------------------------------------
     # WebSocket — session cookie OR API key query param

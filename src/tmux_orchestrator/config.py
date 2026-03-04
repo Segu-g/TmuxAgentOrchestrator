@@ -4,8 +4,16 @@ from __future__ import annotations
 
 import yaml
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Literal
+
+
+class AgentRole(str, Enum):
+    """Role assigned to an agent in the orchestrator hierarchy."""
+
+    WORKER = "worker"
+    DIRECTOR = "director"
 
 
 @dataclass
@@ -13,7 +21,7 @@ class AgentConfig:
     id: str
     type: Literal["claude_code"]
     isolate: bool = True        # False → share main repo working tree
-    role: str = "worker"        # "worker" | "director"
+    role: AgentRole = AgentRole.WORKER
     task_timeout: int | None = None   # overrides OrchestratorConfig.task_timeout when set
     command: str | None = None  # custom command (defaults to claude CLI)
     # --- Context engineering fields ---
@@ -30,6 +38,8 @@ class OrchestratorConfig:
     task_timeout: int = 120
     mailbox_dir: str = "~/.tmux_orchestrator"
     web_base_url: str = "http://localhost:8000"
+    circuit_breaker_threshold: int = 3
+    circuit_breaker_recovery: float = 60.0
 
 
 def load_config(path: str | Path) -> OrchestratorConfig:
@@ -41,7 +51,7 @@ def load_config(path: str | Path) -> OrchestratorConfig:
             id=a["id"],
             type=a["type"],
             isolate=a.get("isolate", True),
-            role=a.get("role", "worker"),
+            role=AgentRole(a.get("role", "worker")),
             task_timeout=a.get("task_timeout"),
             command=a.get("command"),
             system_prompt=a.get("system_prompt"),
@@ -59,4 +69,6 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         task_timeout=data.get("task_timeout", 120),
         mailbox_dir=data.get("mailbox_dir", "~/.tmux_orchestrator"),
         web_base_url=data.get("web_base_url", "http://localhost:8000"),
+        circuit_breaker_threshold=data.get("circuit_breaker_threshold", 3),
+        circuit_breaker_recovery=data.get("circuit_breaker_recovery", 60.0),
     )

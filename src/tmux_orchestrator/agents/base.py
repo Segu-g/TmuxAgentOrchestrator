@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -36,6 +37,7 @@ class Task:
     prompt: str
     priority: int = 0  # lower = higher priority
     metadata: dict[str, Any] = field(default_factory=dict)
+    trace_id: str = field(default_factory=lambda: secrets.token_hex(8))
 
     def __lt__(self, other: "Task") -> bool:
         return self.priority < other.priority
@@ -237,3 +239,9 @@ class Agent(ABC):
         self._current_task = None
         if self.status not in (AgentStatus.STOPPED, AgentStatus.ERROR):
             self.status = AgentStatus.IDLE
+            # Always publish agent_idle so orchestrator, TUI, and WebSocket hub
+            # receive consistent notification regardless of which code path triggered the transition.
+            asyncio.create_task(
+                self._publish_status_event("agent_idle"),
+                name=f"{self.id}-idle-notify",
+            )

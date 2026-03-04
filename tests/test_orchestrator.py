@@ -48,6 +48,14 @@ class DummyAgent(Agent):
         pass
 
 
+class DummyDirectorAgent(DummyAgent):
+    """DummyAgent with role=director for orchestrator director tests."""
+
+    def __init__(self, agent_id: str, bus: Bus) -> None:
+        super().__init__(agent_id, bus)
+        self.role = "director"
+
+
 def make_config(**kwargs) -> OrchestratorConfig:
     defaults = dict(
         session_name="test",
@@ -504,3 +512,159 @@ async def test_agent_idle_event_published() -> None:
 
     await agent.stop()
     await bus.unsubscribe("__events2__")
+
+
+# ---------------------------------------------------------------------------
+# AgentRole enum and config-level ubiquitous language
+# ---------------------------------------------------------------------------
+
+
+def test_agent_role_enum_values() -> None:
+    from tmux_orchestrator.config import AgentRole
+    assert AgentRole.WORKER.value == "worker"
+    assert AgentRole.DIRECTOR.value == "director"
+
+
+def test_agent_role_serialises_as_string() -> None:
+    from tmux_orchestrator.config import AgentRole
+    import json
+    data = {"role": AgentRole.WORKER}
+    assert json.dumps(data) == '{"role": "worker"}'
+
+
+def test_agent_role_from_string() -> None:
+    from tmux_orchestrator.config import AgentRole
+    assert AgentRole("worker") == AgentRole.WORKER
+    assert AgentRole("director") == AgentRole.DIRECTOR
+
+
+# ---------------------------------------------------------------------------
+# Task.trace_id
+# ---------------------------------------------------------------------------
+
+
+def test_task_trace_id_auto_generated() -> None:
+    t = Task(id="t1", prompt="hello")
+    assert t.trace_id
+    assert len(t.trace_id) == 16  # 8 bytes hex
+
+
+def test_task_trace_ids_are_unique() -> None:
+    ids = {Task(id=f"t{i}", prompt="x").trace_id for i in range(20)}
+    assert len(ids) == 20  # no collisions
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator.get_director / flush_director_pending
+# ---------------------------------------------------------------------------
+
+
+async def test_get_director_returns_director_agent() -> None:
+    bus = Bus()
+    tmux = make_tmux_mock()
+    config = make_config()
+    orch = Orchestrator(bus=bus, tmux=tmux, config=config)
+
+    worker = DummyAgent("w1", bus)
+    director = DummyDirectorAgent("d1", bus)
+    orch.register_agent(worker)
+    orch.register_agent(director)
+
+    assert orch.get_director() is director
+
+
+def test_get_director_returns_none_when_no_director() -> None:
+    from unittest.mock import MagicMock
+    bus = Bus()
+    tmux = make_tmux_mock()
+    config = make_config()
+    orch = Orchestrator(bus=bus, tmux=tmux, config=config)
+
+    worker = DummyAgent("w1", bus)
+    orch.register_agent(worker)
+
+    assert orch.get_director() is None
+
+
+def test_flush_director_pending_returns_and_clears() -> None:
+    from unittest.mock import MagicMock
+    bus = Bus()
+    tmux = make_tmux_mock()
+    config = make_config()
+    orch = Orchestrator(bus=bus, tmux=tmux, config=config)
+
+    orch._director_pending = ["result-a", "result-b"]
+    items = orch.flush_director_pending()
+    assert items == ["result-a", "result-b"]
+    assert orch._director_pending == []
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker in dispatch
+# ---------------------------------------------------------------------------
+
+
+async def test_circuit_breaker_blocks_errored_agent() -> None:
+    """An agent whose circuit is OPEN should not receive dispatched tasks."""
+    bus = Bus()
+    tmux = make_tmux_mock()
+    config = make_config()
+    orch = Orchestrator(bus=bus, tmux=tmux, config=config)
+
+    agent = DummyAgent("cb-worker", bus)
+    orch.register_agent(agent)
+
+    # Manually trip the circuit breaker
+    for _ in range(config.circuit_breaker_threshold):
+        orch._breakers["cb-worker"].record_failure()
+
+    assert not orch._breakers["cb-worker"].is_allowed()
+    # _find_idle_agent should skip this agent
+    agent.status = AgentStatus.IDLE
+    found = orch._find_idle_agent()
+    assert found is None
+
+
+async def test_circuit_breaker_closes_after_success() -> None:
+    """After a probe succeeds in HALF_OPEN, the circuit breaker returns to CLOSED."""
+    import time
+    bus = Bus()
+    tmux = make_tmux_mock()
+    config = make_config(circuit_breaker_threshold=1, circuit_breaker_recovery=300.0)
+    orch = Orchestrator(bus=bus, tmux=tmux, config=config)
+
+    agent = DummyAgent("cb-w2", bus)
+    orch.register_agent(agent)
+
+    cb = orch._breakers["cb-w2"]
+    cb.record_failure()  # OPEN (recovery=300s so still blocked)
+    assert not cb.is_allowed()  # OPEN, timeout not elapsed
+
+    # Back-date opened_at to simulate timeout elapsed
+    cb._opened_at = time.monotonic() - 400.0
+    assert cb.is_allowed()  # → HALF_OPEN (first call transitions)
+    cb.record_success()  # → CLOSED
+    assert cb.is_allowed()
+    from tmux_orchestrator.circuit_breaker import BreakerState
+    assert cb.state == BreakerState.CLOSED
+
+
+# ---------------------------------------------------------------------------
+# Bus drop count exposed in list_agents
+# ---------------------------------------------------------------------------
+
+
+async def test_list_agents_includes_bus_drops() -> None:
+    bus = Bus()
+    tmux = make_tmux_mock()
+    config = make_config()
+    orch = Orchestrator(bus=bus, tmux=tmux, config=config)
+
+    agent = DummyAgent("drop-agent", bus)
+    orch.register_agent(agent)
+
+    # Simulate a drop on the bus
+    bus._drop_counts["drop-agent"] = 5
+
+    agents = orch.list_agents()
+    assert agents[0]["bus_drops"] == 5

@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 
 from tmux_orchestrator.agents.base import Agent, AgentStatus, Task
 from tmux_orchestrator.bus import BROADCAST, Bus, Message, MessageType
+from tmux_orchestrator.circuit_breaker import CircuitBreaker
+from tmux_orchestrator.config import AgentRole
 from tmux_orchestrator.messaging import Mailbox
 
 if TYPE_CHECKING:
@@ -55,6 +57,8 @@ class Orchestrator:
         self._bus_queue: asyncio.Queue[Message] | None = None
         # Worker results waiting to be injected into the next Director chat turn
         self._director_pending: list[str] = []
+        # Per-agent circuit breakers (keyed by agent id)
+        self._breakers: dict[str, CircuitBreaker] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -95,25 +99,51 @@ class Orchestrator:
         self._agents[agent.id] = agent
         if parent_id is not None:
             self._agent_parents[agent.id] = parent_id
+        self._breakers[agent.id] = CircuitBreaker(
+            agent.id,
+            failure_threshold=self.config.circuit_breaker_threshold,
+            recovery_timeout=self.config.circuit_breaker_recovery,
+        )
         logger.debug("Registered agent %s (parent=%s)", agent.id, parent_id)
 
     def unregister_agent(self, agent_id: str) -> None:
         self._agents.pop(agent_id, None)
+        self._breakers.pop(agent_id, None)
 
     def get_agent(self, agent_id: str) -> Agent | None:
         return self._agents.get(agent_id)
 
     def list_agents(self) -> list[dict]:
+        drop_counts = self.bus.get_drop_counts()
         return [
             {
                 "id": a.id,
                 "status": a.status.value,
                 "current_task": a._current_task.id if a._current_task else None,
-                "role": getattr(a, "role", "worker"),
+                "role": getattr(a, "role", AgentRole.WORKER),
                 "parent_id": self._agent_parents.get(a.id),
+                "bus_drops": drop_counts.get(a.id, 0),
+                "circuit_breaker": self._breakers[a.id].state.value if a.id in self._breakers else None,
             }
             for a in self._agents.values()
         ]
+
+    def get_director(self) -> "Agent | None":
+        """Return the director agent, or None if no director is registered."""
+        return next(
+            (a for a in self._agents.values() if getattr(a, "role", "") == AgentRole.DIRECTOR),
+            None,
+        )
+
+    def flush_director_pending(self) -> list[str]:
+        """Atomically read and clear pending director results.
+
+        Returns all buffered worker result summaries and empties the buffer.
+        Calling this from the HTTP layer avoids direct access to _director_pending.
+        """
+        items = self._director_pending.copy()
+        self._director_pending.clear()
+        return items
 
     # ------------------------------------------------------------------
     # Task submission
@@ -177,7 +207,11 @@ class Orchestrator:
 
     def _find_idle_agent(self) -> Agent | None:
         for agent in self._agents.values():
-            if agent.status == AgentStatus.IDLE and getattr(agent, "role", "worker") == "worker":
+            if (
+                agent.status == AgentStatus.IDLE
+                and getattr(agent, "role", AgentRole.WORKER) == AgentRole.WORKER
+                and self._breakers.get(agent.id, CircuitBreaker(agent.id)).is_allowed()
+            ):
                 return agent
         return None
 
@@ -198,6 +232,13 @@ class Orchestrator:
                 asyncio.create_task(self._handle_control(msg))
             elif msg.type == MessageType.RESULT:
                 self._buffer_director_result(msg)
+                # Update circuit breaker for the originating agent
+                from_id = msg.from_id
+                if from_id in self._breakers:
+                    if msg.payload.get("error"):
+                        self._breakers[from_id].record_failure()
+                    else:
+                        self._breakers[from_id].record_success()
             self._bus_queue.task_done()
 
     def _buffer_director_result(self, result_msg: Message) -> None:
@@ -207,7 +248,7 @@ class Orchestrator:
         into its tmux pane mid-session.  Instead, the pending summaries are
         prepended to the next message the user sends via POST /director/chat.
         """
-        if not any(getattr(a, "role", "worker") == "director" for a in self._agents.values()):
+        if not any(getattr(a, "role", AgentRole.WORKER) == AgentRole.DIRECTOR for a in self._agents.values()):
             return
         payload = result_msg.payload
         agent_id = result_msg.from_id
@@ -217,10 +258,16 @@ class Orchestrator:
             summary = f"[agent={agent_id} task={task_id}] ERROR: {error}"
         else:
             output = payload.get("output") or ""
-            # Truncate very long outputs to avoid bloating the Director's context
-            if len(output) > 2000:
-                output = output[:2000] + "\n…(truncated)"
-            summary = f"[agent={agent_id} task={task_id}]\n{output}"
+            lines = output.splitlines()
+            total_lines = len(lines)
+            # Take the final 40 lines (typically contains conclusion + prompt)
+            # rather than hard-cutting at a character boundary
+            TAIL_LINES = 40
+            if len(lines) > TAIL_LINES:
+                tail = "\n".join(lines[-TAIL_LINES:])
+                summary = f"[agent={agent_id} task={task_id} lines={TAIL_LINES}/{total_lines}]\n{tail}"
+            else:
+                summary = f"[agent={agent_id} task={task_id}]\n{output}"
         self._director_pending.append(summary)
         logger.debug("Buffered worker result for director: agent=%s task=%s", agent_id, task_id)
 

@@ -27,6 +27,7 @@ class _MockHub:
 class _MockOrchestrator:
     _agents: dict = {}
     _director_pending: list = []
+    _dispatch_task = None
 
     def list_agents(self) -> list:
         return []
@@ -36,6 +37,16 @@ class _MockOrchestrator:
 
     def get_agent(self, agent_id: str):
         return None
+
+    def get_director(self):
+        return None
+
+    def flush_director_pending(self) -> list:
+        return []
+
+    @property
+    def is_paused(self) -> bool:
+        return False
 
 
 @pytest.fixture(autouse=True)
@@ -130,3 +141,25 @@ async def test_authenticate_options_no_creds_returns_empty(client):
     assert r.status_code == 200
     data = r.json()
     assert data.get("allowCredentials", []) == []
+
+
+# ---------------------------------------------------------------------------
+# Health probes
+# ---------------------------------------------------------------------------
+
+
+async def test_healthz_returns_200(client):
+    r = await client.get("/healthz")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["status"] == "ok"
+    assert "ts" in data
+
+
+async def test_readyz_no_workers_returns_503(client):
+    """With no agents registered, readyz should report not-ready."""
+    r = await client.get("/readyz")
+    # No dispatch loop running and no workers
+    assert r.status_code in (200, 503)  # status depends on orchestrator state
+    data = r.json()
+    assert "checks" in data

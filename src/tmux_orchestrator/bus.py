@@ -57,6 +57,7 @@ class Bus:
         self._queues: dict[str, asyncio.Queue[Message]] = {}
         self._broadcast_queues: set[str] = set()
         self._lock = asyncio.Lock()
+        self._drop_counts: dict[str, int] = {}  # subscriber_id → count of dropped messages
 
     async def subscribe(
         self, agent_id: str, *, broadcast: bool = False, maxsize: int = 256
@@ -92,7 +93,16 @@ class Bus:
                 try:
                     q.put_nowait(msg)
                 except asyncio.QueueFull:
-                    logger.warning("Queue full for subscriber %s; dropping msg", sub_id)
+                    self._drop_counts[sub_id] = self._drop_counts.get(sub_id, 0) + 1
+                    logger.warning(
+                        "Bus queue full for subscriber %s — dropped message (total drops: %d)",
+                        sub_id,
+                        self._drop_counts[sub_id],
+                    )
+
+    def get_drop_counts(self) -> dict[str, int]:
+        """Return a snapshot of per-subscriber message drop counts."""
+        return dict(self._drop_counts)
 
     async def iter_messages(self, queue: asyncio.Queue[Message]) -> AsyncIterator[Message]:
         """Async-iterate over messages from a previously subscribed queue."""
