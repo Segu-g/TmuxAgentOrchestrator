@@ -53,6 +53,10 @@ class ClaudeCodeAgent(Agent):
         web_base_url: str = "http://localhost:8000",
         task_timeout: float | None = None,
         role: str = "worker",
+        parent_pane: "libtmux.Pane | None" = None,
+        # --- Context engineering ---
+        system_prompt: str | None = None,
+        context_files: list[str] | None = None,
     ) -> None:
         super().__init__(agent_id, bus, task_timeout=task_timeout)
         self.mailbox = mailbox
@@ -66,18 +70,32 @@ class ClaudeCodeAgent(Agent):
         self._session_name = session_name
         self._web_base_url = web_base_url
         self.role = role
+        # When set, the agent is a sub-agent and shares its parent's tmux window
+        self._parent_pane: "libtmux.Pane | None" = parent_pane
+        # Context engineering: per-agent context localization
+        self._system_prompt: str | None = system_prompt
+        self._context_files: list[str] = context_files or []
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        loop = asyncio.get_event_loop()
-        pane = await loop.run_in_executor(None, self._tmux.new_pane, self.id)
+        loop = asyncio.get_running_loop()
+        if self._parent_pane is not None:
+            # Sub-agent: split the parent's window to stay in the same tmux window
+            pane = await loop.run_in_executor(
+                None, self._tmux.new_subpane, self._parent_pane, self.id
+            )
+        else:
+            # Top-level agent: each gets its own tmux window
+            pane = await loop.run_in_executor(None, self._tmux.new_pane, self.id)
         self.pane = pane
         cwd = await self._setup_worktree()
         if cwd is not None:
             await loop.run_in_executor(None, self._write_context_file, cwd)
+            await loop.run_in_executor(None, self._write_agent_claude_md, cwd)
+            await loop.run_in_executor(None, self._write_notes_template, cwd)
         launch = (
             f"cd {shlex.quote(str(cwd))} && {self._command}" if cwd else self._command
         )
@@ -97,6 +115,169 @@ class ClaudeCodeAgent(Agent):
     def _context_extras(self) -> dict[str, Any]:
         return {"session_name": self._session_name, "web_base_url": self._web_base_url}
 
+    # ------------------------------------------------------------------
+    # Context localization — writes agent-specific files to worktree
+    # ------------------------------------------------------------------
+
+    def _write_agent_claude_md(self, cwd: Path) -> None:
+        """Write an agent-specific CLAUDE.md to the worktree.
+
+        This is the primary mechanism for **context localization**: each agent
+        receives a focused, role-appropriate set of instructions rather than a
+        generic prompt, minimising irrelevant tokens and 'context rot'.
+
+        Content structure (Context Engineering principle: right-altitude guidance):
+        - Role and identity (who this agent is in the hierarchy)
+        - Communication protocol (how to receive/send messages)
+        - Working conventions (TDD, note-taking, progress reporting)
+        - Custom system_prompt if provided in config
+        """
+        api = self._web_base_url
+        parent_section = (
+            f"Your parent agent is the agent that spawned you. "
+            f"Report progress and results upward using `/progress` or `/send-message`."
+            if self._parent_pane is not None
+            else "You are a top-level agent. Report results to the orchestrator."
+        )
+
+        role_desc = {
+            "director": (
+                "You are the **Director** agent. Your responsibilities:\n"
+                "- Discuss project goals with the user via the web UI chat\n"
+                "- Break goals into concrete subtasks\n"
+                "- Delegate subtasks to workers via `POST /tasks` or `/spawn-subagent`\n"
+                "- Aggregate worker results and report back to the user\n"
+                "- Use `/plan` before starting complex coordination work"
+            ),
+            "worker": (
+                "You are a **Worker** agent. Your responsibilities:\n"
+                "- Receive tasks from the orchestrator queue or from your parent agent\n"
+                "- Implement tasks using TDD: write tests first, then implement\n"
+                "- Use `/plan` to break large tasks into steps before starting\n"
+                "- Report completion via `/progress` when done\n"
+                "- Spawn sub-agents via `/spawn-subagent` if the task is parallelisable"
+            ),
+        }.get(self.role, f"You are a **{self.role}** agent.")
+
+        context_files_section = ""
+        if self._context_files:
+            files_list = "\n".join(f"- `{f}`" for f in self._context_files)
+            context_files_section = (
+                f"\n## Pre-loaded Context Files\n\n"
+                f"The following files contain relevant context for your tasks:\n\n"
+                f"{files_list}\n\n"
+                f"Read these at startup to understand the project state.\n"
+            )
+
+        custom_section = (
+            f"\n## Role-Specific Instructions\n\n{self._system_prompt}\n"
+            if self._system_prompt
+            else ""
+        )
+
+        content = f"""\
+# Agent: {self.id}
+
+> This file is auto-generated by TmuxAgentOrchestrator. Do not edit manually.
+> It defines your identity, communication protocol, and working conventions.
+
+## Identity
+
+- **Agent ID**: `{self.id}`
+- **Role**: `{self.role}`
+- **Session**: `{self._session_name}`
+- **Orchestrator API**: {api}
+
+{role_desc}
+
+{parent_section}
+
+## Communication Protocol
+
+### Receiving messages
+When you see `__MSG__:<id>` typed into your pane, a message has arrived:
+1. Run `/check-inbox` — list unread messages
+2. Run `/read-message <id>` — read and mark as read
+
+### Sending messages
+- `/send-message <agent_id> <text>` — send to a specific agent
+- Hierarchy rules: you may freely message your parent, your children, and your
+  siblings (agents at the same level). Cross-branch communication requires
+  explicit permission from the orchestrator config.
+
+### Spawning helpers
+- `/spawn-subagent <template_id>` — spawn a sub-agent in your tmux window
+- `/list-agents` — list all agents and their status
+
+### Reporting progress
+- `/progress <summary>` — send a progress update to your parent agent
+
+## Working Conventions
+
+### Test-Driven Development (TDD)
+Follow the Red → Green → Refactor cycle for all implementation work:
+1. **Spec**: Use `/plan` to write acceptance criteria before coding
+2. **Red**: Write a failing test that captures the requirement
+3. **Green**: Write the minimal code to make the test pass
+4. **Refactor**: Improve code quality without changing behaviour
+5. Run tests frequently; never commit failing tests
+
+### Structured Note-Taking
+Maintain `NOTES.md` in your working directory. Update it as you work:
+- Key decisions and their rationale
+- Completed steps and outstanding work
+- Blockers and open questions
+Use `/summarize` to compress your progress into NOTES.md when context grows large.
+
+### Task Planning
+Use `/plan <description>` before starting any non-trivial task. This writes a
+`PLAN.md` with steps, acceptance criteria, and test strategy.
+
+## Context Management
+
+- Your working directory: `{cwd}` (isolated worktree, branch: `worktree/{self.id}`)
+- Context file: `__orchestrator_context__.json` (agent_id, mailbox, web_base_url)
+- Notes file: `NOTES.md` (your structured scratchpad — keep it updated)
+- Plan file: `PLAN.md` (created by `/plan`, deleted when task is done)
+{context_files_section}{custom_section}
+## Slash Command Reference
+
+| Command | Usage | Purpose |
+|---|---|---|
+| `/check-inbox` | `/check-inbox` | List unread messages |
+| `/read-message` | `/read-message <id>` | Read a message in full |
+| `/send-message` | `/send-message <agent_id> <text>` | Send a message |
+| `/spawn-subagent` | `/spawn-subagent <template_id>` | Spawn a sub-agent |
+| `/list-agents` | `/list-agents` | Show all agent statuses |
+| `/plan` | `/plan <description>` | Write PLAN.md before implementing |
+| `/tdd` | `/tdd <feature>` | Start a TDD cycle for a feature |
+| `/progress` | `/progress <summary>` | Report progress to parent |
+| `/summarize` | `/summarize` | Compress context → NOTES.md |
+| `/delegate` | `/delegate <task>` | Spawn sub-agents and assign subtasks |
+"""
+        claude_md_path = cwd / "CLAUDE.md"
+        claude_md_path.write_text(content)
+        logger.debug("Agent %s wrote CLAUDE.md to %s", self.id, cwd)
+
+    def _write_notes_template(self, cwd: Path) -> None:
+        """Write an initial NOTES.md template for structured note-taking."""
+        notes_path = cwd / "NOTES.md"
+        if notes_path.exists():
+            return  # Don't overwrite existing notes
+        notes_path.write_text(
+            f"# Agent Notes — {self.id}\n\n"
+            "## Current Task\n\n"
+            "_No task assigned yet._\n\n"
+            "## Key Decisions\n\n"
+            "_Record important design choices and their rationale here._\n\n"
+            "## Progress\n\n"
+            "- [ ] Task received\n\n"
+            "## Blockers\n\n"
+            "_None._\n\n"
+            "## Completed\n\n"
+            "_Nothing yet._\n"
+        )
+
     def _director_startup_prompt(self) -> str:
         api = self._web_base_url
         return (
@@ -113,11 +294,15 @@ class ClaudeCodeAgent(Agent):
             f"(read it with the Read tool for agent IDs and details).\n"
             f"Incoming worker results will appear as mailbox notifications (__MSG__:<id>).\n\n"
             f"Wait for the user. When they describe what they want built:\n"
-            f"1. Ask clarifying questions if needed\n"
-            f"2. Break the work into concrete subtasks\n"
-            f"3. Submit each subtask to a worker via the API above\n"
-            f"4. Monitor progress and report back to the user"
+            f"1. Use /plan to break the work into concrete subtasks with acceptance criteria\n"
+            f"2. Submit each subtask to a worker via the API above\n"
+            f"3. Monitor progress via /list-agents and worker messages\n"
+            f"4. Report results back to the user"
         )
+
+    # ------------------------------------------------------------------
+    # Lifecycle — stop
+    # ------------------------------------------------------------------
 
     async def stop(self) -> None:
         self.status = AgentStatus.STOPPED
@@ -126,7 +311,7 @@ class ClaudeCodeAgent(Agent):
         if self._msg_task:
             self._msg_task.cancel()
         if self.pane:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 None, self._tmux.send_keys, self.pane, "q", True
             )
@@ -142,7 +327,7 @@ class ClaudeCodeAgent(Agent):
     async def _dispatch_task(self, task: Task) -> None:
         if self.pane is None:
             raise RuntimeError(f"Agent {self.id} has no pane")
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             None, self._tmux.send_keys, self.pane, task.prompt
         )
@@ -158,7 +343,7 @@ class ClaudeCodeAgent(Agent):
         prev = ""
         while True:
             await asyncio.sleep(_POLL_INTERVAL)
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             text = await loop.run_in_executor(None, self._tmux.capture_pane, self.pane)
             # Auto-accept the workspace trust dialog ("Yes, I trust this folder")
             if "I trust this folder" in text and "Enter to confirm" in text:
@@ -181,7 +366,7 @@ class ClaudeCodeAgent(Agent):
         prev = ""
         while True:
             await asyncio.sleep(_POLL_INTERVAL)
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             text = await loop.run_in_executor(
                 None, self._tmux.capture_pane, self.pane
             )
@@ -213,7 +398,7 @@ class ClaudeCodeAgent(Agent):
         """Send *notification* to the tmux pane via send_keys."""
         if self.pane is None:
             return
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             None, self._tmux.send_keys, self.pane, notification
         )

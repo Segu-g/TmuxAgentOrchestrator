@@ -12,8 +12,13 @@ from typing import Literal
 class AgentConfig:
     id: str
     type: Literal["claude_code"]
-    isolate: bool = True  # False → share main repo working tree
-    role: str = "worker"  # "worker" | "director"
+    isolate: bool = True        # False → share main repo working tree
+    role: str = "worker"        # "worker" | "director"
+    task_timeout: int | None = None   # overrides OrchestratorConfig.task_timeout when set
+    command: str | None = None  # custom command (defaults to claude CLI)
+    # --- Context engineering fields ---
+    system_prompt: str | None = None  # injected into agent's CLAUDE.md at startup
+    context_files: list[str] = field(default_factory=list)  # paths (relative to cwd) to pre-load
 
 
 @dataclass
@@ -37,6 +42,10 @@ def load_config(path: str | Path) -> OrchestratorConfig:
             type=a["type"],
             isolate=a.get("isolate", True),
             role=a.get("role", "worker"),
+            task_timeout=a.get("task_timeout"),
+            command=a.get("command"),
+            system_prompt=a.get("system_prompt"),
+            context_files=a.get("context_files", []),
         )
         for a in data.get("agents", [])
     ]

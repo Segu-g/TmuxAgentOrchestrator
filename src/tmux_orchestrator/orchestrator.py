@@ -42,6 +42,8 @@ class Orchestrator:
         self.config = config
         self._worktree_manager = worktree_manager
         self._agents: dict[str, Agent] = {}
+        # agent_id → parent_id (only set for dynamically spawned sub-agents)
+        self._agent_parents: dict[str, str] = {}
         # Priority queue: (priority, task) — lower priority value = dispatched first
         self._task_queue: asyncio.PriorityQueue[tuple[int, Task]] = asyncio.PriorityQueue()
         self._p2p: set[frozenset[str]] = {
@@ -89,9 +91,11 @@ class Orchestrator:
     # Agent registry
     # ------------------------------------------------------------------
 
-    def register_agent(self, agent: Agent) -> None:
+    def register_agent(self, agent: Agent, *, parent_id: str | None = None) -> None:
         self._agents[agent.id] = agent
-        logger.debug("Registered agent %s", agent.id)
+        if parent_id is not None:
+            self._agent_parents[agent.id] = parent_id
+        logger.debug("Registered agent %s (parent=%s)", agent.id, parent_id)
 
     def unregister_agent(self, agent_id: str) -> None:
         self._agents.pop(agent_id, None)
@@ -106,6 +110,7 @@ class Orchestrator:
                 "status": a.status.value,
                 "current_task": a._current_task.id if a._current_task else None,
                 "role": getattr(a, "role", "worker"),
+                "parent_id": self._agent_parents.get(a.id),
             }
             for a in self._agents.values()
         ]
@@ -204,23 +209,70 @@ class Orchestrator:
         """
         if not any(getattr(a, "role", "worker") == "director" for a in self._agents.values()):
             return
-        summary = (
-            f"agent={result_msg.from_id} "
-            f"task_id={result_msg.payload.get('task_id', '?')}"
-        )
+        payload = result_msg.payload
+        agent_id = result_msg.from_id
+        task_id = payload.get("task_id", "?")
+        error = payload.get("error")
+        if error:
+            summary = f"[agent={agent_id} task={task_id}] ERROR: {error}"
+        else:
+            output = payload.get("output") or ""
+            # Truncate very long outputs to avoid bloating the Director's context
+            if len(output) > 2000:
+                output = output[:2000] + "\n…(truncated)"
+            summary = f"[agent={agent_id} task={task_id}]\n{output}"
         self._director_pending.append(summary)
-        logger.debug("Buffered worker result for director: %s", summary)
+        logger.debug("Buffered worker result for director: agent=%s task=%s", agent_id, task_id)
+
+    def _is_hierarchy_permitted(self, from_id: str, to_id: str) -> bool:
+        """Return True when *from_id* and *to_id* are in a natural hierarchy relationship.
+
+        Permitted relationships (both agents must be registered):
+        - **Parent → child**: from_id is the registered parent of to_id
+        - **Child → parent**: to_id is the registered parent of from_id
+        - **Siblings**: both agents share the same parent (including both being
+          root-level agents with no recorded parent, i.e. defined in the YAML config)
+        """
+        if from_id not in self._agents or to_id not in self._agents:
+            return False
+        from_parent = self._agent_parents.get(from_id)  # None → root-level agent
+        to_parent = self._agent_parents.get(to_id)      # None → root-level agent
+        # Parent → child
+        if from_id == to_parent:
+            return True
+        # Child → parent
+        if to_id == from_parent:
+            return True
+        # Siblings (including both root-level: from_parent == to_parent == None)
+        if from_parent == to_parent:
+            return True
+        return False
 
     async def route_message(self, msg: Message) -> None:
         """Forward a PEER_MSG if the sender/receiver pair is permitted.
 
-        ``__user__`` (Web API) is always permitted to reach any agent.
+        Permission is granted when ANY of the following holds:
+        1. ``from_id == "__user__"`` — Web API always reaches any agent.
+        2. The pair is listed in ``p2p_permissions`` (explicit cross-hierarchy override).
+        3. The agents are in a natural hierarchy relationship: parent↔child or siblings
+           (agents sharing the same parent, including root-level agents).
+
+        The hierarchy rules cover the common case without requiring every pair to be
+        declared in the config.  The explicit table is an escape hatch for lateral
+        or cross-branch communication.
         """
         if msg.from_id == "__user__":
             permitted = True
+            reason = "user"
+        elif frozenset({msg.from_id, msg.to_id}) in self._p2p:
+            permitted = True
+            reason = "explicit"
+        elif self._is_hierarchy_permitted(msg.from_id, msg.to_id):
+            permitted = True
+            reason = "hierarchy"
         else:
-            pair = frozenset({msg.from_id, msg.to_id})
-            permitted = pair in self._p2p
+            permitted = False
+            reason = "blocked"
 
         if permitted:
             # Mark as forwarded so the route loop doesn't re-process it.
@@ -231,10 +283,10 @@ class Orchestrator:
                 payload={**msg.payload, "_forwarded": True},
             )
             await self.bus.publish(routed)
-            logger.debug("P2P %s → %s forwarded", msg.from_id, msg.to_id)
+            logger.debug("P2P %s → %s forwarded (%s)", msg.from_id, msg.to_id, reason)
         else:
             logger.warning(
-                "P2P %s → %s blocked (not in permission table)",
+                "P2P %s → %s blocked (not in hierarchy or permission table)",
                 msg.from_id,
                 msg.to_id,
             )
@@ -283,15 +335,19 @@ class Orchestrator:
         sub_id = f"{parent_id}-sub-{uuid.uuid4().hex[:6]}"
         mailbox = Mailbox(self.config.mailbox_dir, self.config.session_name)
 
+        # Resolve parent agent once for both cwd_override and parent_pane
+        parent_agent = self._agents.get(parent_id)
+
         # Determine cwd_override for share_parent_worktree option.
         cwd_override: _Path | None = None
-        if share_parent:
-            parent_agent = self._agents.get(parent_id)
-            if parent_agent is not None:
-                cwd_override = parent_agent.worktree_path
+        if share_parent and parent_agent is not None:
+            cwd_override = parent_agent.worktree_path
 
         # When cwd_override is provided, no worktree management is needed.
         effective_wm = self._worktree_manager if cwd_override is None else None
+
+        # Sub-agent shares its parent's tmux window (pane-level hierarchy)
+        parent_pane = parent_agent.pane if parent_agent is not None else None
 
         agent: Agent = ClaudeCodeAgent(
             agent_id=sub_id,
@@ -303,10 +359,17 @@ class Orchestrator:
             cwd_override=cwd_override,
             session_name=self.config.session_name,
             web_base_url=self.config.web_base_url,
-            task_timeout=self.config.task_timeout,
+            task_timeout=template_cfg.task_timeout if template_cfg.task_timeout is not None else self.config.task_timeout,
+            role=template_cfg.role,
+            command=template_cfg.command or "env -u CLAUDECODE claude --dangerously-skip-permissions",
+            parent_pane=parent_pane,
+            system_prompt=template_cfg.system_prompt,
+            context_files=template_cfg.context_files,
         )
 
-        self.register_agent(agent)
+        self.register_agent(agent, parent_id=parent_id)
+        # Explicit P2P is no longer needed for parent↔child (auto-permitted by hierarchy),
+        # but we add it for robustness and backward compatibility.
         self._p2p.add(frozenset({parent_id, sub_id}))
         await agent.start()
 

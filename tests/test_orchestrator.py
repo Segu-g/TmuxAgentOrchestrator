@@ -139,13 +139,14 @@ async def test_p2p_allowed() -> None:
 
 
 async def test_p2p_blocked() -> None:
-    """P2P message between non-permitted agents is dropped."""
+    """P2P message between unregistered agents with no explicit permission is dropped."""
     bus = Bus()
     tmux = make_tmux_mock()
     config = make_config(p2p_permissions=[])
     orch = Orchestrator(bus=bus, tmux=tmux, config=config)
     await orch.start()
 
+    # "a" and "b" are NOT registered — hierarchy check requires registration
     q_b = await bus.subscribe("b")
     try:
         blocked_msg = Message(
@@ -157,6 +158,169 @@ async def test_p2p_blocked() -> None:
         await orch.route_message(blocked_msg)
         await asyncio.sleep(0.1)
         assert q_b.qsize() == 0
+    finally:
+        await orch.stop()
+
+
+async def test_p2p_siblings_auto_permitted() -> None:
+    """Root-level agents (no parent) are treated as siblings and may message each other."""
+    bus = Bus()
+    tmux = make_tmux_mock()
+    config = make_config(p2p_permissions=[])  # no explicit P2P config
+    orch = Orchestrator(bus=bus, tmux=tmux, config=config)
+
+    a1 = DummyAgent("sib-1", bus)
+    a2 = DummyAgent("sib-2", bus)
+    orch.register_agent(a1)  # root-level, parent_id=None
+    orch.register_agent(a2)  # root-level, parent_id=None
+
+    await orch.start()
+    q_a2 = await bus.subscribe("sib-2")
+    try:
+        msg = Message(
+            type=MessageType.PEER_MSG,
+            from_id="sib-1",
+            to_id="sib-2",
+            payload={"data": "hello sibling"},
+        )
+        await orch.route_message(msg)
+        await asyncio.sleep(0.1)
+        assert q_a2.qsize() == 1
+        received = q_a2.get_nowait()
+        assert received.payload["data"] == "hello sibling"
+    finally:
+        await orch.stop()
+
+
+async def test_p2p_parent_child_auto_permitted() -> None:
+    """Parent → child and child → parent are auto-permitted by hierarchy."""
+    bus = Bus()
+    tmux = make_tmux_mock()
+    config = make_config(p2p_permissions=[])
+    orch = Orchestrator(bus=bus, tmux=tmux, config=config)
+
+    parent = DummyAgent("parent", bus)
+    child = DummyAgent("child", bus)
+    orch.register_agent(parent)
+    orch.register_agent(child, parent_id="parent")
+
+    await orch.start()
+    q_parent = await bus.subscribe("parent")
+    q_child = await bus.subscribe("child")
+    try:
+        # Parent → child
+        await orch.route_message(Message(
+            type=MessageType.PEER_MSG,
+            from_id="parent", to_id="child",
+            payload={"dir": "down"},
+        ))
+        # Child → parent
+        await orch.route_message(Message(
+            type=MessageType.PEER_MSG,
+            from_id="child", to_id="parent",
+            payload={"dir": "up"},
+        ))
+        await asyncio.sleep(0.1)
+        assert q_child.qsize() == 1
+        assert q_parent.qsize() == 1
+    finally:
+        await orch.stop()
+
+
+async def test_p2p_cross_branch_blocked_without_explicit() -> None:
+    """Agents in different branches of the hierarchy cannot communicate without explicit P2P."""
+    bus = Bus()
+    tmux = make_tmux_mock()
+    config = make_config(p2p_permissions=[])
+    orch = Orchestrator(bus=bus, tmux=tmux, config=config)
+
+    root = DummyAgent("root", bus)
+    branch_a = DummyAgent("branch-a", bus)
+    branch_b = DummyAgent("branch-b", bus)
+    orch.register_agent(root)
+    orch.register_agent(branch_a, parent_id="root")
+    orch.register_agent(branch_b, parent_id="root")
+
+    await orch.start()
+    q_b = await bus.subscribe("branch-b")
+    try:
+        # branch-a → branch-b: both children of root, so they ARE siblings → permitted
+        await orch.route_message(Message(
+            type=MessageType.PEER_MSG,
+            from_id="branch-a", to_id="branch-b",
+            payload={"test": "sibling via root"},
+        ))
+        await asyncio.sleep(0.1)
+        # branch-a and branch-b share parent "root" → siblings → allowed
+        assert q_b.qsize() == 1
+    finally:
+        await orch.stop()
+
+
+async def test_p2p_cross_branch_deep_blocked() -> None:
+    """Agents in different deep branches need explicit P2P permission."""
+    bus = Bus()
+    tmux = make_tmux_mock()
+    config = make_config(p2p_permissions=[])
+    orch = Orchestrator(bus=bus, tmux=tmux, config=config)
+
+    root = DummyAgent("root", bus)
+    branch_a = DummyAgent("branch-a", bus)
+    branch_b = DummyAgent("branch-b", bus)
+    leaf_a = DummyAgent("leaf-a", bus)   # child of branch-a
+    leaf_b = DummyAgent("leaf-b", bus)   # child of branch-b
+    orch.register_agent(root)
+    orch.register_agent(branch_a, parent_id="root")
+    orch.register_agent(branch_b, parent_id="root")
+    orch.register_agent(leaf_a, parent_id="branch-a")
+    orch.register_agent(leaf_b, parent_id="branch-b")
+
+    await orch.start()
+    q_leaf_b = await bus.subscribe("leaf-b")
+    try:
+        # leaf-a → leaf-b: different parents (branch-a vs branch-b) → cross-branch → blocked
+        await orch.route_message(Message(
+            type=MessageType.PEER_MSG,
+            from_id="leaf-a", to_id="leaf-b",
+            payload={"cross": "branch"},
+        ))
+        await asyncio.sleep(0.1)
+        assert q_leaf_b.qsize() == 0
+    finally:
+        await orch.stop()
+
+
+async def test_p2p_cross_branch_explicit_override() -> None:
+    """Cross-branch communication is unlocked by explicit p2p_permissions config."""
+    bus = Bus()
+    tmux = make_tmux_mock()
+    # Explicit lateral permission between leaf-a and leaf-b
+    config = make_config(p2p_permissions=[("leaf-a", "leaf-b")])
+    orch = Orchestrator(bus=bus, tmux=tmux, config=config)
+
+    root = DummyAgent("root", bus)
+    branch_a = DummyAgent("branch-a", bus)
+    branch_b = DummyAgent("branch-b", bus)
+    leaf_a = DummyAgent("leaf-a", bus)
+    leaf_b = DummyAgent("leaf-b", bus)
+    orch.register_agent(root)
+    orch.register_agent(branch_a, parent_id="root")
+    orch.register_agent(branch_b, parent_id="root")
+    orch.register_agent(leaf_a, parent_id="branch-a")
+    orch.register_agent(leaf_b, parent_id="branch-b")
+
+    await orch.start()
+    q_leaf_b = await bus.subscribe("leaf-b")
+    try:
+        await orch.route_message(Message(
+            type=MessageType.PEER_MSG,
+            from_id="leaf-a", to_id="leaf-b",
+            payload={"cross": "explicit"},
+        ))
+        await asyncio.sleep(0.1)
+        assert q_leaf_b.qsize() == 1
+        received = q_leaf_b.get_nowait()
+        assert received.payload["cross"] == "explicit"
     finally:
         await orch.stop()
 

@@ -68,6 +68,10 @@ def _build_system(config_path: Path) -> tuple[Orchestrator, Bus, TmuxInterface]:
 
     for agent_cfg in config.agents:
         if agent_cfg.type == "claude_code":
+            effective_timeout = (
+                agent_cfg.task_timeout if agent_cfg.task_timeout is not None
+                else (config.task_timeout or None)
+            )
             agent = ClaudeCodeAgent(
                 agent_id=agent_cfg.id,
                 bus=bus,
@@ -77,8 +81,11 @@ def _build_system(config_path: Path) -> tuple[Orchestrator, Bus, TmuxInterface]:
                 isolate=agent_cfg.isolate,
                 session_name=config.session_name,
                 web_base_url=config.web_base_url,
-                task_timeout=config.task_timeout or None,
+                task_timeout=effective_timeout,
                 role=agent_cfg.role,
+                command=agent_cfg.command or "env -u CLAUDECODE claude --dangerously-skip-permissions",
+                system_prompt=agent_cfg.system_prompt,
+                context_files=agent_cfg.context_files,
             )
         else:
             typer.echo(f"[error] Unknown agent type: {agent_cfg.type!r}", err=True)
@@ -165,16 +172,16 @@ def web(
     hub = WebSocketHub(bus=bus)
     fastapi_app = create_app(orchestrator=orchestrator, hub=hub, api_key=api_key)
 
-    async def _startup() -> None:
-        await orchestrator.start()
+    # Wire orchestrator start/stop into the FastAPI app's lifespan via event handlers.
+    # create_app already uses lifespan for the WebSocket hub; these hooks extend it.
+    fastapi_app.router.on_startup.append(orchestrator.start)
 
     async def _shutdown() -> None:
         await orchestrator.stop()
         tmux.stop_watcher()
         tmux.kill_session()
 
-    fastapi_app.add_event_handler("startup", _startup)
-    fastapi_app.add_event_handler("shutdown", _shutdown)
+    fastapi_app.router.on_shutdown.append(_shutdown)
 
     display_host = "localhost" if host in ("0.0.0.0", "") else host
     typer.echo(f"Web UI:  http://{display_host}:{port}/")
