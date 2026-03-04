@@ -426,6 +426,11 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
             status_code=200 if ready else 503,
         )
 
+    @app.get("/dlq", summary="Dead letter queue", dependencies=[Depends(auth)])
+    async def dead_letter_queue() -> list:
+        """Return tasks that could not be dispatched after exhausting retries."""
+        return orchestrator.list_dlq()
+
     # ------------------------------------------------------------------
     # WebSocket — session cookie OR API key query param
     # ------------------------------------------------------------------

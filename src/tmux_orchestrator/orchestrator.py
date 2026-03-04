@@ -59,6 +59,8 @@ class Orchestrator:
         self._director_pending: list[str] = []
         # Per-agent circuit breakers (keyed by agent id)
         self._breakers: dict[str, CircuitBreaker] = {}
+        # Dead letter queue: tasks that could not be dispatched after max retries
+        self._dlq: list[dict] = []
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -196,14 +198,51 @@ class Orchestrator:
 
             agent = self._find_idle_agent()
             if agent is None:
-                # No idle agent — put back and wait
-                await self._task_queue.put((task.priority, task))
-                await asyncio.sleep(0.2)
+                # No idle agent — track retry count and re-queue or dead-letter
+                retry_count = task.metadata.get("_retry_count", 0) + 1
+                task.metadata["_retry_count"] = retry_count
+                if retry_count >= self.config.dlq_max_retries:
+                    await self._dead_letter(task, f"no idle agent after {retry_count} retries")
+                else:
+                    await self._task_queue.put((task.priority, task))
+                    await asyncio.sleep(0.2)
                 continue
 
             logger.info("Dispatching task %s → agent %s", task.id, agent.id)
             await agent.send_task(task)
             self._task_queue.task_done()
+
+    async def _dead_letter(self, task: Task, reason: str) -> None:
+        """Move *task* to the dead letter queue and publish a STATUS event."""
+        retry_count = task.metadata.get("_retry_count", 0)
+        entry = {
+            "task_id": task.id,
+            "prompt": task.prompt,
+            "priority": task.priority,
+            "retry_count": retry_count,
+            "reason": reason,
+            "trace_id": task.trace_id,
+        }
+        self._dlq.append(entry)
+        self._task_queue.task_done()
+        await self.bus.publish(Message(
+            type=MessageType.STATUS,
+            from_id="__orchestrator__",
+            payload={
+                "event": "task_dead_lettered",
+                "task_id": task.id,
+                "prompt": task.prompt,
+                "retry_count": retry_count,
+                "reason": reason,
+            },
+        ))
+        logger.warning(
+            "Task %s dead-lettered after %d retries: %s", task.id, retry_count, reason
+        )
+
+    def list_dlq(self) -> list[dict]:
+        """Return the dead letter queue contents (snapshot)."""
+        return list(self._dlq)
 
     def _find_idle_agent(self) -> Agent | None:
         for agent in self._agents.values():

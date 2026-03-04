@@ -40,6 +40,7 @@ class OrchestratorConfig:
     web_base_url: str = "http://localhost:8000"
     circuit_breaker_threshold: int = 3
     circuit_breaker_recovery: float = 60.0
+    dlq_max_retries: int = 50  # re-queue attempts before dead-lettering a task
 
 
 def load_config(path: str | Path) -> OrchestratorConfig:
@@ -71,4 +72,5 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         web_base_url=data.get("web_base_url", "http://localhost:8000"),
         circuit_breaker_threshold=data.get("circuit_breaker_threshold", 3),
         circuit_breaker_recovery=data.get("circuit_breaker_recovery", 60.0),
+        dlq_max_retries=data.get("dlq_max_retries", 50),
     )

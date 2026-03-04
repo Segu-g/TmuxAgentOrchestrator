@@ -149,6 +149,7 @@ def make_config(
     tmp_path: Path,
     agents: list[AgentConfig] | None = None,
     p2p_permissions: list[tuple[str, str]] | None = None,
+    dlq_max_retries: int = 50,
     **kwargs,
 ) -> OrchestratorConfig:
     return OrchestratorConfig(
@@ -157,6 +158,7 @@ def make_config(
         p2p_permissions=p2p_permissions or [],
         task_timeout=5,
         mailbox_dir=str(tmp_path / "mailbox"),
+        dlq_max_retries=dlq_max_retries,
         **kwargs,
     )
 
@@ -347,6 +349,46 @@ async def test_director_result_buffering(tmp_path):
         assert len(orch._director_pending) == 1
         assert "worker-1" in orch._director_pending[0]
         assert task.id in orch._director_pending[0]
+    finally:
+        await orch.stop()
+
+
+# ---------------------------------------------------------------------------
+# Test: Dead letter queue after max retries
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+async def test_task_dead_lettered_when_no_idle_agents(tmp_path):
+    """Tasks exceeding dlq_max_retries with no idle agent go to the DLQ."""
+    bus = Bus()
+    cfg = make_config(tmp_path, dlq_max_retries=3)
+    orch = HeadlessOrchestrator(bus, cfg)
+
+    # Register a worker but keep it BUSY
+    agent = HeadlessAgent("busy-worker", bus)
+    orch.register_agent(agent)
+    await orch.start()
+    agent.status = AgentStatus.BUSY  # force BUSY after start
+
+    try:
+        task = await orch.submit_task("impossible task")
+
+        # Wait for dead-lettered STATUS event
+        dead_letters = await collect_messages(
+            bus,
+            predicate=lambda m: (
+                m.type == MessageType.STATUS
+                and m.payload.get("event") == "task_dead_lettered"
+                and m.payload.get("task_id") == task.id
+            ),
+            timeout=3.0,
+        )
+
+        assert len(dead_letters) == 1
+        assert dead_letters[0].payload["retry_count"] == cfg.dlq_max_retries
+        assert len(orch.list_dlq()) == 1
+        assert orch.list_dlq()[0]["task_id"] == task.id
     finally:
         await orch.stop()
 

@@ -6,6 +6,47 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.4.0] — 2026-03-05
+
+### Added
+
+**Dead Letter Queue**
+- `Orchestrator._dlq: list[dict]` — tasks that could not be dispatched after
+  `dlq_max_retries` re-queue attempts are moved here instead of looping forever
+- `Orchestrator.list_dlq() → list[dict]` — read-only snapshot of dead-lettered tasks
+- `OrchestratorConfig.dlq_max_retries: int` (default: 50) — configurable threshold
+- Publishes `task_dead_lettered` STATUS event when a task is dead-lettered
+- `GET /dlq` REST endpoint exposes the DLQ to operators
+- Integration test: `test_task_dead_lettered_when_no_idle_agents`
+
+**Typed Message Payload Schemas (Pydantic)**
+- New `src/tmux_orchestrator/schemas.py` — Pydantic v2 models for all bus
+  message payload types: `TaskQueuedPayload`, `AgentBusyPayload`, `AgentIdlePayload`,
+  `AgentErrorPayload`, `SubagentSpawnedPayload`, `TaskDeadLetteredPayload`,
+  `TaskResultPayload`, `PeerMessagePayload`, `SpawnSubagentPayload`
+- `parse_status_payload(dict)` / `parse_result_payload(dict)` factory functions
+- Unknown events fall back to `_BasePayload` (forward-compatible via `extra="allow"`)
+
+**Property-Based Tests (Hypothesis)**
+- New `tests/test_properties.py` — 11 property tests verifying invariants:
+  - `Task.trace_id` always 16-char hex
+  - Task trace_ids are unique across all instances
+  - Task ordering consistent with priority for any int pair
+  - Circuit breaker opens exactly at threshold (any threshold 1–5)
+  - Successes in CLOSED state never open the breaker
+  - `parse_result_payload` never raises for any dict with `task_id`
+  - Unknown event schema falls back without raising
+  - Known event schema raises `ValidationError` on missing required fields
+  - Bus drop counts are monotonically non-decreasing
+  - Subscribe/unsubscribe leaves no leaked state
+
+### Tests
+
+- 97 total (85 → 97), all passing
+- Hypothesis found and confirmed: known event schemas correctly reject incomplete payloads
+
+---
+
 ## [0.3.0] — 2026-03-05
 
 ### Added

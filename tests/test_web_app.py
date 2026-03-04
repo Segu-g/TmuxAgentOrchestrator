@@ -44,6 +44,9 @@ class _MockOrchestrator:
     def flush_director_pending(self) -> list:
         return []
 
+    def list_dlq(self) -> list:
+        return []
+
     @property
     def is_paused(self) -> bool:
         return False
