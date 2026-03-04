@@ -50,6 +50,8 @@ class TmuxInterface:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._watcher_thread: threading.Thread | None = None
+        # Event loop reference captured at construction time for thread-safe scheduling
+        self._loop: "asyncio.AbstractEventLoop | None" = None
 
     # ------------------------------------------------------------------
     # Session management
@@ -85,10 +87,28 @@ class TmuxInterface:
             self._session = None
 
     def new_pane(self, agent_id: str = "") -> libtmux.Pane:
-        """Spawn a new window for the agent and return its first pane."""
+        """Spawn a new window for a top-level agent and return its first pane.
+
+        In the session/window/pane hierarchy:
+        - session  → project
+        - window   → top-level agent (or agent group)
+        - pane     → individual agent process
+        """
         session = self.ensure_session()
         window = session.new_window(window_name=agent_id or None, attach=False)
         return window.panes[0]
+
+    def new_subpane(self, parent_pane: libtmux.Pane, agent_id: str = "") -> libtmux.Pane:
+        """Split *parent_pane*'s window to create a pane for a sub-agent.
+
+        Sub-agents are co-located in the same tmux window as their parent,
+        maintaining the visual hierarchy: window = agent group, pane = agent.
+        Returns the newly created pane.
+        """
+        window = parent_pane.window
+        new_pane = window.split(attach=False)
+        logger.debug("Created sub-pane %s for agent %s in window %s", new_pane.id, agent_id, window.id)
+        return new_pane
 
     def get_first_pane(self) -> libtmux.Pane:
         """Return the first (pre-existing) pane of the session."""
@@ -136,9 +156,17 @@ class TmuxInterface:
             self._watched.pop(pane.id, None)
 
     def start_watcher(self) -> None:
-        """Start the background polling thread."""
+        """Start the background polling thread.
+
+        Captures the running event loop so the watcher thread can safely
+        schedule coroutines via ``asyncio.run_coroutine_threadsafe``.
+        """
         if self._watcher_thread and self._watcher_thread.is_alive():
             return
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
         self._stop_event.clear()
         self._watcher_thread = threading.Thread(
             target=self._watch_loop, daemon=True, name="pane-watcher"
@@ -170,9 +198,7 @@ class TmuxInterface:
                         event = PaneOutputEvent(
                             pane_id=pane_id, agent_id=agent_id, text=content
                         )
-                        if self.bus is not None:
-                            import asyncio
-
+                        if self.bus is not None and self._loop is not None:
                             from tmux_orchestrator.bus import Message, MessageType
 
                             msg = Message(
@@ -180,14 +206,9 @@ class TmuxInterface:
                                 from_id=agent_id,
                                 payload={"pane_output": content},
                             )
-                            try:
-                                loop = asyncio.get_event_loop()
-                                if loop.is_running():
-                                    asyncio.run_coroutine_threadsafe(
-                                        self.bus.publish(msg), loop
-                                    )
-                            except RuntimeError:
-                                pass
+                            asyncio.run_coroutine_threadsafe(
+                                self.bus.publish(msg), self._loop
+                            )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Watcher error for pane %s: %s", pane_id, exc)
             time.sleep(POLL_INTERVAL)

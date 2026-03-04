@@ -112,7 +112,7 @@ class Agent(ABC):
     async def _message_loop(self) -> None:
         """Subscribe to the bus and handle messages directed at this agent."""
         q = await self.bus.subscribe(self.id)
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         while True:
             try:
                 msg = await q.get()
@@ -197,7 +197,7 @@ class Agent(ABC):
             return self._cwd_override
         if self._worktree_manager is None:
             return None
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         path: Path = await loop.run_in_executor(
             None,
             lambda: self._worktree_manager.setup(self.id, isolate=self._isolate),  # type: ignore[union-attr]
@@ -209,7 +209,7 @@ class Agent(ABC):
         """Remove the agent's worktree (no-op when not isolated or not set up)."""
         if self._worktree_manager is None or self.worktree_path is None:
             return
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._worktree_manager.teardown, self.id)
         self.worktree_path = None
 

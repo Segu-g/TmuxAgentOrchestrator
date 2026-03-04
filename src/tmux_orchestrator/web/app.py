@@ -9,6 +9,7 @@ import logging
 import secrets
 import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any
 
 import webauthn
@@ -54,8 +55,7 @@ class SendMessage(BaseModel):
 
 class SpawnAgent(BaseModel):
     parent_id: str
-    agent_type: str = "custom"
-    command: str = ""
+    template_id: str
 
 
 class DirectorChat(BaseModel):
@@ -148,25 +148,20 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
     """
     auth = _make_combined_auth(api_key)
 
+    @asynccontextmanager
+    async def _lifespan(application: FastAPI):  # noqa: ARG001
+        await hub.start()
+        logger.info("WebSocket hub started")
+        yield
+        await hub.stop()
+        logger.info("WebSocket hub stopped")
+
     app = FastAPI(
         title="TmuxAgentOrchestrator",
         description="REST + WebSocket API for the tmux agent orchestrator",
         version="0.1.0",
+        lifespan=_lifespan,
     )
-
-    # ------------------------------------------------------------------
-    # Startup / shutdown
-    # ------------------------------------------------------------------
-
-    @app.on_event("startup")
-    async def _startup() -> None:
-        await hub.start()
-        logger.info("WebSocket hub started")
-
-    @app.on_event("shutdown")
-    async def _shutdown() -> None:
-        await hub.stop()
-        logger.info("WebSocket hub stopped")
 
     # ------------------------------------------------------------------
     # Auth endpoints (no auth dependency — public)
@@ -340,12 +335,11 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
             to_id="__orchestrator__",
             payload={
                 "action": "spawn_subagent",
-                "agent_type": body.agent_type,
-                "command": body.command,
+                "template_id": body.template_id,
             },
         )
         await orchestrator.bus.publish(msg)
-        return {"status": "spawning", "parent_id": body.parent_id}
+        return {"status": "spawning", "parent_id": body.parent_id, "template_id": body.template_id}
 
     @app.post("/director/chat", summary="Send a message to the Director agent", dependencies=[Depends(auth)])
     async def director_chat(body: DirectorChat, wait: bool = False) -> dict:
