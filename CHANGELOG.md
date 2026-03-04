@@ -6,6 +6,32 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.7.0] — 2026-03-05
+
+### Added
+
+**Structured JSON logging with trace_id context**
+- New `src/tmux_orchestrator/logging_config.py` — `JsonFormatter`, `bind_trace()`,
+  `bind_agent()`, `unbind()`, `current_trace_id()`, `current_agent_id()`,
+  `setup_json_logging()`, `setup_text_logging()`
+- Uses `contextvars.ContextVar` so every log record produced within a task dispatch
+  call tree automatically includes `trace_id` and `agent_id` — no explicit parameter
+  passing required
+- `agents/base.py._run_loop` binds `task.trace_id` and `self.id` before calling
+  `_dispatch_task` and unbinds in the `finally` block
+- `main.py` adds `--json-logs` flag to `web` and `run` commands; `_setup_logging()`
+  delegates to `setup_json_logging()` or `setup_text_logging()` accordingly
+- `main.py` uses `setup_text_logging()` (force=True) instead of bare `basicConfig`
+  for idempotent reconfiguration
+- New `tests/test_logging_config.py` — 10 tests covering formatter fields,
+  context binding/unbinding, nesting, exception serialisation, and handler setup
+
+### Test count: 133 (up from 123)
+
+Reference: Kleppmann "DDIA" Ch. 11; SRE Book Ch. 16; DESIGN.md §10.5
+
+---
+
 ## [0.6.0] — 2026-03-05
 
 ### Added / Refactored

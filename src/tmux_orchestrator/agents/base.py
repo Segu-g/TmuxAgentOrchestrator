@@ -12,6 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import tmux_orchestrator.logging_config as log_ctx
 from tmux_orchestrator.bus import Message, MessageType
 
 if TYPE_CHECKING:
@@ -137,6 +138,10 @@ class Agent(ABC):
             self._current_task = task
             self.status = AgentStatus.BUSY
             await self._publish_status_event("agent_busy", task_id=task.id)
+            # Bind trace_id and agent_id into the async context so every log record
+            # produced during this task automatically includes these fields.
+            t1 = log_ctx.bind_trace(task.trace_id)
+            t2 = log_ctx.bind_agent(self.id)
             logger.info("Agent %s starting task %s", self.id, task.id)
             try:
                 if self.task_timeout is not None:
@@ -156,6 +161,8 @@ class Agent(ABC):
                 self.status = AgentStatus.ERROR
                 await self._publish_status_event("agent_error", task_id=task.id)
             finally:
+                log_ctx.unbind(t2)
+                log_ctx.unbind(t1)
                 self._task_queue.task_done()
             if self.status == AgentStatus.IDLE:
                 await self._publish_status_event("agent_idle", task_id=task.id)

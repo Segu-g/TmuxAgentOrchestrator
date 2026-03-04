@@ -16,6 +16,7 @@ import typer
 import uvicorn
 
 from tmux_orchestrator.factory import build_system, patch_web_url
+from tmux_orchestrator.logging_config import setup_json_logging, setup_text_logging
 
 app = typer.Typer(
     name="tmux-orchestrator",
@@ -24,14 +25,12 @@ app = typer.Typer(
 )
 
 
-def _setup_logging(verbose: bool) -> None:
+def _setup_logging(verbose: bool, json_logs: bool = False) -> None:
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-        stream=sys.stderr,
-    )
+    if json_logs:
+        setup_json_logging(level)
+    else:
+        setup_text_logging(level)
 
 
 _logger = logging.getLogger(__name__)
@@ -97,9 +96,10 @@ def web(
         typer.Option("--api-key", "-k", help="API key for auth (auto-generated if omitted)"),
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+    json_logs: Annotated[bool, typer.Option("--json-logs", help="Emit structured JSON logs")] = False,
 ) -> None:
     """Launch the FastAPI web server (REST + WebSocket + browser UI)."""
-    _setup_logging(verbose)
+    _setup_logging(verbose, json_logs=json_logs)
     from tmux_orchestrator.web.app import create_app
     from tmux_orchestrator.web.ws import WebSocketHub
 
@@ -139,9 +139,10 @@ def run(
         typer.Option("--prompt", help="Submit a single task and wait for result"),
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+    json_logs: Annotated[bool, typer.Option("--json-logs", help="Emit structured JSON logs")] = False,
 ) -> None:
     """Start agents headlessly; optionally submit one task and print the result."""
-    _setup_logging(verbose)
+    _setup_logging(verbose, json_logs=json_logs)
     logger = logging.getLogger(__name__)
 
     orchestrator, bus, tmux = _build_system(config)
