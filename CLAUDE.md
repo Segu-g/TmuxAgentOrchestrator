@@ -127,6 +127,24 @@ Minimum bar: **2 agents with meaningful interaction** (one agent's output is an 
 another, OR agents communicate via P2P messages, OR a Director coordinates workers).
 A demo where 2 agents write independent files without any coordination does not count.
 
+**Recommended concrete scenario — AtCoder Heuristic Contest (AHC):**
+AHC problems are ideal for best-of-N validation because:
+- The problem statement and scoring function are fully specified (no ambiguity)
+- Multiple agents independently generate solutions using different strategies/seeds
+- Scores are objective and comparable — the orchestrator can deterministically pick the winner
+- Agents can run in true parallel (each tackles the same input, different approach)
+
+Workflow:
+1. Fetch an AHC problem statement (e.g. from atcoder.jp or a local copy)
+2. Spawn N agents (N ≥ 3), each given the same problem + a different strategy hint
+   (e.g. "greedy", "random restart", "simulated annealing")
+3. Each agent writes a solver script and runs it, producing a score
+4. Orchestrator collects scores and selects the highest
+5. Demo verifies: correct number of solutions produced, scores are numeric, winner is selected
+
+Use past AHC problems (e.g. AHC001–AHC030) which are publicly available and have
+well-defined offline scoring tools.
+
 - Document demo results in `~/Demonstration/v<version>-<topic>/build-log.md`:
   - What passed / what failed
   - Root cause of every failure

@@ -533,6 +533,24 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |
 | ~~低~~ ~~Prometheus メトリクス (`/metrics`)~~ | **完了 (v0.13.0)** — `GET /metrics` (prometheus_client 直接使用; 認証不要) |
 
+### デモシナリオ候補
+
+| 優先度 | シナリオ | パターン |
+|--------|----------|---------|
+| **高** | **AtCoder Heuristic Contest (AHC) best-of-N** | Competitive / best-of-N |
+| 中 | Director → Workers でマイクロサービス API を分割実装 | Director → Workers |
+| 中 | agent-a が実装 → agent-b がレビュー → agent-a が修正 | Peer review pipeline |
+
+**AHC best-of-N シナリオ詳細**:
+- 過去の AHC 問題（AHC001〜AHC030）を使用（公開済み・オフラインスコアラーあり）
+- N ≥ 3 エージェントが同一問題を異なる戦略（greedy / random restart / simulated annealing など）で解く
+- 各エージェントがソルバースクリプトを書いて実行し、スコアを出力
+- オーケストレーターがスコアを収集して最高得点の解を選択
+- 検証項目: 正しい本数のソルバーが生成された・スコアが数値・勝者が選択された
+
+→ スコア関数が完全に定義されていて曖昧さがなく、複数エージェントの並列実行価値が明確。
+→ 詳細は CLAUDE.md「Recommended concrete scenario」を参照。
+
 ### アーキテクチャ
 
 | 優先度 | 課題 |
