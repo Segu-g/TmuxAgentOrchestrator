@@ -103,6 +103,11 @@ class Orchestrator:
         # Tracks when each agent started its current task (for history duration).
         self._task_started_at: dict[str, float] = {}
         self._task_started_prompt: dict[str, str] = {}
+        # Active task lookup: task_id → Task object, so _route_loop can re-enqueue
+        # on failure when task.retry_count < task.max_retries.
+        # Reference: AWS SQS maxReceiveCount / Redrive policy; Netflix Hystrix retry;
+        # Polly .NET resilience library. DESIGN.md §10.21 (v0.26.0)
+        self._active_tasks: dict[str, Task] = {}
         # Token-bucket rate limiter for task submission backpressure.
         # None → unlimited (default).  Set via set_rate_limiter() or
         # reconfigure_rate_limiter(), or auto-created from config if
@@ -337,6 +342,7 @@ class Orchestrator:
         target_agent: str | None = None,
         required_tags: list[str] | None = None,
         wait_for_token: bool = True,
+        max_retries: int = 0,
     ) -> Task:
         """Submit a new task to the priority queue.
 
@@ -393,6 +399,7 @@ class Orchestrator:
             reply_to=reply_to,
             target_agent=target_agent,
             required_tags=required_tags or [],
+            max_retries=max_retries,
         )
         if idempotency_key is not None:
             self._idempotency_keys[idempotency_key] = task.id
@@ -658,6 +665,8 @@ class Orchestrator:
             # Record dispatch time for history duration tracking.
             self._task_started_at[task.id] = time.monotonic()
             self._task_started_prompt[task.id] = task.prompt
+            # Track the Task object for potential retry on failure.
+            self._active_tasks[task.id] = task
             await agent.send_task(task)
             self._task_queue.task_done()
             # Yield so the agent's _run_loop can dequeue and set status=BUSY
@@ -875,8 +884,37 @@ class Orchestrator:
                 if not error and task_id:
                     self._completed_tasks.add(task_id)
                     self._workflow_manager.on_task_complete(task_id)
+                    # Clean up active task tracking on success.
+                    self._active_tasks.pop(task_id, None)
                 elif error and task_id:
-                    self._workflow_manager.on_task_failed(task_id)
+                    # Check if task has retries remaining before dead-lettering.
+                    task = self._active_tasks.get(task_id)
+                    if task is not None and task.retry_count < task.max_retries:
+                        # Retry: increment counter, re-enqueue, publish task_retrying event.
+                        task.retry_count += 1
+                        self._task_seq += 1
+                        await self._task_queue.put((task.priority, self._task_seq, task))
+                        self._workflow_manager.on_task_retrying(task_id)
+                        await self.bus.publish(Message(
+                            type=MessageType.STATUS,
+                            from_id="__orchestrator__",
+                            payload={
+                                "event": "task_retrying",
+                                "task_id": task_id,
+                                "retry_count": task.retry_count,
+                                "max_retries": task.max_retries,
+                                "error": error,
+                            },
+                        ))
+                        logger.info(
+                            "Task %s retry %d/%d after error: %s",
+                            task_id, task.retry_count, task.max_retries, error,
+                        )
+                        self._bus_queue.task_done()
+                        continue
+                    else:
+                        self._workflow_manager.on_task_failed(task_id)
+                        self._active_tasks.pop(task_id, None)
                 # Record task in per-agent history.
                 self._record_agent_history(msg)
                 # reply_to routing: deliver RESULT to the requesting agent's mailbox.

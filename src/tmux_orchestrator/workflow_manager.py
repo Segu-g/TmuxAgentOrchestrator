@@ -165,6 +165,29 @@ class WorkflowManager:
         run._completed.discard(task_id)
         self._update_status(run)
 
+    def on_task_retrying(self, task_id: str) -> None:
+        """Record that a task is being retried (intermediate failure).
+
+        If *task_id* belongs to a tracked workflow that was transitioning to
+        ``"failed"`` due to this task, reset the status to ``"running"`` so
+        that the workflow is not prematurely marked as failed while retries are
+        still outstanding.
+
+        No-op when *task_id* is not associated with any tracked workflow.
+
+        Design reference:
+        - AWS SQS maxReceiveCount / Redrive policy — re-enqueue before DLQ
+        - Netflix Hystrix retry — transient-failure tolerance
+        - DESIGN.md §10.21 (v0.26.0)
+        """
+        run = self._get_run_for_task(task_id)
+        if run is None:
+            return
+        # Remove from failed set — this task is still in-flight (retrying).
+        run._failed.discard(task_id)
+        run._completed.discard(task_id)
+        self._update_status(run)
+
     # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------

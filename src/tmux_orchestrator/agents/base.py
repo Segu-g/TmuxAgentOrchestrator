@@ -54,9 +54,33 @@ class Task:
     # ``tags`` list.  Empty list = no constraint (any idle worker matches).
     # Reference: FIPA Directory Facilitator (2002); Kubernetes nodeSelector.
     required_tags: list[str] = field(default_factory=list)
+    # Per-task retry semantics: how many times this task may be re-enqueued on
+    # failure before it is dead-lettered.  ``retry_count`` is incremented each
+    # time the orchestrator retries on an errored RESULT.
+    # Reference: AWS SQS maxReceiveCount / Redrive policy; Netflix Hystrix retry;
+    # Polly .NET resilience library; Erlang OTP supervisor restart strategies.
+    # DESIGN.md §10.21 (v0.26.0)
+    max_retries: int = 0
+    retry_count: int = 0
 
     def __lt__(self, other: "Task") -> bool:
         return self.priority < other.priority
+
+    def to_dict(self) -> dict:
+        """Return a JSON-serialisable representation of this task."""
+        return {
+            "task_id": self.id,
+            "prompt": self.prompt,
+            "priority": self.priority,
+            "trace_id": self.trace_id,
+            "depends_on": self.depends_on,
+            "reply_to": self.reply_to,
+            "target_agent": self.target_agent,
+            "required_tags": self.required_tags,
+            "max_retries": self.max_retries,
+            "retry_count": self.retry_count,
+            **({"metadata": self.metadata} if self.metadata else {}),
+        }
 
 
 class Agent(ABC):
