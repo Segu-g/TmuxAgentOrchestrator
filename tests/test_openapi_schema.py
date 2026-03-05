@@ -75,6 +75,11 @@ class _MockOrchestrator:
         from tmux_orchestrator.workflow_manager import WorkflowManager
         return WorkflowManager()
 
+    @property
+    def _webhook_manager(self):
+        from tmux_orchestrator.webhook_manager import WebhookManager
+        return WebhookManager()
+
 
 @pytest.fixture
 def fastapi_app():

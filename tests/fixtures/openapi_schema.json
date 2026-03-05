@@ -476,6 +476,39 @@
         "title": "ValidationError",
         "type": "object"
       },
+      "WebhookCreate": {
+        "description": "Request body for POST /webhooks.\n\nReference: GitHub Webhooks; Stripe Webhooks; DESIGN.md \u00a710.25 (v0.30.0).",
+        "properties": {
+          "events": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "secret": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secret"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "events"
+        ],
+        "title": "WebhookCreate",
+        "type": "object"
+      },
       "WorkflowSubmit": {
         "description": "Request body for POST /workflows.",
         "properties": {
@@ -1896,6 +1929,150 @@
           }
         },
         "summary": "Cancel a pending task"
+      }
+    },
+    "/webhooks": {
+      "get": {
+        "description": "Return all registered webhooks with delivery statistics.\n\nEach entry contains:\n- ``id``: webhook UUID\n- ``url``: target URL\n- ``events``: subscribed event names\n- ``created_at``: Unix timestamp of registration\n- ``delivery_count``: total delivery attempts\n- ``failure_count``: total failed attempts\n\nDesign reference: DESIGN.md \u00a710.25 (v0.30.0).",
+        "operationId": "list_webhooks_webhooks_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {},
+                  "title": "Response List Webhooks Webhooks Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List all registered webhooks"
+      },
+      "post": {
+        "description": "Register a new outbound webhook.\n\nWhen a subscribed event fires, the orchestrator POSTs a JSON payload to\nthe registered URL.  An optional HMAC-SHA256 signature is included in\nthe ``X-Signature-SHA256`` header when ``secret`` is supplied.\n\nValid event names:\n``task_complete``, ``task_failed``, ``task_retrying``, ``task_cancelled``,\n``task_dependency_failed``, ``task_waiting``, ``agent_status``,\n``workflow_complete``, ``workflow_failed``, ``workflow_cancelled``, ``*``\n(wildcard \u2014 receive all events).\n\nReturns: ``{id, url, events, created_at}``\n\nDesign reference: GitHub Webhooks; Stripe Webhooks; RFC 2104 HMAC;\nZalando RESTful API Guidelines \u00a7webhook; DESIGN.md \u00a710.25 (v0.30.0).",
+        "operationId": "create_webhook_webhooks_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Webhook Webhooks Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register a new webhook"
+      }
+    },
+    "/webhooks/{webhook_id}": {
+      "delete": {
+        "description": "Remove a registered webhook by ID.\n\nReturns 404 if the webhook ID is unknown.\n\nDesign reference: DESIGN.md \u00a710.25 (v0.30.0).",
+        "operationId": "delete_webhook_webhooks__webhook_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "webhook_id",
+            "required": true,
+            "schema": {
+              "title": "Webhook Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Delete Webhook Webhooks  Webhook Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete a webhook"
+      }
+    },
+    "/webhooks/{webhook_id}/deliveries": {
+      "get": {
+        "description": "Return the last 20 delivery attempts for *webhook_id*.\n\nEach entry contains:\n- ``id``: delivery attempt UUID\n- ``webhook_id``: the webhook this delivery belongs to\n- ``event``: the event name that triggered the delivery\n- ``timestamp``: Unix timestamp of the attempt\n- ``success``: whether the delivery succeeded (HTTP 2xx)\n- ``status_code``: HTTP response status code, or null on connection error\n- ``error``: error message string, or null on success\n- ``duration_ms``: request duration in milliseconds\n\nReturns 404 if the webhook ID is unknown.\n\nDesign reference: DESIGN.md \u00a710.25 (v0.30.0).",
+        "operationId": "get_webhook_deliveries_webhooks__webhook_id__deliveries_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "webhook_id",
+            "required": true,
+            "schema": {
+              "title": "Webhook Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {},
+                  "title": "Response Get Webhook Deliveries Webhooks  Webhook Id  Deliveries Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get recent delivery attempts for a webhook"
       }
     },
     "/workflows": {
