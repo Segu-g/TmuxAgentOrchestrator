@@ -266,6 +266,66 @@ class Orchestrator:
             for p, _seq, t in sorted(items, key=lambda x: (x[0], x[1]))
         ]
 
+    async def update_task_priority(self, task_id: str, new_priority: int) -> bool:
+        """Update the priority of a pending task in-place.
+
+        Locates *task_id* in the priority queue, changes its priority to
+        *new_priority*, and rebuilds the heap to restore the heap invariant.
+        Returns ``True`` if the task was found and updated; ``False`` if not
+        found (already dispatched, completed, or never submitted).
+
+        A ``task_priority_updated`` STATUS event is published on success.
+
+        Design note: Python's ``heapq`` module does not provide a
+        ``decrease_key`` / ``increase_key`` operation directly. The standard
+        approach (Python docs "heapq — Priority Queue Implementation Notes") is
+        to mark entries as invalid and add a replacement, or to rebuild the
+        heap after mutating an element. We mutate the tuple in-place and call
+        ``heapq.heapify`` for O(n) rebuild — acceptable for the small queue
+        sizes expected (< 10 000 tasks). This is equivalent to the
+        ``decrease_key`` / ``increase_key`` operations described in Sedgewick &
+        Wayne "Algorithms" 4th ed. §2.4 and the RTOS priority-change pattern
+        described in Liu & Layland (1973) "Scheduling Algorithms for
+        Multiprogramming in a Hard Real-Time Environment".
+
+        Reference:
+        - Python heapq docs: https://docs.python.org/3/library/heapq.html
+        - Liu, C.L.; Layland, J.W. (1973). "Scheduling Algorithms for
+          Multiprogramming in a Hard Real-Time Environment". JACM 20(1).
+        - Sedgewick & Wayne "Algorithms" 4th ed. §2.4 — Priority Queues.
+        """
+        items = list(self._task_queue._queue)  # type: ignore[attr-defined]
+        new_items = []
+        found = False
+        for p, seq, t in items:
+            if t.id == task_id:
+                t.priority = new_priority
+                new_items.append((new_priority, seq, t))
+                found = True
+            else:
+                new_items.append((p, seq, t))
+
+        if not found:
+            return False
+
+        # Rebuild the heap with the updated priority.
+        self._task_queue._queue.clear()  # type: ignore[attr-defined]
+        for item in new_items:
+            self._task_queue._queue.append(item)  # type: ignore[attr-defined]
+        heapq.heapify(self._task_queue._queue)  # type: ignore[attr-defined]
+
+        await self.bus.publish(Message(
+            type=MessageType.STATUS,
+            from_id="__orchestrator__",
+            payload={
+                "event": "task_priority_updated",
+                "task_id": task_id,
+                "priority": new_priority,
+            },
+        ))
+        logger.info("Task %s priority updated to %d", task_id, new_priority)
+        return True
+
     async def cancel_task(self, task_id: str) -> bool:
         """Remove *task_id* from the pending queue.
 

@@ -110,6 +110,20 @@
         "title": "TaskBatchSubmit",
         "type": "object"
       },
+      "TaskPriorityUpdate": {
+        "description": "Request body for PATCH /tasks/{task_id}.",
+        "properties": {
+          "priority": {
+            "title": "Priority",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "priority"
+        ],
+        "title": "TaskPriorityUpdate",
+        "type": "object"
+      },
       "TaskSubmit": {
         "properties": {
           "metadata": {
@@ -584,6 +598,69 @@
         "summary": "Real-time bus event stream (Server-Sent Events)"
       }
     },
+    "/orchestrator/pause": {
+      "post": {
+        "description": "Pause the orchestrator dispatch loop.\n\nWhile paused, no new tasks are dequeued from the pending queue.\nIn-flight tasks (already dispatched to agents) continue to run\nnormally.  New tasks can still be submitted to the queue via\n``POST /tasks`` \u2014 they will be dispatched as soon as dispatch is\nresumed.\n\nIdempotent: calling pause on an already-paused orchestrator is safe.\n\nDesign reference: Google Cloud Tasks ``queues.pause`` API; Oracle\nWebLogic Server \"Pause queue message operations at runtime\" \u2014 queue\npause enables maintenance, rolling deploys, and controlled draining\nwithout dropping in-flight work.\nDESIGN.md \u00a711 (v0.19.0) \u2014 queue pause/resume.",
+        "operationId": "pause_dispatch_orchestrator_pause_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Pause Dispatch Orchestrator Pause Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Pause task dispatch"
+      }
+    },
+    "/orchestrator/resume": {
+      "post": {
+        "description": "Resume the orchestrator dispatch loop after a pause.\n\nIdempotent: calling resume on an already-running orchestrator is safe.\n\nAfter resuming, the dispatch loop immediately checks the pending queue\nand dispatches any queued tasks to idle agents.",
+        "operationId": "resume_dispatch_orchestrator_resume_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Resume Dispatch Orchestrator Resume Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Resume task dispatch"
+      }
+    },
+    "/orchestrator/status": {
+      "get": {
+        "description": "Return operational status of the orchestrator.\n\nReturns:\n- ``paused``: whether dispatch is currently paused\n- ``queue_depth``: number of tasks waiting in the pending queue\n- ``agent_count``: total number of registered agents\n- ``dlq_depth``: number of tasks in the dead-letter queue",
+        "operationId": "orchestrator_status_orchestrator_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Orchestrator Status Orchestrator Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Orchestrator operational status"
+      }
+    },
     "/scratchpad/": {
       "get": {
         "description": "Return all scratchpad key-value pairs.\n\nThe shared scratchpad implements the Blackboard architectural pattern\n(Buschmann et al., 1996): a shared working memory that multiple agents\ncan read and write independently.  It is especially useful for pipeline\nworkflows where one agent writes results that a downstream agent reads.\n\nReference: DESIGN.md \u00a711 (architecture) \u2014 shared scratchpad (v0.16.0)",
@@ -837,6 +914,58 @@
           }
         },
         "summary": "Submit multiple tasks in one request"
+      }
+    },
+    "/tasks/{task_id}": {
+      "patch": {
+        "description": "Update the priority of a task that is still in the pending queue.\n\nRebuilds the internal heap after the in-place mutation so the new\npriority is respected on the next dispatch cycle.\n\nReturns:\n- ``{\"updated\": true, \"task_id\": ..., \"priority\": N}``\n  if the task was found in the pending queue and its priority was changed.\n- ``{\"updated\": false, \"task_id\": ...}``\n  if the task is not in the pending queue (already dispatched, completed,\n  or never submitted).\n\nDesign reference: Python heapq \"Priority Queue Implementation Notes\"\n(https://docs.python.org/3/library/heapq.html); Liu & Layland (1973)\n\"Scheduling Algorithms for Multiprogramming in a Hard Real-Time\nEnvironment\", JACM 20(1) \u2014 live priority adjustment prevents priority\ninversion and lets operators promote urgent work without re-submitting.",
+        "operationId": "update_task_priority_tasks__task_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskPriorityUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Update Task Priority Tasks  Task Id  Patch",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update a pending task's priority"
       }
     },
     "/tasks/{task_id}/cancel": {

@@ -81,6 +81,12 @@ class ScratchpadWrite(BaseModel):
     value: Any
 
 
+class TaskPriorityUpdate(BaseModel):
+    """Request body for PATCH /tasks/{task_id}."""
+
+    priority: int
+
+
 # ---------------------------------------------------------------------------
 # Module-level auth state
 # ---------------------------------------------------------------------------
@@ -535,6 +541,101 @@ def create_app(
             return {"cancelled": False, "task_id": task_id, "status": "already_dispatched"}
 
         raise HTTPException(status_code=404, detail=f"Task {task_id!r} not found")
+
+    @app.patch(
+        "/tasks/{task_id}",
+        summary="Update a pending task's priority",
+        dependencies=[Depends(auth)],
+    )
+    async def update_task_priority(task_id: str, body: TaskPriorityUpdate) -> dict:
+        """Update the priority of a task that is still in the pending queue.
+
+        Rebuilds the internal heap after the in-place mutation so the new
+        priority is respected on the next dispatch cycle.
+
+        Returns:
+        - ``{"updated": true, "task_id": ..., "priority": N}``
+          if the task was found in the pending queue and its priority was changed.
+        - ``{"updated": false, "task_id": ...}``
+          if the task is not in the pending queue (already dispatched, completed,
+          or never submitted).
+
+        Design reference: Python heapq "Priority Queue Implementation Notes"
+        (https://docs.python.org/3/library/heapq.html); Liu & Layland (1973)
+        "Scheduling Algorithms for Multiprogramming in a Hard Real-Time
+        Environment", JACM 20(1) — live priority adjustment prevents priority
+        inversion and lets operators promote urgent work without re-submitting.
+        """
+        updated = await orchestrator.update_task_priority(task_id, body.priority)
+        if updated:
+            return {"updated": True, "task_id": task_id, "priority": body.priority}
+        return {"updated": False, "task_id": task_id}
+
+    # ------------------------------------------------------------------
+    # Orchestrator dispatch control (pause / resume)
+    # ------------------------------------------------------------------
+
+    @app.post(
+        "/orchestrator/pause",
+        summary="Pause task dispatch",
+        dependencies=[Depends(auth)],
+    )
+    async def pause_dispatch() -> dict:
+        """Pause the orchestrator dispatch loop.
+
+        While paused, no new tasks are dequeued from the pending queue.
+        In-flight tasks (already dispatched to agents) continue to run
+        normally.  New tasks can still be submitted to the queue via
+        ``POST /tasks`` — they will be dispatched as soon as dispatch is
+        resumed.
+
+        Idempotent: calling pause on an already-paused orchestrator is safe.
+
+        Design reference: Google Cloud Tasks ``queues.pause`` API; Oracle
+        WebLogic Server "Pause queue message operations at runtime" — queue
+        pause enables maintenance, rolling deploys, and controlled draining
+        without dropping in-flight work.
+        DESIGN.md §11 (v0.19.0) — queue pause/resume.
+        """
+        orchestrator.pause()
+        return {"paused": True}
+
+    @app.post(
+        "/orchestrator/resume",
+        summary="Resume task dispatch",
+        dependencies=[Depends(auth)],
+    )
+    async def resume_dispatch() -> dict:
+        """Resume the orchestrator dispatch loop after a pause.
+
+        Idempotent: calling resume on an already-running orchestrator is safe.
+
+        After resuming, the dispatch loop immediately checks the pending queue
+        and dispatches any queued tasks to idle agents.
+        """
+        orchestrator.resume()
+        return {"paused": False}
+
+    @app.get(
+        "/orchestrator/status",
+        summary="Orchestrator operational status",
+        dependencies=[Depends(auth)],
+    )
+    async def orchestrator_status() -> dict:
+        """Return operational status of the orchestrator.
+
+        Returns:
+        - ``paused``: whether dispatch is currently paused
+        - ``queue_depth``: number of tasks waiting in the pending queue
+        - ``agent_count``: total number of registered agents
+        - ``dlq_depth``: number of tasks in the dead-letter queue
+        """
+        return {
+            "paused": orchestrator.is_paused,
+            "queue_depth": len(orchestrator.list_tasks()),
+            "agent_count": len(orchestrator.list_agents()),
+            "dlq_depth": len(orchestrator.list_dlq()),
+        }
 
     @app.post("/agents/{agent_id}/message", summary="Send a message to an agent", dependencies=[Depends(auth)])
     async def send_message(agent_id: str, body: SendMessage) -> dict:
