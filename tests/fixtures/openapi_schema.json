@@ -1535,6 +1535,46 @@
       }
     },
     "/tasks/{task_id}": {
+      "delete": {
+        "description": "Cancel *task_id* whether it is queued or currently in-progress.\n\n- If the task is **queued**: removes it from the priority queue and\n  publishes STATUS ``task_cancelled``.\n- If the task is **in-progress**: marks it as cancelled (tombstone),\n  sends Ctrl-C to the agent via ``interrupt()``, and publishes STATUS\n  ``task_cancelled``.  The eventual RESULT from the agent is silently\n  discarded.\n- If the task is **already completed/failed/unknown**: returns 404.\n\nReturns:\n``{\"cancelled\": true, \"task_id\": ..., \"was_running\": <bool>}``\n\nDesign references:\n- Kubernetes ``kubectl delete pod`` \u2014 REST DELETE on a resource URI\n- POSIX SIGTERM/SIGKILL model; Go context.Context cancellation\n- DESIGN.md \u00a710.22 (v0.27.0)",
+        "operationId": "delete_task_tasks__task_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Delete Task Tasks  Task Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel a task by ID (queued or in-progress)"
+      },
       "get": {
         "description": "Return the status and details of a specific task by its ID.\n\nSearches the pending queue, in-progress tasks, and per-agent history.\n\nReturns:\n- ``task_id``: unique task identifier\n- ``prompt``: task prompt text\n- ``priority``: dispatch priority\n- ``status``: one of ``\"queued\"``, ``\"in_progress\"``, ``\"success\"``, ``\"error\"``\n- ``max_retries``: maximum allowed retries\n- ``retry_count``: current retry attempt count\n- 404 if the task ID is unknown.\n\nDesign reference: DESIGN.md \u00a710.21 (v0.26.0)",
         "operationId": "get_task_tasks__task_id__get",
@@ -1729,6 +1769,46 @@
       }
     },
     "/workflows/{workflow_id}": {
+      "delete": {
+        "description": "Cancel all tasks belonging to *workflow_id* and mark it as cancelled.\n\nCancels each task in the workflow (queued or in-progress) and sets the\nworkflow status to ``\"cancelled\"``.\n\nReturns:\n``{\"workflow_id\": ..., \"cancelled\": [...task_ids...], \"already_done\": [...task_ids...]}``\n\n- ``cancelled``: task IDs that were successfully cancelled.\n- ``already_done``: task IDs that were not found (already completed,\n  dead-lettered, or unknown).\n\nReturns 404 if *workflow_id* is unknown.\n\nDesign references:\n- Apache Airflow ``dag_run.update_state(\"cancelled\")`` \u2014 bulk cancel\n- AWS Step Functions ``StopExecution`` \u2014 cancel a running state machine\n- DESIGN.md \u00a710.22 (v0.27.0)",
+        "operationId": "delete_workflow_workflows__workflow_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Delete Workflow Workflows  Workflow Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel all tasks in a workflow"
+      },
       "get": {
         "description": "Return the status and task list for *workflow_id*.\n\nReturns 404 if the workflow ID is unknown.\n\nDesign reference: DESIGN.md \u00a710.20 (v0.25.0).",
         "operationId": "get_workflow_workflows__workflow_id__get",

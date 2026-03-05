@@ -875,6 +875,79 @@ def create_app(
             )
         return result
 
+    @app.delete(
+        "/tasks/{task_id}",
+        summary="Cancel a task by ID (queued or in-progress)",
+        dependencies=[Depends(auth)],
+    )
+    async def delete_task(task_id: str) -> dict:
+        """Cancel *task_id* whether it is queued or currently in-progress.
+
+        - If the task is **queued**: removes it from the priority queue and
+          publishes STATUS ``task_cancelled``.
+        - If the task is **in-progress**: marks it as cancelled (tombstone),
+          sends Ctrl-C to the agent via ``interrupt()``, and publishes STATUS
+          ``task_cancelled``.  The eventual RESULT from the agent is silently
+          discarded.
+        - If the task is **already completed/failed/unknown**: returns 404.
+
+        Returns:
+        ``{"cancelled": true, "task_id": ..., "was_running": <bool>}``
+
+        Design references:
+        - Kubernetes ``kubectl delete pod`` — REST DELETE on a resource URI
+        - POSIX SIGTERM/SIGKILL model; Go context.Context cancellation
+        - DESIGN.md §10.22 (v0.27.0)
+        """
+        # Determine if the task was in-progress before cancellation attempt
+        in_progress_ids = set()
+        for agent in orchestrator.list_agents():
+            agent_obj = orchestrator.get_agent(agent["id"])
+            if agent_obj is not None and agent_obj._current_task is not None:
+                in_progress_ids.add(agent_obj._current_task.id)
+
+        cancelled = await orchestrator.cancel_task(task_id)
+        if not cancelled:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Task {task_id!r} not found (already completed, unknown, or dead-lettered)",
+            )
+        was_running = task_id in in_progress_ids
+        return {"cancelled": True, "task_id": task_id, "was_running": was_running}
+
+    @app.delete(
+        "/workflows/{workflow_id}",
+        summary="Cancel all tasks in a workflow",
+        dependencies=[Depends(auth)],
+    )
+    async def delete_workflow(workflow_id: str) -> dict:
+        """Cancel all tasks belonging to *workflow_id* and mark it as cancelled.
+
+        Cancels each task in the workflow (queued or in-progress) and sets the
+        workflow status to ``"cancelled"``.
+
+        Returns:
+        ``{"workflow_id": ..., "cancelled": [...task_ids...], "already_done": [...task_ids...]}``
+
+        - ``cancelled``: task IDs that were successfully cancelled.
+        - ``already_done``: task IDs that were not found (already completed,
+          dead-lettered, or unknown).
+
+        Returns 404 if *workflow_id* is unknown.
+
+        Design references:
+        - Apache Airflow ``dag_run.update_state("cancelled")`` — bulk cancel
+        - AWS Step Functions ``StopExecution`` — cancel a running state machine
+        - DESIGN.md §10.22 (v0.27.0)
+        """
+        result = await orchestrator.cancel_workflow(workflow_id)
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Workflow {workflow_id!r} not found",
+            )
+        return result
+
     @app.post(
         "/tasks/{task_id}/cancel",
         summary="Cancel a pending task",
