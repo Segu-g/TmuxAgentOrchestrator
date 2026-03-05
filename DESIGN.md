@@ -1187,6 +1187,70 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.24 調査記録 (v0.29.0, 2026-03-05)
+
+**実装テーマ: Task-level `depends_on` — first-class dependency tracking**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| 依存関係に基づくビルド制御 | GNU Make dependency resolution | Feldman, S.I. (1979). "Make — A Program for Maintaining Computer Programs". Bell Labs USENIX. https://dl.acm.org/doi/10.1145/800076.802475 |
+| タスクグラフの遅延実行 | Dask task graphs | Rocklin, M. (2015). "Dask: Parallel computation with blocked algorithms". SciPy Proceedings. https://conference.scipy.org/proceedings/scipy2015/pdfs/matthew_rocklin.pdf |
+| DAG ステージ依存追跡 | Apache Spark DAG scheduler | Zaharia et al. (2012). "Resilient Distributed Datasets: A Fault-Tolerant Abstraction for In-Memory Cluster Computing". USENIX NSDI. https://www.usenix.org/system/files/conference/nsdi12/nsdi12-final138.pdf |
+| 依存関係の伝播 | POSIX `make` prerequisites | IEEE Std 1003.1-2017 "make — maintain, update, and regenerate groups of programs". https://pubs.opengroup.org/onlinepubs/9699919799/utilities/make.html |
+
+**主要知見:**
+
+1. **GNU Make dependency resolution**: GNU Make は依存グラフを走査し、前提条件が
+   すべて最新の場合のみターゲットをビルドする。本実装の `_waiting_tasks` / `_task_dependents` は
+   Make の「前提条件が完了したらターゲットを実行」というセマンティクスを非同期タスク
+   スケジューリングに適用したものである。
+
+2. **Dask task graphs**: Dask はタスクグラフを `{key: (func, *args)}` の辞書として表現し、
+   依存関係が解決されると即座にワーカーへ送信する。本実装の `_on_dep_satisfied()` が
+   依存完了後にタスクをキューへ移動する仕組みはこれと等価である。特に Dask の
+   "scheduler knows which tasks are ready" アプローチが参考になった。
+
+3. **Apache Spark DAG scheduler**: Spark は各 Stage の依存関係を追跡し、親 Stage の
+   すべてのパーティションが完了したときに子 Stage をスケジュールする。本実装の
+   「すべての `depends_on` ID が `_completed_tasks` に入ったら `_waiting_tasks` から
+   キューへ移動」はこの hold-and-release セマンティクスと構造的に同一。
+
+4. **POSIX make prerequisites**: `make` は依存関係チェーンを再帰的に解決する。
+   A→B→C の場合、A が失敗すると B が実行されず C も実行されない。本実装の
+   `_on_dep_failed()` の再帰呼び出しはこの連鎖失敗伝播を再現している。
+
+**設計上の注意点:**
+
+- **poll-based → hold-and-release**: v0.29.0 以前は `depends_on` の解決を
+  `_dispatch_loop` のポーリング (0.05s ごとの re-queue) で行っていた。
+  これは O(n²) のパイプライン遅延を生じさせる可能性があった。
+  v0.29.0 では `_waiting_tasks` + `_task_dependents` の逆引きテーブルにより O(1) wake-up に改善。
+
+- **`_task_dependents` は reverse lookup table**: dep_task_id → [waiting_task_ids] の
+  辞書により、依存先が完了したときに O(1) で待機タスクを特定できる。
+  完了または失敗後はエントリを削除してメモリリークを防ぐ。
+
+- **即時失敗**: 既に `_failed_tasks` に登録されている依存先を持つタスクを `submit_task()` で
+  提出した場合、キューにも `_waiting_tasks` にも入らずに即座に失敗する。
+  これにより既知の失敗依存を持つタスクが無限に蓄積することを防ぐ。
+
+- **Tomasulo-style local_id**: `POST /tasks/batch` の `local_id` → global UUID 変換は
+  Tomasulo のアルゴリズム (IBM System/360 Model 91, 1967) のレジスタリネーミングと
+  同じ概念。バッチ内のローカル名を広域ユニークIDに変換することで、複数のバッチが
+  同一のローカル名を使っても衝突しない。
+
+**デモシナリオ (v0.29.0):**
+- シナリオ: "Task-level depends_on"
+- デモフォルダ: `~/Demonstration/v0.29.0-task-dependencies/`
+- 2 ClaudeCodeAgent インスタンス
+- Task A: `base.py` にシンプルなクラスを書く
+- Task B: A に依存し、`extended.py` で `base.py` をインポート・拡張
+- Task C: B に依存し、`test_extended.py` でテスト作成
+- すべてを `POST /tasks` に `depends_on` 付きで同時提出 (workflow 不要)
+- 実行順序: A → B → C が保証される
+
+---
+
 ## 11. 今後の課題
 
 ### 機能
@@ -1208,6 +1272,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~高~~ ~~Task retry on failure — per-task retry semantics~~ | **完了 (v0.26.0)** — `Task.max_retries`/`retry_count`; `_active_tasks` lookup; `task_retrying` STATUS イベント; `WorkflowManager.on_task_retrying()`; `GET /tasks` 全タスク一覧 (pagination); `GET /tasks/{id}`; REST `max_retries` パラメータ; 30テスト (468合計) |
 | ~~高~~ ~~Task cancellation — queued and in-progress~~ | **完了 (v0.27.0)** — `Agent.interrupt()`; `ClaudeCodeAgent.interrupt()` (Ctrl-C via tmux); `_cancelled_task_ids` tombstone; `cancel_task()` handles both queued and in-progress; `_dispatch_loop` tombstone check; `_route_loop` RESULT discard; `cancel_workflow()`; `WorkflowManager.cancel()` + no-ops after cancel; `DELETE /tasks/{id}`; `DELETE /workflows/{id}`; 29テスト (497合計) |
 | ~~高~~ ~~Agent drain / graceful shutdown~~ | **完了 (v0.28.0)** — `AgentStatus.DRAINING`; `_set_idle()` DRAINING ガード; `Orchestrator._draining_agents: set[str]`; `drain_agent()` (IDLE即停止/BUSY→DRAINING); `drain_all()`; `_route_loop` RESULT後の auto-stop; `POST /agents/{id}/drain`; `GET /agents/{id}/drain`; `POST /orchestrator/drain`; 23テスト (520合計) |
+| ~~高~~ ~~Task-level depends_on — first-class dependency tracking~~ | **完了 (v0.29.0)** — `_waiting_tasks: dict[str, Task]`; `_task_dependents: dict[str, list[str]]`; `_failed_tasks: set[str]`; `_on_dep_satisfied()` / `_on_dep_failed()` (cascade); `_task_blocking()`; `submit_task(depends_on=...)` hold-and-release; `cancel_task()` waiting-task case; `POST /tasks` + `POST /tasks/batch` (local_id sibling resolution); `GET /tasks/{id}` (depends_on + blocking + status="waiting"); `GET /tasks` list; 23テスト (543合計) |
 | ~~低~~ ~~エージェントのコンテキスト使用量モニタリング~~ | **完了 (v0.21.0)** — `ContextMonitor` + `GET /agents/{id}/stats`, `GET /context-stats`; `context_warning`/`notes_updated`/`summarize_triggered` STATUS イベント; `context_auto_summarize`; 21 テスト (347 合計) |
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |
 | ~~低~~ ~~Prometheus メトリクス (`/metrics`)~~ | **完了 (v0.13.0)** — `GET /metrics` (prometheus_client 直接使用; 認証不要) |

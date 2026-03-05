@@ -6,6 +6,72 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.29.0] — 2026-03-05
+
+### Added
+
+**Task-level `depends_on` — first-class dependency tracking without Workflows**
+
+Adds native dependency support to individual tasks submitted via `POST /tasks`
+and `POST /tasks/batch`, without requiring a full Workflow DAG submission.
+
+- **`Task.depends_on`** (`agents/base.py`): already-present field; now used
+  actively for hold-and-release logic in the orchestrator.
+- **`Orchestrator._waiting_tasks: dict[str, Task]`** (`orchestrator.py`):
+  tasks held pending dependency resolution. Key = task_id.
+- **`Orchestrator._task_dependents: dict[str, list[str]]`** (`orchestrator.py`):
+  reverse lookup — dep_task_id → [waiting_task_ids]. Used for O(1) wake-up.
+- **`Orchestrator._failed_tasks: set[str]`** (`orchestrator.py`): task IDs
+  that have finally failed (retries exhausted). Used for cascade failure.
+- **`submit_task(depends_on=...)`** updated:
+  - All deps already complete → queued immediately (existing behaviour).
+  - Any dep already failed → immediate cascade failure (no queue, no wait).
+  - Otherwise → held in `_waiting_tasks`; STATUS `task_waiting` published.
+- **`submit_task(_task_id=...)`**: internal parameter for pre-allocated IDs
+  (used by `POST /tasks/batch` local_id resolution).
+- **`Orchestrator._on_dep_satisfied(completed_task_id)`**: called after
+  success. Checks each waiting task; releases it to queue when all deps done.
+- **`Orchestrator._on_dep_failed(failed_task_id)`**: cascades failure to all
+  waiting tasks. Recursively handles A→B→C chains. STATUS
+  `task_dependency_failed` published per failed task.
+- **`Orchestrator._task_blocking(task_id)`**: returns list of waiting task IDs
+  that depend on `task_id`. Used by REST `GET /tasks/{id}`.
+- **`Orchestrator.get_waiting_task(task_id)`**: returns a Task from
+  `_waiting_tasks` or None.
+- **`Orchestrator.list_tasks()`** updated: includes waiting tasks with
+  `status="waiting"` and `depends_on` fields.
+- **`cancel_task()`** updated: Case 2 now handles tasks in `_waiting_tasks`
+  (removes from `_waiting_tasks` and `_task_dependents`).
+- **`POST /tasks`**: accepts `depends_on: list[str] = []` in `TaskSubmit`.
+  Response includes `depends_on` when non-empty.
+- **`POST /tasks/batch`**: new `TaskBatchItem` Pydantic model with `local_id`
+  and `depends_on`. Local IDs within the batch are resolved to global task IDs
+  before submission (Tomasulo-style register renaming). Response includes
+  `local_id` and `depends_on` per task.
+- **`GET /tasks/{task_id}`**: response includes `depends_on` and `blocking`
+  (list of task IDs waiting on this task). Status `"waiting"` returned for
+  tasks held in `_waiting_tasks`.
+- **`GET /tasks`**: includes waiting tasks with `status="waiting"` and
+  `depends_on` in each record.
+
+### STATUS events
+
+| Event | When |
+|---|---|
+| `task_waiting` | Task submitted but held for unmet deps |
+| `task_dependency_failed` | A dep failed; cascaded to waiting task |
+
+### Design references
+
+- GNU Make dependency resolution — prerequisite targets; dependency-driven
+  build execution
+- Dask task graphs — deferred execution, compute graph with hold-and-release
+- Apache Spark DAG scheduler — stage dependency tracking; O(1) wake-up
+- POSIX `make` prerequisites — dependency propagation to dependent targets
+- Tomasulo's algorithm (IBM 1967) — register renaming == local_id → global_task_id
+
+---
+
 ## [0.28.0] — 2026-03-05
 
 ### Added
