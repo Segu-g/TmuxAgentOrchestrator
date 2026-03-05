@@ -6,6 +6,46 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.31.0] — 2026-03-05
+
+### Added
+
+**Agent Groups / Named Pools**
+
+Adds named agent groups so tasks can target a logical pool of agents rather
+than a specific agent ID or capability tags.
+
+- **`GroupManager`** (`src/tmux_orchestrator/group_manager.py`): new module.
+  - `create(name, agent_ids=[])` → `bool` (False if name already exists)
+  - `delete(name)` → `bool`
+  - `get(name)` → `set[str] | None`
+  - `list_all()` → `list[{name, agent_ids}]`
+  - `add_agent(name, agent_id)` → `bool`
+  - `remove_agent(name, agent_id)` → `bool`
+  - `get_agent_groups(agent_id)` → `list[str]`
+- **`Orchestrator._group_manager`**: `GroupManager` instance created in `__init__`;
+  `OrchestratorConfig.groups` entries loaded at startup.
+- **`Orchestrator.get_group_manager()`**: accessor for the group manager.
+- **`Task.target_group`**: new optional field; when set, dispatch only targets
+  agents in the named group (AND-filter with `required_tags`).
+- **`Orchestrator.submit_task(target_group=...)`**: new kwarg threaded through.
+- **`AgentRegistry.find_idle_worker(allowed_agent_ids=...)`**: new kwarg for group
+  membership filtering.
+- **`AgentConfig.groups`**: list of group names the agent is pre-registered into
+  at startup (via factory).
+- **`OrchestratorConfig.groups`**: top-level `groups:` list parsed from YAML.
+- **6 REST endpoints**:
+  - `POST /groups` — create group; 409 on duplicate name
+  - `GET /groups` — list groups with agent statuses
+  - `GET /groups/{name}` — group detail; 404 if unknown
+  - `DELETE /groups/{name}` — remove group; 404 if unknown
+  - `POST /groups/{name}/agents` — add agent; 404 if group unknown
+  - `DELETE /groups/{name}/agents/{id}` — remove agent; 404 if group or agent unknown
+- **`TaskSubmit`**, **`TaskBatchItem`**, **`WorkflowTaskSpec`**: all gain `target_group: str | None = None`.
+- **Tests**: 38 tests in `tests/test_group_manager.py` (unit + integration + REST).
+
+---
+
 ## [0.30.0] — 2026-03-05
 
 ### Added

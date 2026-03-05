@@ -1293,6 +1293,47 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.26 調査記録 (v0.31.0, 2026-03-05)
+
+#### 実装: Agent Groups / Named Pools — 名前付きエージェントプール
+
+**調査観点:**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| Named agent pools | Kubernetes Node Pools / Node Groups | https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/ |
+| Cluster resource partitioning | AWS Auto Scaling Groups | https://docs.aws.amazon.com/autoscaling/ec2/userguide/auto-scaling-groups.html |
+| Role-based resource allocation | Apache Mesos Roles | https://mesos.apache.org/documentation/latest/roles/ |
+| Co-located task grouping | HashiCorp Nomad Task Groups | https://developer.hashicorp.com/nomad/docs/job-specification/group |
+
+**主要知見:**
+
+1. **Kubernetes Node Pools (GKE/EKS/AKS)**: クラスタ内のノードを名前付きプールに分割し、Pod の `nodeSelector` / `nodeAffinity` でプールにスケジュールを誘導する。本実装の `target_group` はこの概念の軽量版で、タスクが特定のエージェントプールにのみディスパッチされる。
+
+2. **AWS Auto Scaling Groups**: EC2 インスタンスを論理グループに集め、同一設定・同一スケーリングポリシーで管理する。名前によるターゲティングが基本で、`TargetGroupARN` で ELB から特定グループにルーティングする。本実装のグループは静的（スケーリング機能なし）だが、将来的に AutoScaler との連携で動的グループ管理が可能。
+
+3. **Apache Mesos Roles**: クラスタリソースを役割（ロール）でパーティショニングし、特定フレームワークが特定ロールのリソースしか使えないようにする。`required_tags` + `target_group` の AND フィルタと同様のアクセス制御モデル。
+
+4. **HashiCorp Nomad Task Groups**: ジョブ定義内の論理グループで、同一ノードにスケジュールされるタスクをまとめる。本実装のグループは同一ノード制約を持たないが、「名前によるターゲティング」という概念は共通。
+
+**設計決定:**
+
+- **AND フィルタ semantics**: `target_group` と `required_tags` は AND で組み合わせる。`target_group="gpu-workers"` かつ `required_tags=["cuda"]` の場合、グループ内で CUDA タグを持つエージェントのみが対象。Kubernetes の `nodeSelector` + `nodeAffinity` の組み合わせと同じ設計。
+- **不明グループは即 DLQ**: 存在しないグループを指定したタスクは即座に dead-letter される（リトライ不要）。Kubernetes の `nodeSelector` でマッチするノードがない場合の Pending 状態と対照的に、本システムでは明示的なエラーを選択。
+- **`GroupManager` は純粋 in-memory**: 永続化なし。再起動でリセット。YAML `groups:` で設定値として永続化する設計を採用。
+- **`AgentConfig.groups` による起動時自動登録**: factory.py でエージェント作成後に `group_manager.add_agent()` を呼び出す。グループが存在しない場合は自動作成（auto-create semantics）。
+- **コピー返却**: `get(name)` は内部 set のコピーを返す。直接参照を渡すと意図しない変更が可能になるため。
+
+**デモシナリオ (v0.31.0):**
+- シナリオ: Agent Groups デモ
+- デモフォルダ: `~/Demonstration/v0.31.0-agent-groups/`
+- 4 エージェント: 2つが `"python-workers"`、2つが `"docs-workers"` グループに所属
+- 3 python タスク → `target_group="python-workers"` で投入 → python-workers のみに配送
+- 2 docs タスク → `target_group="docs-workers"` で投入 → docs-workers のみに配送
+- `GET /groups/{name}` でクロスグループ配送が発生しないことを確認
+
+---
+
 ## 11. 今後の課題
 
 ### 機能
@@ -1316,6 +1357,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~高~~ ~~Agent drain / graceful shutdown~~ | **完了 (v0.28.0)** — `AgentStatus.DRAINING`; `_set_idle()` DRAINING ガード; `Orchestrator._draining_agents: set[str]`; `drain_agent()` (IDLE即停止/BUSY→DRAINING); `drain_all()`; `_route_loop` RESULT後の auto-stop; `POST /agents/{id}/drain`; `GET /agents/{id}/drain`; `POST /orchestrator/drain`; 23テスト (520合計) |
 | ~~高~~ ~~Task-level depends_on — first-class dependency tracking~~ | **完了 (v0.29.0)** — `_waiting_tasks: dict[str, Task]`; `_task_dependents: dict[str, list[str]]`; `_failed_tasks: set[str]`; `_on_dep_satisfied()` / `_on_dep_failed()` (cascade); `_task_blocking()`; `submit_task(depends_on=...)` hold-and-release; `cancel_task()` waiting-task case; `POST /tasks` + `POST /tasks/batch` (local_id sibling resolution); `GET /tasks/{id}` (depends_on + blocking + status="waiting"); `GET /tasks` list; 23テスト (543合計) |
 | ~~高~~ ~~Webhook notifications — outbound event delivery~~ | **完了 (v0.30.0)** — `WebhookManager` (register/unregister/deliver/sign); `Webhook`/`WebhookDelivery` dataclasses; `collections.deque(maxlen=50)` circular buffer; HMAC-SHA256 signing; fire-and-forget `asyncio.create_task`; `POST/GET/DELETE /webhooks`, `GET /webhooks/{id}/deliveries`; `OrchestratorConfig.webhook_timeout`; 33テスト (576合計) |
+| ~~高~~ ~~Agent Groups / Named Pools~~ | **完了 (v0.31.0)** — `GroupManager` (create/delete/get/list_all/add_agent/remove_agent); `Task.target_group`; `AgentConfig.groups`; `OrchestratorConfig.groups`; `find_idle_worker(allowed_agent_ids=...)`; `POST/GET/DELETE /groups`, `POST/DELETE /groups/{name}/agents`; `target_group` in TaskSubmit/TaskBatchItem/WorkflowTaskSpec; 38テスト (614合計) |
 | ~~低~~ ~~エージェントのコンテキスト使用量モニタリング~~ | **完了 (v0.21.0)** — `ContextMonitor` + `GET /agents/{id}/stats`, `GET /context-stats`; `context_warning`/`notes_updated`/`summarize_triggered` STATUS イベント; `context_auto_summarize`; 21 テスト (347 合計) |
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |
 | ~~低~~ ~~Prometheus メトリクス (`/metrics`)~~ | **完了 (v0.13.0)** — `GET /metrics` (prometheus_client 直接使用; 認証不要) |
