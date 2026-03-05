@@ -1051,6 +1051,118 @@
         "summary": "Reconfigure rate limiter"
       }
     },
+    "/results": {
+      "get": {
+        "description": "Return persisted task results from the append-only JSONL store.\n\nQuery parameters are AND-combined:\n- ``agent_id``: filter by the agent that completed the task.\n- ``task_id``: filter to a specific task.\n- ``date``: ``YYYY-MM-DD`` \u2014 scan only that day's file.\n- ``limit``: maximum records returned (default 50).\n\nReturns an empty list when ``result_store_enabled=False`` or no\nresults have been persisted yet.\n\nDesign reference:\n- Martin Fowler \"Event Sourcing\" (2005): append-only log of facts.\n- Greg Young \"CQRS Documents\" (2010): separate write/read paths.\n- Rich Hickey \"The Value of Values\" (Datomic, 2012): immutable facts.\n- DESIGN.md \u00a710.19 (v0.24.0).",
+        "operationId": "query_results_results_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "agent_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Agent Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "task_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Task Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Date"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {},
+                  "title": "Response Query Results Results Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Query persisted task results"
+      }
+    },
+    "/results/dates": {
+      "get": {
+        "description": "Return a sorted list of ``YYYY-MM-DD`` date strings for which\nresult data exists in the JSONL store.\n\nReturns an empty list when ``result_store_enabled=False`` or no\nresults have been persisted yet.\n\nDesign reference: DESIGN.md \u00a710.19 (v0.24.0).",
+        "operationId": "results_dates_results_dates_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {},
+                  "title": "Response Results Dates Results Dates Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List dates with persisted result data"
+      }
+    },
     "/scratchpad/": {
       "get": {
         "description": "Return all scratchpad key-value pairs.\n\nThe shared scratchpad implements the Blackboard architectural pattern\n(Buschmann et al., 1996): a shared working memory that multiple agents\ncan read and write independently.  It is especially useful for pipeline\nworkflows where one agent writes results that a downstream agent reads.\n\nReference: DESIGN.md \u00a711 (architecture) \u2014 shared scratchpad (v0.16.0)",
