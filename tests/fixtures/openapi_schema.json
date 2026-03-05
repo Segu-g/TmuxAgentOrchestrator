@@ -396,6 +396,40 @@
         "summary": "Dead letter queue"
       }
     },
+    "/events": {
+      "get": {
+        "description": "Stream all bus events to the client as Server-Sent Events.\n\nEach event is a JSON object with ``type``, ``from_id``, ``to_id``,\nand ``payload`` fields.  The client can listen with the browser's\nnative ``EventSource`` API.\n\nAuthentication: session cookie OR ``X-API-Key`` header / ``?key=`` query parameter.\n\nReference:\n- FastAPI SSE (v0.135+): https://fastapi.tiangolo.com/tutorial/server-sent-events/\n- DESIGN.md \u00a710.8 \u2014 SSE push notifications (v0.12.0, 2026-03-05)",
+        "operationId": "sse_events_events_get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "itemSchema": {
+                  "properties": {
+                    "data": {
+                      "type": "string"
+                    },
+                    "event": {
+                      "type": "string"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "retry": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Real-time bus event stream (Server-Sent Events)"
+      }
+    },
     "/tasks": {
       "get": {
         "operationId": "list_tasks_tasks_get",

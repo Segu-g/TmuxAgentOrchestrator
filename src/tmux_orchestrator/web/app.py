@@ -15,6 +15,7 @@ from typing import Any
 import webauthn
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.sse import EventSourceResponse, ServerSentEvent
 from pydantic import BaseModel
 from webauthn.helpers.structs import (
     AuthenticationCredential,
@@ -484,6 +485,61 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
             await websocket.close(code=1008)  # Policy Violation
             return
         await hub.handle(websocket)
+
+    # ------------------------------------------------------------------
+    # SSE push endpoint — real-time bus event stream
+    # ------------------------------------------------------------------
+
+    @app.get(
+        "/events",
+        summary="Real-time bus event stream (Server-Sent Events)",
+        response_class=EventSourceResponse,
+        dependencies=[Depends(auth)],
+    )
+    async def sse_events(request: Request):  # type: ignore[return]
+        """Stream all bus events to the client as Server-Sent Events.
+
+        Each event is a JSON object with ``type``, ``from_id``, ``to_id``,
+        and ``payload`` fields.  The client can listen with the browser's
+        native ``EventSource`` API.
+
+        Authentication: session cookie OR ``X-API-Key`` header / ``?key=`` query parameter.
+
+        Reference:
+        - FastAPI SSE (v0.135+): https://fastapi.tiangolo.com/tutorial/server-sent-events/
+        - DESIGN.md §10.8 — SSE push notifications (v0.12.0, 2026-03-05)
+        """
+        sub_id = f"__sse_{id(request)}__"
+        q = await orchestrator.bus.subscribe(sub_id, broadcast=True)
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    # Keep-alive comment every 15s to prevent proxy disconnections
+                    yield ServerSentEvent(comment="keep-alive")
+                    continue
+                except asyncio.CancelledError:
+                    break
+                try:
+                    q.task_done()
+                    yield ServerSentEvent(
+                        data={
+                            "type": msg.type.value,
+                            "from_id": msg.from_id,
+                            "to_id": msg.to_id,
+                            "payload": msg.payload,
+                        },
+                        event=msg.type.value.lower(),
+                        id=msg.id,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("SSE: error serialising message %s", msg.id)
+        finally:
+            await orchestrator.bus.unsubscribe(sub_id)
+            logger.debug("SSE: client disconnected, unsubscribed %s", sub_id)
 
     # ------------------------------------------------------------------
     # Browser UI — unconditional; JS handles auth gate
@@ -958,6 +1014,65 @@ function bufferToB64url(buf) {
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 }
 
+// ── SSE push notifications ──
+// Replaces 3-second polling for agent/task state changes.
+// Reference: DESIGN.md §10.8; FastAPI SSE (v0.135+).
+let _sseSource = null;
+
+function connectSSE() {
+  if (_sseSource && _sseSource.readyState !== EventSource.CLOSED) return;
+  _sseSource = new EventSource('/events');
+  _sseSource.onopen = () => {
+    document.getElementById('status-dot').classList.remove('disconnected');
+    document.getElementById('conn-label').textContent = 'Connected (SSE)';
+  };
+  _sseSource.onerror = () => {
+    document.getElementById('status-dot').classList.add('disconnected');
+    document.getElementById('conn-label').textContent = 'SSE reconnecting…';
+    // EventSource auto-reconnects; we keep a fallback poll in case it stays broken
+  };
+  // On any STATUS or RESULT event, refresh agent/task tables immediately
+  _sseSource.addEventListener('status', (ev) => {
+    let data;
+    try { data = JSON.parse(ev.data); } catch { return; }
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch { return; } }
+    logEntry({type: 'STATUS', from_id: data.from_id, payload: data.payload, timestamp: new Date().toISOString()});
+    refreshAgents();
+    refreshTasks();
+    refreshAgentTree();
+  });
+  _sseSource.addEventListener('result', (ev) => {
+    let data;
+    try { data = JSON.parse(ev.data); } catch { return; }
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch { return; } }
+    logEntry({type: 'RESULT', from_id: data.from_id, payload: data.payload, timestamp: new Date().toISOString()});
+    refreshAgents();
+    // Director response via SSE
+    if (pendingChats.has(data.payload?.task_id)) {
+      const bubble = pendingChats.get(data.payload.task_id);
+      pendingChats.delete(data.payload.task_id);
+      const output = (data.payload && data.payload.output) || '';
+      bubble.className = 'chat-bubble bubble-director';
+      bubble.textContent = output;
+      scrollChat();
+      document.getElementById('chat-send-btn').disabled = false;
+      document.getElementById('chat-input').disabled = false;
+    }
+  });
+  _sseSource.addEventListener('peer_msg', (ev) => {
+    let data;
+    try { data = JSON.parse(ev.data); } catch { return; }
+    if (typeof data === 'string') { try { data = JSON.parse(data); } catch { return; } }
+    if (data.payload && data.payload._forwarded) {
+      addConversationEntry({type: 'PEER_MSG', from_id: data.from_id, to_id: data.to_id, payload: data.payload});
+    }
+  });
+}
+
+function disconnectSSE() {
+  if (_sseSource) { _sseSource.close(); _sseSource = null; }
+}
+
 // ── Auth ──
 let _pollInterval = null;
 
@@ -975,15 +1090,19 @@ async function checkAuth() {
     if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
       connectWS();
     }
+    // SSE replaces polling for real-time agent/task updates
+    connectSSE();
     refreshAgents();
     refreshTasks();
     refreshAgentTree();
+    // Keep a light 30s fallback poll in case SSE misses an event
     if (!_pollInterval) {
-      _pollInterval = setInterval(() => { refreshAgents(); refreshTasks(); refreshAgentTree(); }, 3000);
+      _pollInterval = setInterval(() => { refreshAgents(); refreshTasks(); }, 30000);
     }
   } else {
     overlay.style.display = 'flex';
     btnSignout.style.display = 'none';
+    disconnectSSE();
     if (_pollInterval) { clearInterval(_pollInterval); _pollInterval = null; }
     if (!status.registered) {
       document.getElementById('auth-msg').textContent = 'No passkey registered yet.';
@@ -1068,6 +1187,7 @@ async function authenticatePasskey() {
 async function signOut() {
   await fetch('/auth/logout', {method: 'POST'});
   if (ws) { ws.close(); ws = null; }
+  disconnectSSE();
   if (_pollInterval) { clearInterval(_pollInterval); _pollInterval = null; }
   await checkAuth();
 }
