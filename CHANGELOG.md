@@ -6,6 +6,64 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.30.0] — 2026-03-05
+
+### Added
+
+**Outbound Webhook Notifications**
+
+Adds fire-and-forget outbound webhook delivery so external systems can react
+to orchestrator events without polling.
+
+- **`WebhookManager`** (`src/tmux_orchestrator/webhook_manager.py`): new module.
+  - `Webhook` dataclass: `id`, `url`, `events`, `secret`, `created_at`,
+    `delivery_count`, `failure_count`, `_deliveries` (circular buffer, maxlen=50).
+  - `WebhookDelivery` dataclass: delivery attempt record with `success`,
+    `status_code`, `error`, `duration_ms`.
+  - `register(url, events, secret=None)` → `Webhook`
+  - `unregister(webhook_id)` → `bool`
+  - `list_all()` → `list[Webhook]`
+  - `get(webhook_id)` → `Webhook | None`
+  - `last_deliveries(webhook_id, n=20)` → `list[WebhookDelivery]` (newest first)
+  - `deliver(event, data)` — async; spawns background `asyncio.create_task` for
+    each matching webhook (fire-and-forget, 5 s timeout).
+  - `_sign(body, secret)` — HMAC-SHA256 signature; `sha256=<hex>` format
+    (compatible with GitHub/Stripe webhook verification).
+  - `KNOWN_EVENTS` frozenset of all supported event names plus `"*"` wildcard.
+- **`OrchestratorConfig.webhook_timeout: float = 5.0`** (`config.py`): per-delivery
+  HTTP timeout configurable via YAML.
+- **`Orchestrator._webhook_manager`** (`orchestrator.py`): created in `__init__`
+  from `WebhookManager(timeout=config.webhook_timeout)`.
+- **Orchestrator webhook integration** (`orchestrator.py`):
+  - `task_complete` — fired in `_route_loop` after successful RESULT.
+  - `task_failed` — fired in `_route_loop` after exhausted retries.
+  - `task_retrying` — fired in `_route_loop` on each retry.
+  - `task_cancelled` — fired in `cancel_task()` (all 3 cancellation paths).
+  - `task_dependency_failed` — fired in `_on_dep_failed()` (cascade).
+  - `workflow_complete` / `workflow_failed` — fired when workflow status
+    transitions; uses `WorkflowManager.get_workflow_status_for_task()` (new).
+- **`WorkflowManager.get_workflow_status_for_task(task_id)`** and
+  **`get_workflow_id_for_task(task_id)`** (`workflow_manager.py`): new helpers
+  for detecting workflow status transitions before/after task completion.
+- **REST endpoints** (`web/app.py`):
+  - `POST /webhooks` — register; validates event names (422 on unknown event);
+    returns `{id, url, events, created_at}`.
+  - `GET /webhooks` — list all with `delivery_count`, `failure_count`.
+  - `DELETE /webhooks/{id}` — remove; 404 if not found.
+  - `GET /webhooks/{id}/deliveries` — last 20 delivery attempts; 404 if not found.
+- **`WebhookCreate` Pydantic model** (`web/app.py`): `url`, `events`,
+  `secret: str | None = None`.
+- **Tests** (`tests/test_webhook_manager.py`): 33 tests covering all CRUD
+  operations, HMAC signing, HTTP 200/500/error delivery recording, wildcard
+  subscriptions, circular buffer, multiple webhooks, and all REST endpoints.
+- **Demo** (`~/Demonstration/v0.30.0-webhooks/run.py`): starts receiver on
+  port 9999, registers webhook, delivers 3 events, prints delivery history.
+- **OpenAPI snapshot** regenerated to include new webhook endpoints.
+
+**Test totals**: 576 (543 existing + 33 new)
+
+---
+
 ## [0.29.0] — 2026-03-05
 
 ### Added

@@ -1251,6 +1251,48 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.25 調査記録 (v0.30.0, 2026-03-05)
+
+#### 実装: Webhook Notifications — アウトバウンドイベント通知
+
+**調査観点:**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| Webhook delivery | Event Notification pattern | GitHub Webhooks https://docs.github.com/en/webhooks/using-webhooks/best-practices-for-using-webhooks |
+| Webhook verification | HMAC-SHA256 署名 | Stripe Webhooks https://docs.stripe.com/webhooks; RFC 2104 HMAC https://datatracker.ietf.org/doc/html/rfc2104 |
+| Webhook API design | RESTful webhook registration | Zalando RESTful API Guidelines §webhook https://opensource.zalando.com/restful-api-guidelines/#webhook |
+| Webhook signature verification | HMAC verification best practices | Shopify webhook verification https://shopify.dev/docs/apps/build/webhooks/signature-verification |
+
+**主要知見:**
+
+1. **GitHub Webhooks (2024)**: GitHub はペイロードに `X-Hub-Signature-256: sha256=<hex>` ヘッダーを付与し、受信者が HMAC-SHA256 で検証する。本実装の `X-Signature-SHA256` ヘッダーはこの慣習に準拠。`sha256=` プレフィックスが標準。
+
+2. **Stripe Webhooks (2024)**: Stripe は `Stripe-Signature` ヘッダーにタイムスタンプと署名を含め、リプレイ攻撃を防ぐ。本実装はシンプルな HMAC のみ（タイムスタンプ付き署名は YAGNI）。
+
+3. **RFC 2104 HMAC**: `HMAC(K, m) = H((K ⊕ opad) || H((K ⊕ ipad) || m))` — 本実装は Python の `hmac.new(key, msg, digestmod)` で RFC 2104 準拠の HMAC-SHA256 を生成。
+
+4. **Zalando RESTful API Guidelines §webhook**: webhook の CRUD は POST/GET/DELETE の REST リソースとして設計し、`delivery_history` を別リソースで返すパターンを採用。`GET /webhooks/{id}/deliveries` がこれに対応。
+
+5. **Fire-and-forget + circular buffer**: 配信は `asyncio.create_task()` でバックグラウンド実行し、ルートループをブロックしない。配信履歴は `collections.deque(maxlen=50)` で最新50件を保持。メモリは O(50 × delivery_size) で有界。
+
+**設計決定:**
+
+- **`deliver()` は fire-and-forget**: `asyncio.create_task()` で各 webhook に非同期 POST。`_route_loop` や `cancel_task()` を絶対にブロックしない。失敗はログとバッファへの記録のみ。
+- **ワイルドカード `"*"`**: `events` に `"*"` を含む webhook はすべてのイベントを受信。GitHub の "all events" に相当。
+- **HMAC ヘッダー条件付き**: `secret` が設定されている場合のみ `X-Signature-SHA256` を送信。secret なし → ヘッダーなし。
+- **`KNOWN_EVENTS` frozenset**: 既知のイベント名を定義し、REST API で 422 バリデーション。タイポによる「サイレント購読失敗」を防ぐ。
+- **`OrchestratorConfig.webhook_timeout: float = 5.0`**: デフォルト5秒。YAML で上書き可能。Stripe の推奨タイムアウト (20s) より短いが、エージェントシステムのローカル環境では5秒で十分。
+
+**デモシナリオ (v0.30.0):**
+- シナリオ: Webhook Notifications デモ
+- デモフォルダ: `~/Demonstration/v0.30.0-webhooks/`
+- ポート 9999 に受信サーバーを起動 (http.server)
+- `task_complete` + `workflow_complete` に webhook 登録 (secret 付き)
+- 3 イベントを配信 → 受信確認 → `GET /webhooks/{id}/deliveries` 表示
+
+---
+
 ## 11. 今後の課題
 
 ### 機能
@@ -1273,6 +1315,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~高~~ ~~Task cancellation — queued and in-progress~~ | **完了 (v0.27.0)** — `Agent.interrupt()`; `ClaudeCodeAgent.interrupt()` (Ctrl-C via tmux); `_cancelled_task_ids` tombstone; `cancel_task()` handles both queued and in-progress; `_dispatch_loop` tombstone check; `_route_loop` RESULT discard; `cancel_workflow()`; `WorkflowManager.cancel()` + no-ops after cancel; `DELETE /tasks/{id}`; `DELETE /workflows/{id}`; 29テスト (497合計) |
 | ~~高~~ ~~Agent drain / graceful shutdown~~ | **完了 (v0.28.0)** — `AgentStatus.DRAINING`; `_set_idle()` DRAINING ガード; `Orchestrator._draining_agents: set[str]`; `drain_agent()` (IDLE即停止/BUSY→DRAINING); `drain_all()`; `_route_loop` RESULT後の auto-stop; `POST /agents/{id}/drain`; `GET /agents/{id}/drain`; `POST /orchestrator/drain`; 23テスト (520合計) |
 | ~~高~~ ~~Task-level depends_on — first-class dependency tracking~~ | **完了 (v0.29.0)** — `_waiting_tasks: dict[str, Task]`; `_task_dependents: dict[str, list[str]]`; `_failed_tasks: set[str]`; `_on_dep_satisfied()` / `_on_dep_failed()` (cascade); `_task_blocking()`; `submit_task(depends_on=...)` hold-and-release; `cancel_task()` waiting-task case; `POST /tasks` + `POST /tasks/batch` (local_id sibling resolution); `GET /tasks/{id}` (depends_on + blocking + status="waiting"); `GET /tasks` list; 23テスト (543合計) |
+| ~~高~~ ~~Webhook notifications — outbound event delivery~~ | **完了 (v0.30.0)** — `WebhookManager` (register/unregister/deliver/sign); `Webhook`/`WebhookDelivery` dataclasses; `collections.deque(maxlen=50)` circular buffer; HMAC-SHA256 signing; fire-and-forget `asyncio.create_task`; `POST/GET/DELETE /webhooks`, `GET /webhooks/{id}/deliveries`; `OrchestratorConfig.webhook_timeout`; 33テスト (576合計) |
 | ~~低~~ ~~エージェントのコンテキスト使用量モニタリング~~ | **完了 (v0.21.0)** — `ContextMonitor` + `GET /agents/{id}/stats`, `GET /context-stats`; `context_warning`/`notes_updated`/`summarize_triggered` STATUS イベント; `context_auto_summarize`; 21 テスト (347 合計) |
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |
 | ~~低~~ ~~Prometheus メトリクス (`/metrics`)~~ | **完了 (v0.13.0)** — `GET /metrics` (prometheus_client 直接使用; 認証不要) |
