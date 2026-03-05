@@ -62,6 +62,10 @@ class TaskSubmit(BaseModel):
     # task is dispatched.  Tasks with unmet deps are held in _waiting_tasks.
     # Reference: GNU Make prerequisites; Dask task graph; DESIGN.md §10.24 (v0.29.0)
     depends_on: list[str] = []
+    # Priority inheritance: when True (default), child task priority = min(own, parent).
+    # Prevents high-priority dependent tasks from being delayed by lower-priority work.
+    # Reference: Liu & Layland JACM (1973); DESIGN.md §10.27 (v0.32.0)
+    inherit_priority: bool = True
 
 
 class TaskBatchItem(BaseModel):
@@ -227,6 +231,9 @@ class WorkflowTaskSpec(BaseModel):
     # Per-task retry count: how many times to re-enqueue on failure before DLQ.
     # Reference: AWS SQS maxReceiveCount; Netflix Hystrix; DESIGN.md §10.21 (v0.26.0)
     max_retries: int = 0
+    # Priority inheritance: when True (default), child task priority = min(own, parent).
+    # Reference: Liu & Layland JACM (1973); DESIGN.md §10.27 (v0.32.0)
+    inherit_priority: bool = True
 
 
 class WorkflowSubmit(BaseModel):
@@ -519,6 +526,7 @@ def create_app(
             required_tags=body.required_tags or None,
             target_group=body.target_group,
             max_retries=body.max_retries,
+            inherit_priority=body.inherit_priority,
         )
         result: dict = {
             "task_id": task.id,
@@ -526,6 +534,7 @@ def create_app(
             "priority": task.priority,
             "max_retries": task.max_retries,
             "retry_count": task.retry_count,
+            "inherit_priority": task.inherit_priority,
         }
         if task.depends_on:
             result["depends_on"] = task.depends_on
@@ -1020,6 +1029,7 @@ def create_app(
                 required_tags=spec.get("required_tags") or None,
                 target_group=spec.get("target_group"),
                 max_retries=spec.get("max_retries", 0),
+                inherit_priority=spec.get("inherit_priority", True),
             )
             local_to_global[spec["local_id"]] = task.id
             global_task_ids.append(task.id)
@@ -1241,6 +1251,7 @@ def create_app(
                 "depends_on": waiting_task.depends_on,
                 "max_retries": waiting_task.max_retries,
                 "retry_count": waiting_task.retry_count,
+                "inherit_priority": waiting_task.inherit_priority,
             }
             if blocking:
                 resp["blocking"] = blocking
@@ -1264,6 +1275,7 @@ def create_app(
                     "depends_on": item.get("depends_on", []),
                     "max_retries": active.max_retries if active else 0,
                     "retry_count": active.retry_count if active else 0,
+                    "inherit_priority": active.inherit_priority if active else True,
                 }
                 if blocking:
                     resp["blocking"] = blocking
@@ -1289,6 +1301,7 @@ def create_app(
                         "agent_id": agent["id"],
                         "max_retries": ct.max_retries,
                         "retry_count": ct.retry_count,
+                        "inherit_priority": ct.inherit_priority,
                     }
                     if blocking:
                         resp["blocking"] = blocking
