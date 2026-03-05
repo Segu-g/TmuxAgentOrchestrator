@@ -292,6 +292,11 @@
       },
       "TaskSubmit": {
         "properties": {
+          "max_retries": {
+            "default": 0,
+            "title": "Max Retries",
+            "type": "integer"
+          },
           "metadata": {
             "additionalProperties": true,
             "default": {},
@@ -420,6 +425,11 @@
           "local_id": {
             "title": "Local Id",
             "type": "string"
+          },
+          "max_retries": {
+            "default": 0,
+            "title": "Max Retries",
+            "type": "integer"
           },
           "priority": {
             "default": 0,
@@ -1391,7 +1401,30 @@
     },
     "/tasks": {
       "get": {
+        "description": "Return all tasks: currently queued, in-progress, and completed/failed.\n\nCombines the pending queue, currently dispatched (in-progress) tasks,\nand per-agent history into a single flat list.  Use ``skip`` and\n``limit`` query params for pagination.\n\nEach task record contains at minimum:\n- ``task_id``: unique task identifier\n- ``status``: one of ``\"queued\"``, ``\"in_progress\"``, ``\"success\"``, ``\"error\"``\n- ``prompt``: task prompt text\n- ``priority``: dispatch priority (lower = higher priority)\n- ``max_retries``: maximum allowed retries\n- ``retry_count``: current retry attempt count\n\nDesign reference:\n- AWS SQS message visibility / dead-letter queue listing\n- DESIGN.md \u00a710.21 (v0.26.0)",
         "operationId": "list_tasks_tasks_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "skip",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "title": "Skip",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -1407,9 +1440,19 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
-        "summary": "List pending tasks"
+        "summary": "List all tasks (active + completed)"
       },
       "post": {
         "operationId": "submit_task_tasks_post",
@@ -1492,6 +1535,46 @@
       }
     },
     "/tasks/{task_id}": {
+      "get": {
+        "description": "Return the status and details of a specific task by its ID.\n\nSearches the pending queue, in-progress tasks, and per-agent history.\n\nReturns:\n- ``task_id``: unique task identifier\n- ``prompt``: task prompt text\n- ``priority``: dispatch priority\n- ``status``: one of ``\"queued\"``, ``\"in_progress\"``, ``\"success\"``, ``\"error\"``\n- ``max_retries``: maximum allowed retries\n- ``retry_count``: current retry attempt count\n- 404 if the task ID is unknown.\n\nDesign reference: DESIGN.md \u00a710.21 (v0.26.0)",
+        "operationId": "get_task_tasks__task_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Task Tasks  Task Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get a specific task by ID"
+      },
       "patch": {
         "description": "Update the priority of a task that is still in the pending queue.\n\nRebuilds the internal heap after the in-place mutation so the new\npriority is respected on the next dispatch cycle.\n\nReturns:\n- ``{\"updated\": true, \"task_id\": ..., \"priority\": N}``\n  if the task was found in the pending queue and its priority was changed.\n- ``{\"updated\": false, \"task_id\": ...}``\n  if the task is not in the pending queue (already dispatched, completed,\n  or never submitted).\n\nDesign reference: Python heapq \"Priority Queue Implementation Notes\"\n(https://docs.python.org/3/library/heapq.html); Liu & Layland (1973)\n\"Scheduling Algorithms for Multiprogramming in a Hard Real-Time\nEnvironment\", JACM 20(1) \u2014 live priority adjustment prevents priority\ninversion and lets operators promote urgent work without re-submitting.",
         "operationId": "update_task_priority_tasks__task_id__patch",

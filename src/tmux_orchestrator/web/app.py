@@ -48,6 +48,9 @@ class TaskSubmit(BaseModel):
     # Capability tags: ALL tags must be present in the target agent's tags list.
     # Reference: FIPA Directory Facilitator (2002); Kubernetes nodeSelector.
     required_tags: list[str] = []
+    # Per-task retry count: how many times to re-enqueue on failure before DLQ.
+    # Reference: AWS SQS maxReceiveCount; Netflix Hystrix; DESIGN.md §10.21 (v0.26.0)
+    max_retries: int = 0
 
 
 class TaskBatchSubmit(BaseModel):
@@ -149,6 +152,9 @@ class WorkflowTaskSpec(BaseModel):
     target_agent: str | None = None
     required_tags: list[str] = []
     priority: int = 0
+    # Per-task retry count: how many times to re-enqueue on failure before DLQ.
+    # Reference: AWS SQS maxReceiveCount; Netflix Hystrix; DESIGN.md §10.21 (v0.26.0)
+    max_retries: int = 0
 
 
 class WorkflowSubmit(BaseModel):
@@ -438,8 +444,15 @@ def create_app(
             reply_to=body.reply_to,
             target_agent=body.target_agent,
             required_tags=body.required_tags or None,
+            max_retries=body.max_retries,
         )
-        result: dict = {"task_id": task.id, "prompt": task.prompt, "priority": task.priority}
+        result: dict = {
+            "task_id": task.id,
+            "prompt": task.prompt,
+            "priority": task.priority,
+            "max_retries": task.max_retries,
+            "retry_count": task.retry_count,
+        }
         if task.reply_to is not None:
             result["reply_to"] = task.reply_to
         if task.target_agent is not None:
@@ -470,8 +483,15 @@ def create_app(
                 reply_to=item.reply_to,
                 target_agent=item.target_agent,
                 required_tags=item.required_tags or None,
+                max_retries=item.max_retries,
             )
-            record: dict = {"task_id": task.id, "prompt": task.prompt, "priority": task.priority}
+            record: dict = {
+                "task_id": task.id,
+                "prompt": task.prompt,
+                "priority": task.priority,
+                "max_retries": task.max_retries,
+                "retry_count": task.retry_count,
+            }
             if task.reply_to is not None:
                 record["reply_to"] = task.reply_to
             if task.target_agent is not None:
@@ -481,9 +501,89 @@ def create_app(
             results.append(record)
         return {"tasks": results}
 
-    @app.get("/tasks", summary="List pending tasks", dependencies=[Depends(auth)])
-    async def list_tasks() -> list[dict]:
-        return orchestrator.list_tasks()
+    @app.get("/tasks", summary="List all tasks (active + completed)", dependencies=[Depends(auth)])
+    async def list_tasks(skip: int = 0, limit: int = 100) -> list[dict]:
+        """Return all tasks: currently queued, in-progress, and completed/failed.
+
+        Combines the pending queue, currently dispatched (in-progress) tasks,
+        and per-agent history into a single flat list.  Use ``skip`` and
+        ``limit`` query params for pagination.
+
+        Each task record contains at minimum:
+        - ``task_id``: unique task identifier
+        - ``status``: one of ``"queued"``, ``"in_progress"``, ``"success"``, ``"error"``
+        - ``prompt``: task prompt text
+        - ``priority``: dispatch priority (lower = higher priority)
+        - ``max_retries``: maximum allowed retries
+        - ``retry_count``: current retry attempt count
+
+        Design reference:
+        - AWS SQS message visibility / dead-letter queue listing
+        - DESIGN.md §10.21 (v0.26.0)
+        """
+        all_tasks: list[dict] = []
+
+        # 1. Pending (queued) tasks
+        for item in orchestrator.list_tasks():
+            all_tasks.append({
+                "task_id": item["task_id"],
+                "prompt": item["prompt"],
+                "priority": item["priority"],
+                "status": "queued",
+                "max_retries": 0,
+                "retry_count": 0,
+                **({"required_tags": item["required_tags"]} if item.get("required_tags") else {}),
+                **({"target_agent": item["target_agent"]} if item.get("target_agent") else {}),
+            })
+
+        # Enrich queued tasks with retry fields from _active_tasks if tracked
+        queued_ids = {t["task_id"] for t in all_tasks}
+
+        # 2. In-progress tasks (currently being worked on by agents)
+        for agent in orchestrator.list_agents():
+            agent_obj = orchestrator.get_agent(agent["id"])
+            if agent_obj is not None and agent_obj._current_task is not None:
+                ct = agent_obj._current_task
+                if ct.id not in queued_ids:
+                    all_tasks.append({
+                        "task_id": ct.id,
+                        "prompt": ct.prompt,
+                        "priority": ct.priority,
+                        "status": "in_progress",
+                        "agent_id": agent["id"],
+                        "max_retries": ct.max_retries,
+                        "retry_count": ct.retry_count,
+                        **({"required_tags": ct.required_tags} if ct.required_tags else {}),
+                        **({"target_agent": ct.target_agent} if ct.target_agent else {}),
+                    })
+
+        # 3. Completed / failed tasks from per-agent history
+        seen_task_ids = {t["task_id"] for t in all_tasks}
+        for agent in orchestrator.list_agents():
+            history = orchestrator.get_agent_history(agent["id"], limit=200) or []
+            for record in history:
+                tid = record.get("task_id")
+                if tid and tid not in seen_task_ids:
+                    seen_task_ids.add(tid)
+                    # Retrieve retry fields from _active_tasks if still present,
+                    # otherwise default to 0 (already cleaned up on success/final failure)
+                    active_task = orchestrator._active_tasks.get(tid)
+                    all_tasks.append({
+                        "task_id": tid,
+                        "prompt": record.get("prompt", ""),
+                        "priority": 0,
+                        "status": record.get("status", "unknown"),
+                        "started_at": record.get("started_at"),
+                        "finished_at": record.get("finished_at"),
+                        "duration_s": record.get("duration_s"),
+                        "error": record.get("error"),
+                        "agent_id": agent["id"],
+                        "max_retries": active_task.max_retries if active_task else 0,
+                        "retry_count": active_task.retry_count if active_task else 0,
+                    })
+
+        # Apply pagination
+        return all_tasks[skip : skip + limit]
 
     @app.get("/agents", summary="List agents and their status", dependencies=[Depends(auth)])
     async def list_agents() -> list[dict]:
@@ -717,6 +817,7 @@ def create_app(
                 depends_on=global_deps or None,
                 target_agent=spec.get("target_agent"),
                 required_tags=spec.get("required_tags") or None,
+                max_retries=spec.get("max_retries", 0),
             )
             local_to_global[spec["local_id"]] = task.id
             global_task_ids.append(task.id)
@@ -826,6 +927,81 @@ def create_app(
         dlq_ids = {e.get("task_id") for e in orchestrator.list_dlq()}
         if task_id in dlq_ids:
             return {"cancelled": False, "task_id": task_id, "status": "already_dispatched"}
+
+        raise HTTPException(status_code=404, detail=f"Task {task_id!r} not found")
+
+    @app.get(
+        "/tasks/{task_id}",
+        summary="Get a specific task by ID",
+        dependencies=[Depends(auth)],
+    )
+    async def get_task(task_id: str) -> dict:
+        """Return the status and details of a specific task by its ID.
+
+        Searches the pending queue, in-progress tasks, and per-agent history.
+
+        Returns:
+        - ``task_id``: unique task identifier
+        - ``prompt``: task prompt text
+        - ``priority``: dispatch priority
+        - ``status``: one of ``"queued"``, ``"in_progress"``, ``"success"``, ``"error"``
+        - ``max_retries``: maximum allowed retries
+        - ``retry_count``: current retry attempt count
+        - 404 if the task ID is unknown.
+
+        Design reference: DESIGN.md §10.21 (v0.26.0)
+        """
+        # 1. Check pending queue
+        for item in orchestrator.list_tasks():
+            if item["task_id"] == task_id:
+                # Enrich with retry fields from _active_tasks if present
+                active = orchestrator._active_tasks.get(task_id)
+                return {
+                    "task_id": task_id,
+                    "prompt": item["prompt"],
+                    "priority": item["priority"],
+                    "status": "queued",
+                    "max_retries": active.max_retries if active else 0,
+                    "retry_count": active.retry_count if active else 0,
+                    **({"required_tags": item["required_tags"]} if item.get("required_tags") else {}),
+                    **({"target_agent": item["target_agent"]} if item.get("target_agent") else {}),
+                }
+
+        # 2. Check in-progress tasks
+        for agent in orchestrator.list_agents():
+            agent_obj = orchestrator.get_agent(agent["id"])
+            if agent_obj is not None and agent_obj._current_task is not None:
+                ct = agent_obj._current_task
+                if ct.id == task_id:
+                    return {
+                        "task_id": ct.id,
+                        "prompt": ct.prompt,
+                        "priority": ct.priority,
+                        "status": "in_progress",
+                        "agent_id": agent["id"],
+                        "max_retries": ct.max_retries,
+                        "retry_count": ct.retry_count,
+                    }
+
+        # 3. Check per-agent history
+        for agent in orchestrator.list_agents():
+            history = orchestrator.get_agent_history(agent["id"], limit=200) or []
+            for record in history:
+                if record.get("task_id") == task_id:
+                    active = orchestrator._active_tasks.get(task_id)
+                    return {
+                        "task_id": task_id,
+                        "prompt": record.get("prompt", ""),
+                        "priority": 0,
+                        "status": record.get("status", "unknown"),
+                        "agent_id": agent["id"],
+                        "started_at": record.get("started_at"),
+                        "finished_at": record.get("finished_at"),
+                        "duration_s": record.get("duration_s"),
+                        "error": record.get("error"),
+                        "max_retries": active.max_retries if active else 0,
+                        "retry_count": active.retry_count if active else 0,
+                    }
 
         raise HTTPException(status_code=404, detail=f"Task {task_id!r} not found")
 
