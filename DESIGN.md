@@ -1382,6 +1382,66 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.28 調査記録 (v0.33.0, 2026-03-05)
+
+#### 実装: Task TTL (Time-to-Live / Expiry) — キュー滞留タスクの自動期限切れ
+
+**調査観点:**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| Message queue TTL / per-message expiry | Message Expiration Pattern | RabbitMQ "Time-To-Live and Expiration" https://www.rabbitmq.com/docs/ttl |
+| Broker-level TTL vs runtime-handled TTL | Native vs Runtime-Handled TTL | Dapr "Message TTL" https://docs.dapr.io/developing-applications/building-blocks/pubsub/pubsub-message-ttl/ |
+| Key expiry / TTL in in-memory stores | EXPIRE / TTL commands | Redis EXPIRE docs https://redis.io/docs/latest/commands/expire/ |
+| Queue retention and expiry | MessageRetentionPeriod / VisibilityTimeout | AWS SQS https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html |
+| Job scheduler expiry best practices | Dead Letter Queue; At-most-once | "Design a Distributed Job Scheduler" https://www.systemdesignhandbook.com/guides/design-a-distributed-job-scheduler/ |
+| Message expiry and dead-letter routing | Azure Service Bus ExpiresAtUtc | Azure Service Bus message expiration https://learn.microsoft.com/en-us/azure/service-bus-messaging/message-expiration |
+
+**主要知見:**
+
+1. **RabbitMQ TTL — "The server guarantees that expired messages will not be delivered" (rabbitmq.com/docs/ttl)**:
+   - TTL は per-message および per-queue の両レベルで設定可能。両方指定時は小さい方が適用される。
+   - Quorum キューでは expired messages はキュー先頭到達時にデッドレターされる。
+   - 本実装は "lazy expiry" を採用: 定期スキャンではなく `_dispatch_loop` でのデキュー時にチェック。これは RabbitMQ クラシックキューの「キュー先頭到達時の期限チェック」と同等。
+
+2. **Azure Service Bus — message expiration (Microsoft Docs 2024)**:
+   - `AbsoluteExpiryTime` = enqueue_time + TTL の絶対タイムスタンプとして保存。
+   - 本実装も同様: `submitted_at + ttl` を `expires_at` として一度計算し、以後変更しない。
+   - Azure は TTL を "time from when the message was enqueued" として定義。本実装も同一セマンティクス。
+
+3. **Dapr pubsub-message-ttl — Native vs Runtime-Handled TTL (docs.dapr.io)**:
+   - ブローカーが TTL ネイティブサポートの場合 (e.g. Azure Service Bus): Dapr は TTL 設定をブローカーに転送。
+   - サポートなしの場合: Dapr ランタイムが TTL ロジックを実装 ("Dapr handles the TTL logic within the runtime")。
+   - 本実装は Dapr の "runtime-handled" パターン: ブローカー (asyncio.PriorityQueue) は TTL を理解しないため、
+     オーケストレーターが全ての期限切れロジックを実装。
+
+4. **Redis EXPIRE — active + passive expiry (redis.io/docs)**:
+   - **Passive**: キーがアクセスされた時のみ TTL チェック (lazy expiry)。
+   - **Active**: 定期的な expire サイクルが期限切れキーをスキャン。
+   - 本実装は両方を組み合わせ: `_dispatch_loop` での lazy expiry (queued tasks) + `_ttl_reaper_loop` での active scan (waiting tasks)。
+   - `_waiting_tasks` は `_dispatch_loop` を通らないため active scan が必要。
+
+5. **Distributed Job Scheduler — Dead Letter Queue (systemdesignhandbook.com)**:
+   - 期限切れタスクは DLQ に移すのではなく `_failed_tasks` に追加して依存関係カスケードを発火。
+   - "Jobs that fail repeatedly are moved to a separate inspection queue to prevent them from blocking the main queue" — 本実装では TTL 期限切れタスクも同様に `_failed_tasks` でクリーンに処理。
+
+**設計決定:**
+
+- **`expires_at` は submit 時に一度計算、以後不変**: RabbitMQ / Azure と同一セマンティクス。リトライ時でも `expires_at` は更新しない（リトライは TTL 期限に影響しない）。
+- **二重期限チェック**: (1) `_dispatch_loop` — queued tasks のデキュー時; (2) `_ttl_reaper_loop` — `_waiting_tasks` の定期スキャン。Waiting tasks は dispatch loop を通らないため別経路が必要。
+- **`ttl_reaper_poll = 1.0` s デフォルト**: エージェントタスクの典型的 TTL (秒〜分) に対して 1 s の粒度は十分。ミリ秒 TTL には不向きだが agentic tasks には適切。
+- **期限切れ = 失敗セマンティクス**: TTL 期限切れは task failure として扱われ、`_on_dep_failed()` で依存タスクへカスケード。これは RabbitMQ の dead-letter-on-expiry と同等の効果。
+- **`from_reaper: bool` フィールド**: `task_expired` イベントで期限切れ経路を識別可能にする (デバッグ/可観測性)。
+
+**デモシナリオ (v0.33.0):**
+- agent-a: TTL=30s の quick task → 正常完了 (`ttl_demo_a.py` 作成)
+- agent-b: 15s blocker task を実行中 → 同時に TTL=8s の task B をキューに投入
+- Task B が 8 秒後に期限切れ (`from_reaper=False` — dispatch loop 経路)
+- Task C (depends_on task B) → `task_dependency_failed` カスケード
+- デモフォルダ: `~/Demonstration/v0.33.0-task-ttl/`
+
+---
+
 ## 11. 今後の課題
 
 ### 機能
@@ -1407,6 +1467,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~高~~ ~~Webhook notifications — outbound event delivery~~ | **完了 (v0.30.0)** — `WebhookManager` (register/unregister/deliver/sign); `Webhook`/`WebhookDelivery` dataclasses; `collections.deque(maxlen=50)` circular buffer; HMAC-SHA256 signing; fire-and-forget `asyncio.create_task`; `POST/GET/DELETE /webhooks`, `GET /webhooks/{id}/deliveries`; `OrchestratorConfig.webhook_timeout`; 33テスト (576合計) |
 | ~~高~~ ~~Agent Groups / Named Pools~~ | **完了 (v0.31.0)** — `GroupManager` (create/delete/get/list_all/add_agent/remove_agent); `Task.target_group`; `AgentConfig.groups`; `OrchestratorConfig.groups`; `find_idle_worker(allowed_agent_ids=...)`; `POST/GET/DELETE /groups`, `POST/DELETE /groups/{name}/agents`; `target_group` in TaskSubmit/TaskBatchItem/WorkflowTaskSpec; 38テスト (614合計) |
 | ~~高~~ ~~Priority inheritance for sub-tasks~~ | **完了 (v0.32.0)** — `Task.inherit_priority: bool = True`; `Orchestrator._task_priorities: dict[str, int]`; `submit_task(inherit_priority=)` — `min(own, parent_priorities)` when True; `TaskSubmit.inherit_priority`; `WorkflowTaskSpec.inherit_priority`; `GET /tasks/{id}` returns `inherit_priority`; OpenAPI snapshot updated; 22テスト (636合計) |
+| ~~高~~ ~~Task TTL / expiry — キュー滞留タスクの自動期限切れ~~ | **完了 (v0.33.0)** — `Task.ttl`/`submitted_at`/`expires_at`; `submit_task(ttl=)`; `OrchestratorConfig.default_task_ttl`/`ttl_reaper_poll`; `_dispatch_loop` TTL check; `_ttl_reaper_loop` for waiting tasks; `_expire_task()` cascade; `task_expired` STATUS event; REST `TaskSubmit`/`TaskBatchItem`/`WorkflowTaskSpec` ttl field; `GET /tasks` + `GET /tasks/{id}` expires_at; OpenAPI snapshot updated; 23テスト (659合計) |
 | ~~低~~ ~~エージェントのコンテキスト使用量モニタリング~~ | **完了 (v0.21.0)** — `ContextMonitor` + `GET /agents/{id}/stats`, `GET /context-stats`; `context_warning`/`notes_updated`/`summarize_triggered` STATUS イベント; `context_auto_summarize`; 21 テスト (347 合計) |
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |
 | ~~低~~ ~~Prometheus メトリクス (`/metrics`)~~ | **完了 (v0.13.0)** — `GET /metrics` (prometheus_client 直接使用; 認証不要) |

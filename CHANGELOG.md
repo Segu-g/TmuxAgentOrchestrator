@@ -6,6 +6,60 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.33.0] — 2026-03-05
+
+### Added
+
+**Task TTL (Time-to-Live / Expiry)**
+
+Tasks that sit in the queue too long are now automatically expired rather than
+waiting indefinitely.  Expiry is enforced in two complementary paths:
+
+- **`Task.ttl: float | None = None`**: per-task TTL in seconds from submission.
+  `None` = never expires (default).
+- **`Task.submitted_at: float`**: wall-clock submission time (`time.time()`),
+  set automatically when the `Task` is constructed.
+- **`Task.expires_at: float | None`**: absolute expiry timestamp, computed once
+  at `submit_task()` time as `submitted_at + ttl`.  `None` when no TTL is set.
+- **`OrchestratorConfig.default_task_ttl: float | None = None`**: global default
+  TTL applied to tasks that do not specify an explicit `ttl`.
+- **`OrchestratorConfig.ttl_reaper_poll: float = 1.0`**: poll interval for the
+  background reaper task.
+- **`submit_task(ttl=None)`**: new keyword argument.  Effective TTL is
+  `ttl` if set, otherwise `config.default_task_ttl`.
+- **TTL check in `_dispatch_loop()`**: before dispatching a dequeued task, the
+  loop checks `task.expires_at`.  If `time.time() > task.expires_at` the task is
+  discarded, a `task_expired` STATUS event is published, `WorkflowManager.on_task_failed()`
+  is called, and `_on_dep_failed()` cascades failure to waiting dependents.
+- **`_ttl_reaper_loop()`**: background `asyncio.Task` (started in `start()`,
+  cancelled in `stop()`) that scans `_waiting_tasks` every `ttl_reaper_poll`
+  seconds.  Expired waiting tasks are removed, added to `_failed_tasks`, and
+  cascade-failed via `_on_dep_failed()`.
+- **REST `TaskSubmit`**: new `ttl: float | None = None` field.
+  `POST /tasks` now accepts `ttl` and returns `ttl`, `submitted_at`, `expires_at`.
+- **REST `TaskBatchItem`**: new `ttl: float | None = None` field.
+  `POST /tasks/batch` supports per-task TTL.
+- **REST `WorkflowTaskSpec`**: new `ttl: float | None = None` field.
+  `POST /workflows` supports per-task TTL.
+- **`GET /tasks`**: response per-task now includes `submitted_at`, `ttl`, `expires_at`.
+- **`GET /tasks/{task_id}`**: response includes `submitted_at`, `ttl`, `expires_at`
+  for waiting, queued, and in-progress tasks.
+- **`list_tasks()`**: includes `submitted_at`, `ttl`, `expires_at` in each entry.
+- **`Task.to_dict()`**: includes `submitted_at`, `ttl`, `expires_at`.
+- **OpenAPI snapshot** regenerated.
+
+Design references:
+- RabbitMQ "Time-To-Live and Expiration" (rabbitmq.com/docs/ttl)
+- Azure Service Bus message expiration (Microsoft Docs 2024)
+- Dapr pubsub-message-ttl (docs.dapr.io 2024)
+- AWS SQS `MessageRetentionPeriod`
+- DESIGN.md §10.28 (v0.33.0)
+
+**Tests**: 23 new tests in `tests/test_task_ttl.py`.
+Total test count: 659 (was 636).
+
+---
+
 ## [0.32.0] — 2026-03-05
 
 ### Added
