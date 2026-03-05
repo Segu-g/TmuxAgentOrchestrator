@@ -612,6 +612,48 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.13 調査記録 (v0.17.0, 2026-03-05)
+
+#### 実装: タスクキャンセル + エージェント別タスク履歴 + Director → Workers デモ
+
+**調査観点:**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| タスクキャンセル | Async Request-Reply キャンセル | Microsoft Azure "Asynchronous Request-Reply pattern" (2024) [learn.microsoft.com](https://learn.microsoft.com/en-us/azure/architecture/patterns/async-request-reply) |
+| タスク履歴・観測性 | Per-agent タスク履歴 | TAMAS (IBM, 2025) "Beyond Black-Box Benchmarking" arXiv:2503.06745 |
+| エージェント観測性 | Langfuse AI Agent Observability | Langfuse "AI Agent Observability" (2024) [langfuse.com](https://langfuse.com/blog/2024-07-ai-agent-observability-with-langfuse) |
+| Director-Worker パターン | Orchestrator-Worker / Role-Based Cooperation | Guo et al. "Designing LLM-based Multi-Agent Systems for Software Engineering Tasks" arXiv:2511.08475 (2024) |
+| Director-Worker パターン | Hierarchical Coordination | Google ADK "Developer's guide to multi-agent patterns" (2025) |
+
+**主要知見:**
+
+1. **非同期 REST キャンセル (Azure, 2024)**: タスク提出時に返されるロケーション URL への DELETE/POST で非同期タスクをキャンセルできる。本実装では `POST /tasks/{id}/cancel` という action sub-resource パターンを採用。DELETE だとリソース削除と混同されるため POST が適切。キャンセルは冪等 (idempotent) であるべきで、既にディスパッチ済みタスクには `{cancelled: false, status: "already_dispatched"}` を返す。
+
+2. **TAMAS エージェント分析 (IBM, 2025)**: タスク別エージェントパフォーマンストラッキング（処理時間、スループット、エラー率）が LLM マルチエージェントシステムの「ブラックボックス」問題を解決する。各エージェントのタスク履歴を `{task_id, started_at, finished_at, duration_s, status}` として記録することで、ボトルネック特定・パフォーマンス最適化が可能になる。
+
+3. **Orchestrator-Worker パターン (Guo et al., 2024)**: 多エージェント LLM システムの 47% がロールベース協調を採用。Orchestrator が動的にサブタスクを分解し、各 Worker に割り当て、結果を統合する。本デモの Director (1) + Workers (3) 構成はこのパターンの典型例。
+
+4. **asyncio.PriorityQueue のキャンセル実装**: `asyncio.PriorityQueue` は Python stdlib の実装で、ヒープ (`_queue`) を直接操作してキャンセルを実装した。`heapq.heapify()` でヒープ性質を再構築し、`_unfinished_tasks` カウンタを手動で調整する。これは内部 API 依存だが、asyncio のバージョン間で安定していることを確認した（Python 3.11-3.12）。
+
+**設計決定:**
+
+- **`cancel_task` のキュー操作**: `asyncio.PriorityQueue._queue` ヒープを直接操作してキャンセル対象を除外し再構築する。Queue の public API にはキャンセルメソッドがないため内部操作は不可避。`_unfinished_tasks` の手動デクリメントで `task_done()` の不整合を防ぐ。
+- **タスク履歴の上限 200**: 履歴は append-only で蓄積するため上限 200 を設定。`get_agent_history()` は末尾 200 件 → 逆順で返す。エージェントが長期稼働する場合でも最大メモリは O(200 × entry_size)。
+- **`started_at` の計算**: `time.monotonic()` で経過時間を計測し `duration_s` を算出。`started_at` は `finished_at - duration_s` として逆算する。壁時計を使わないことで clock skew に頑健。
+- **REST 404 判定ロジック**: `POST /tasks/{id}/cancel` で「未知のタスク」を区別するには `_task_started_at`（インフライト）、`_completed_tasks`（完了済み）、`_dlq`（デッドレター）を参照。いずれにも見つからなければ 404。
+- **デモの `wait_for_task_completion`**: v0.17.0 の新機能 `GET /agents/{id}/history` を使ってタスク完了を検知する。BUSY→IDLE ポーリングと異なり、タスクが高速完了しても history レコードが残るので見逃しがない。
+
+**Director-Workers デモ成果 (v0.17.0)**:
+- 4 エージェント並列: agent-director + agent-w1 + agent-w2 + agent-w3
+- 3 ワーカーが `endpoint_post_items.py`、`endpoint_get_items.py`、`endpoint_delete_items.py` を並列実装
+- タスクキャンセルをライブデモ: `b0264aed` タスクが `agent-w1` が BUSY 中にキューで待機 → キャンセル確認
+- Director が `integration_report.md` (3565 bytes) を生成、CRUD サービス全体を評価
+- 経過時間 70 秒、DLQ 0 件、全 OK
+- デモフォルダ: `~/Demonstration/v0.17.0-director-workers/`
+
+---
+
 ## 11. 今後の課題
 
 ### 機能
@@ -633,7 +675,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | 優先度 | シナリオ | パターン |
 |--------|----------|---------|
 | ~~**高**~~ ~~**AtCoder Heuristic Contest (AHC) best-of-N**~~ | **完了 (v0.15.0)** — 3 ClaudeCodeAgent 並列実行、Weighted Knapsack 問題、`POST /tasks/batch` で一括提出、スコアで勝者選択 |
-| 中 | Director → Workers でマイクロサービス API を分割実装 | Director → Workers |
+| ~~中~~ ~~Director → Workers でマイクロサービス API を分割実装~~ | **完了 (v0.17.0)** — 4 ClaudeCodeAgent 並列、3 ワーカーが FastAPI エンドポイントを並列実装、Director が `integration_report.md` 生成 |
 | ~~中~~ ~~agent-a が実装 → agent-b がレビュー → agent-a が修正~~ | **完了 (v0.16.0)** — Peer review pipeline デモ |
 
 **AHC best-of-N デモ完了 (v0.15.0)**:

@@ -6,6 +6,63 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.17.0] — 2026-03-05
+
+### Added
+
+**Task Cancellation — `POST /tasks/{id}/cancel`**
+
+Allows operators to remove a pending task from the priority queue before it
+is dispatched to an agent.  Follows the async request-reply pattern described
+in Microsoft Azure Architecture Center "Asynchronous Request-Reply pattern"
+(2024).
+
+- `Orchestrator.cancel_task(task_id)` — removes the task from the heap by
+  rebuilding it without the cancelled entry; adjusts `_unfinished_tasks`
+  counter; returns `True` if found and removed, `False` otherwise.
+- Publishes a `task_cancelled` STATUS event on successful cancellation.
+- `POST /tasks/{id}/cancel` REST endpoint — returns:
+  - `{cancelled: true, status: "cancelled"}` if removed from queue.
+  - `{cancelled: false, status: "already_dispatched"}` if not in queue but was tracked.
+  - `404` if the task ID is completely unknown.
+- Distinguishes pending vs already-dispatched vs unknown via `_task_started_at`,
+  `_completed_tasks`, and DLQ lookup.
+- 9 new tests in `tests/test_task_cancel.py`.
+
+**Per-Agent Task History — `GET /agents/{id}/history`**
+
+Enables per-agent observability: track every completed task with timing and
+outcome.  Follows the TAMAS (IBM, 2025) "Beyond Black-Box Benchmarking"
+observability model (arXiv:2503.06745).
+
+- `Orchestrator.get_agent_history(agent_id, limit=50)` — returns the last N
+  completed task records for an agent, most-recent-first; capped at 200.
+  Each record: `task_id`, `prompt`, `started_at`, `finished_at`,
+  `duration_s`, `status` ("success"|"error"), `error`.
+- Dispatch loop records `_task_started_at` and `_task_started_prompt` on
+  each dispatch; `_route_loop` calls `_record_agent_history()` on RESULT.
+- `GET /agents/{id}/history?limit=N` REST endpoint — 404 for unknown agents.
+- 12 new tests in `tests/test_agent_history.py`.
+
+**Director → Workers Demo — `~/Demonstration/v0.17.0-director-workers/`**
+
+Demonstrates the Orchestrator-Worker pattern (Guo et al. arXiv:2511.08475,
+2024) with 4 real `ClaudeCodeAgent` instances:
+
+- `agent-director` — receives coordination task, reads worker outputs,
+  writes `integration_report.md` summarising the CRUD service
+- `agent-w1` — implements POST /items endpoint (`endpoint_post_items.py`)
+- `agent-w2` — implements GET /items/{id} endpoint (`endpoint_get_items.py`)
+- `agent-w3` — implements DELETE /items/{id} endpoint (`endpoint_delete_items.py`)
+- 3 workers run in parallel via `target_agent` routing (`POST /tasks`)
+- `reply_to=agent-director` on each task routes results to director's mailbox
+- Task cancellation demonstrated live: a dummy task queued while workers are
+  busy, then cancelled before dispatch
+- Per-agent history used to poll for task completion (replaces BUSY→IDLE polling)
+- All 4 artifacts verified: 3 endpoint .py files + integration_report.md
+- 0 DLQ entries, 0 errors
+- Total elapsed: ~70 seconds
+
 ## [0.16.0] — 2026-03-05
 
 ### Added
