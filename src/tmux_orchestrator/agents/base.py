@@ -131,6 +131,26 @@ class Agent(ABC):
         """Enqueue *task* for execution."""
         await self._task_queue.put(task)
 
+    async def interrupt(self) -> bool:
+        """Interrupt the currently running task.
+
+        Send an interrupt signal to the agent process.  Returns ``True`` if an
+        interrupt was sent, ``False`` if the agent does not support interruption
+        or has no active process.
+
+        The default implementation is a no-op (returns ``False``).  Concrete
+        subclasses that drive a subprocess should override this to send the
+        appropriate signal (e.g., Ctrl-C / SIGINT).
+
+        Design references:
+        - POSIX SIGTERM/SIGKILL model — graceful interrupt before forceful kill
+        - Java Future.cancel(mayInterruptIfRunning=true) — cooperative cancellation
+        - Go context.Context cancellation — propagated cancellation signal
+        - Kubernetes Pod deletion grace period — give running process time to clean up
+        - DESIGN.md §10.22 (v0.27.0)
+        """
+        return False
+
     @abstractmethod
     async def _dispatch_task(self, task: Task) -> None:
         """Write the task to the agent process (pane or stdin)."""

@@ -379,6 +379,39 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
         logger.info("ClaudeCodeAgent %s stopped", self.id)
 
     # ------------------------------------------------------------------
+    # Interruption
+    # ------------------------------------------------------------------
+
+    async def interrupt(self) -> bool:
+        """Send Ctrl-C to the tmux pane to interrupt the running task.
+
+        Uses libtmux ``send_keys("C-c")`` which sends the SIGINT key sequence
+        to the pane's foreground process.  Returns ``True`` if a pane is
+        attached, ``False`` otherwise.
+
+        After the interrupt, the pane output will eventually settle back to
+        the agent's prompt.  The ``_wait_for_completion`` poll loop in
+        ``_dispatch_task`` will detect this and publish a RESULT; the
+        orchestrator's ``_route_loop`` will discard the result if the task
+        has been added to ``_cancelled_task_ids``.
+
+        Design references:
+        - POSIX SIGTERM/SIGKILL: send SIGINT (Ctrl-C) before forced teardown
+        - Java Future.cancel(mayInterruptIfRunning=true): cooperative interruption
+        - Go context.Context cancellation: caller signals intent, callee checks
+        - Kubernetes Pod deletion grace period: SIGTERM → wait → SIGKILL
+        - DESIGN.md §10.22 (v0.27.0)
+        """
+        if self.pane is None:
+            return False
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, self.pane.send_keys, "C-c"
+        )
+        logger.info("ClaudeCodeAgent %s: sent C-c interrupt to pane %s", self.id, self.pane.id)
+        return True
+
+    # ------------------------------------------------------------------
     # Task dispatch
     # ------------------------------------------------------------------
 

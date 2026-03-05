@@ -108,6 +108,13 @@ class Orchestrator:
         # Reference: AWS SQS maxReceiveCount / Redrive policy; Netflix Hystrix retry;
         # Polly .NET resilience library. DESIGN.md §10.21 (v0.26.0)
         self._active_tasks: dict[str, Task] = {}
+        # Tombstone set for cancelled tasks.  Tasks added here are:
+        # 1. Skipped by _dispatch_loop when dequeued (queued-cancellation tombstone).
+        # 2. Silently discarded by _route_loop when a RESULT arrives for an
+        #    in-progress task that was cancelled via cancel_task().
+        # Reference: Kubernetes Pod deletion grace period; POSIX SIGTERM/SIGKILL;
+        # Go context.Context cancellation; Java Future.cancel(). DESIGN.md §10.22 (v0.27.0)
+        self._cancelled_task_ids: set[str] = set()
         # Token-bucket rate limiter for task submission backpressure.
         # None → unlimited (default).  Set via set_rate_limiter() or
         # reconfigure_rate_limiter(), or auto-created from config if
@@ -508,23 +515,64 @@ class Orchestrator:
         return True
 
     async def cancel_task(self, task_id: str) -> bool:
-        """Remove *task_id* from the pending queue.
+        """Cancel *task_id* whether it is queued or currently in-progress.
 
-        Returns True if the task was found and removed; False if not found
-        (already dispatched, never submitted, or already completed).
+        Handles two cases:
 
-        Cancelled tasks are discarded — they are NOT moved to the DLQ.
-        A ``task_cancelled`` STATUS event is published on successful cancellation.
+        1. **In-progress** (task is in ``_active_tasks``): adds task_id to
+           ``_cancelled_task_ids``, calls ``agent.interrupt()`` to send Ctrl-C,
+           and publishes STATUS ``task_cancelled`` with ``was_running=True``.
+           When the agent's RESULT eventually arrives, ``_route_loop`` sees
+           the tombstone and silently discards it.
 
-        Design: task cancellation via REST DELETE/POST follows the async
-        request-reply pattern described in Microsoft Azure Architecture Center
-        "Asynchronous Request-Reply pattern" (2024).
+        2. **Queued** (task is in ``_task_queue``): removes task from the heap
+           and adjusts internal counters; publishes STATUS ``task_cancelled``
+           with ``was_running=False``.
+
+        Returns ``True`` if the task was found and cancelled; ``False`` if not
+        found (already completed, dead-lettered, or never submitted).
+
+        Cancelled tasks are NOT moved to the DLQ.
+
+        Design references:
+        - Kubernetes Pod deletion grace period — SIGTERM → grace → SIGKILL
+        - POSIX SIGTERM/SIGKILL model — cooperative interrupt before forced kill
+        - Java Future.cancel(mayInterruptIfRunning=true) — in-flight interruption
+        - Go context.Context cancellation — propagated cancellation token
+        - Microsoft Azure "Asynchronous Request-Reply pattern" (2024)
+        - DESIGN.md §10.22 (v0.27.0)
         """
-        # Snapshot the underlying heap and rebuild it without the cancelled task.
+        # Case 1: task is in-progress (dispatched to an agent).
+        task = self._active_tasks.get(task_id)
+        if task is not None:
+            # Find the agent currently running this task
+            agent = None
+            for a in self.registry.all_agents().values():
+                if a._current_task is not None and a._current_task.id == task_id:
+                    agent = a
+                    break
+            # Mark as cancelled so _route_loop discards the eventual RESULT
+            self._cancelled_task_ids.add(task_id)
+            # Send interrupt signal to the agent process
+            if agent is not None:
+                await agent.interrupt()
+            await self.bus.publish(Message(
+                type=MessageType.STATUS,
+                from_id="__orchestrator__",
+                payload={
+                    "event": "task_cancelled",
+                    "task_id": task_id,
+                    "was_running": True,
+                },
+            ))
+            logger.info("Task %s cancelled (in-progress, interrupt sent)", task_id)
+            return True
+
+        # Case 2: task is still queued — remove from heap directly.
         items = list(self._task_queue._queue)  # type: ignore[attr-defined]
         new_items = [(p, seq, t) for p, seq, t in items if t.id != task_id]
         if len(new_items) == len(items):
-            # Task was not in the queue.
+            # Task was not in the queue and not in-progress.
             return False
 
         # Rebuild the queue with remaining items.
@@ -547,10 +595,52 @@ class Orchestrator:
             payload={
                 "event": "task_cancelled",
                 "task_id": task_id,
+                "was_running": False,
             },
         ))
         logger.info("Task %s cancelled from queue", task_id)
         return True
+
+    async def cancel_workflow(self, workflow_id: str) -> dict | None:
+        """Cancel all tasks in *workflow_id* and mark the workflow as cancelled.
+
+        Iterates over all task IDs registered to the workflow and cancels each
+        one (queued or in-progress).  Returns a summary dict with two keys:
+
+        - ``cancelled``: list of task IDs that were successfully cancelled.
+        - ``already_done``: list of task IDs that were not found (already
+          completed, dead-lettered, or unknown).
+
+        Returns ``None`` if *workflow_id* is unknown.
+
+        Design reference:
+        - Apache Airflow ``dag_run.update_state("cancelled")`` — bulk cancel
+        - AWS Step Functions ``StopExecution`` — cancel a running state machine
+        - DESIGN.md §10.22 (v0.27.0)
+        """
+        wm = self._workflow_manager
+        run = wm.get(workflow_id)
+        if run is None:
+            return None
+
+        cancelled_ids: list[str] = []
+        already_done_ids: list[str] = []
+
+        for task_id in list(run.task_ids):
+            ok = await self.cancel_task(task_id)
+            if ok:
+                cancelled_ids.append(task_id)
+            else:
+                already_done_ids.append(task_id)
+
+        # Mark the workflow as cancelled regardless of individual task outcomes.
+        wm.cancel(workflow_id)
+
+        return {
+            "workflow_id": workflow_id,
+            "cancelled": cancelled_ids,
+            "already_done": already_done_ids,
+        }
 
     # ------------------------------------------------------------------
     # Per-agent task history
@@ -596,6 +686,25 @@ class Orchestrator:
                 continue
             except asyncio.CancelledError:
                 break
+
+            # Tombstone check: skip tasks that were cancelled while queued.
+            # The task_id is placed in _cancelled_task_ids by cancel_task() when
+            # the PriorityQueue does not yet contain the task (race window) or as
+            # the primary cancellation mechanism for queued tasks.
+            if task.id in self._cancelled_task_ids:
+                self._cancelled_task_ids.discard(task.id)
+                self._task_queue.task_done()
+                await self.bus.publish(Message(
+                    type=MessageType.STATUS,
+                    from_id="__orchestrator__",
+                    payload={
+                        "event": "task_cancelled",
+                        "task_id": task.id,
+                        "was_running": False,
+                    },
+                ))
+                logger.info("Task %s skipped (tombstone-cancelled)", task.id)
+                continue
 
             # Check task dependency graph: re-queue if any dependency is not yet done.
             unmet = [dep for dep in task.depends_on if dep not in self._completed_tasks]
@@ -877,10 +986,24 @@ class Orchestrator:
             elif msg.type == MessageType.CONTROL and msg.to_id == "__orchestrator__":
                 asyncio.create_task(self._handle_control(msg))
             elif msg.type == MessageType.RESULT:
+                task_id = msg.payload.get("task_id")
+                # Discard RESULTs for cancelled in-progress tasks.
+                # When cancel_task() finds a task in _active_tasks it adds its id
+                # to _cancelled_task_ids and sends interrupt(); the eventual RESULT
+                # from the agent must be silently dropped so workflow callbacks and
+                # reply_to routing are never triggered for a cancelled task.
+                if task_id and task_id in self._cancelled_task_ids:
+                    self._cancelled_task_ids.discard(task_id)
+                    self._active_tasks.pop(task_id, None)
+                    self._task_started_at.pop(task_id, None)
+                    self._task_started_prompt.pop(task_id, None)
+                    self._task_reply_to.pop(task_id, None)
+                    self._bus_queue.task_done()
+                    logger.info("Task %s result discarded (cancelled in-progress)", task_id)
+                    continue
                 self._buffer_director_result(msg)
                 error = msg.payload.get("error")
                 self.registry.record_result(msg.from_id, error=bool(error))
-                task_id = msg.payload.get("task_id")
                 if not error and task_id:
                     self._completed_tasks.add(task_id)
                     self._workflow_manager.on_task_complete(task_id)

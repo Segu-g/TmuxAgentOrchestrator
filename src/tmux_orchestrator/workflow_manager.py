@@ -60,7 +60,7 @@ class WorkflowRun:
     id: str
     name: str
     task_ids: list[str]
-    status: str = "pending"  # pending | running | complete | failed
+    status: str = "pending"  # pending | running | complete | failed | cancelled
     created_at: float = field(default_factory=time.time)
     completed_at: float | None = None
     _completed: set[str] = field(default_factory=set, repr=False)
@@ -141,10 +141,13 @@ class WorkflowManager:
         Marks the task as done and transitions the workflow to ``"complete"``
         if all tasks have now finished successfully.
 
-        No-op when *task_id* is not associated with any tracked workflow.
+        No-op when *task_id* is not associated with any tracked workflow, or
+        when the workflow has already been cancelled.
         """
         run = self._get_run_for_task(task_id)
         if run is None:
+            return
+        if run.status == "cancelled":
             return
         run._completed.add(task_id)
         run._failed.discard(task_id)  # idempotent: remove any prior failure
@@ -156,14 +159,40 @@ class WorkflowManager:
         Marks the task as failed and immediately transitions the workflow to
         ``"failed"`` status.
 
-        No-op when *task_id* is not associated with any tracked workflow.
+        No-op when *task_id* is not associated with any tracked workflow, or
+        when the workflow has already been cancelled.
         """
         run = self._get_run_for_task(task_id)
         if run is None:
             return
+        if run.status == "cancelled":
+            return
         run._failed.add(task_id)
         run._completed.discard(task_id)
         self._update_status(run)
+
+    def cancel(self, workflow_id: str) -> list[str]:
+        """Mark a workflow as cancelled and return its task IDs.
+
+        Sets the workflow status to ``"cancelled"`` and records the completion
+        time.  Subsequent calls to :meth:`on_task_complete` and
+        :meth:`on_task_failed` for tasks belonging to this workflow are no-ops.
+
+        Returns the list of task IDs belonging to the workflow, or an empty
+        list if *workflow_id* is unknown.
+
+        Design references:
+        - Apache Airflow ``dag_run.update_state("cancelled")``: bulk workflow cancel
+        - AWS Step Functions ``StopExecution``: cancel a running state machine
+        - DESIGN.md §10.22 (v0.27.0)
+        """
+        run = self._runs.get(workflow_id)
+        if run is None:
+            return []
+        run.status = "cancelled"
+        if run.completed_at is None:
+            run.completed_at = time.time()
+        return list(run.task_ids)
 
     def on_task_retrying(self, task_id: str) -> None:
         """Record that a task is being retried (intermediate failure).
