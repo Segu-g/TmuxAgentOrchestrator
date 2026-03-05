@@ -74,6 +74,22 @@ print("  • Update NOTES.md with the test name and decision rationale")
 print("  • If the feature is large, break it into smaller acceptance criteria")
 print("    and run /tdd for each one separately")
 print("  • When the full feature is done, run /progress to notify your parent")
+
+# Notify parent agent that a TDD cycle has been scaffolded (best-effort)
+try:
+    try:
+        from tmux_orchestrator.slash_notify import notify_parent
+    except ImportError:
+        notify_parent = None
+    if notify_parent is not None:
+        sent = notify_parent(
+            event_type="tdd_cycle_started",
+            extra={"feature": feature, "phase": "red", "agent_id": agent_id},
+        )
+        if sent:
+            print(f"✓ Parent agent notified (tdd_cycle_started: {feature})")
+except Exception:
+    pass  # Notification is best-effort — never block TDD scaffolding
 ```
 
 The TDD cycle produces verifiable, maintainable code. Each micro-cycle (5–15 min) should result

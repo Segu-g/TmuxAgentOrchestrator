@@ -92,6 +92,24 @@ print("  2. Write failing tests first (Red) — use `/tdd` for guidance")
 print("  3. Implement minimally (Green), then refactor")
 print("  4. Update NOTES.md as you progress")
 print("  5. Run /progress when done to notify your parent agent")
+
+# Notify parent agent about plan creation (no-op if not in orchestrated env)
+try:
+    import sys, importlib
+    # Support both installed package and PYTHONPATH=src invocation
+    try:
+        from tmux_orchestrator.slash_notify import notify_parent
+    except ImportError:
+        notify_parent = None
+    if notify_parent is not None:
+        sent = notify_parent(
+            event_type="plan_created",
+            extra={"description": description, "plan_path": str(plan_path)},
+        )
+        if sent:
+            print(f"✓ Parent agent notified (plan_created)")
+except Exception:
+    pass  # Notification is best-effort — never block plan creation
 ```
 
 After writing PLAN.md, fill in the acceptance criteria manually, then use `/tdd` to start the TDD cycle.
