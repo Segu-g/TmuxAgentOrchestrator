@@ -323,6 +323,48 @@
         "summary": "Send a message to an agent"
       }
     },
+    "/agents/{agent_id}/reset": {
+      "post": {
+        "description": "Stop and restart *agent_id*, clearing ERROR and permanently-failed state.\n\nUse this endpoint when an agent exhausted automatic recovery attempts\nand needs a manual restart.  Returns 404 if the agent is not registered.\n\nDesign note: ``POST /agents/{id}/reset`` follows the action sub-resource\npattern \u2014 an imperative verb endpoint rather than a PUT state replacement.\nReference: DESIGN.md \u00a711; Nordic APIs \"Designing a True REST State Machine\".",
+        "operationId": "reset_agent_agents__agent_id__reset_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Reset Agent Agents  Agent Id  Reset Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Manually reset an agent from ERROR state"
+      }
+    },
     "/director/chat": {
       "post": {
         "operationId": "director_chat_director_chat_post",
