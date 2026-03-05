@@ -442,6 +442,91 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
         return {"agent_id": agent_id, "reset": True}
 
+    @app.get(
+        "/agents/{agent_id}/history",
+        summary="Per-agent task history",
+        dependencies=[Depends(auth)],
+    )
+    async def agent_history(agent_id: str, limit: int = 50) -> list:
+        """Return the last *limit* completed task records for *agent_id*.
+
+        Each record contains:
+        - ``task_id``: unique task identifier
+        - ``prompt``: the task prompt text
+        - ``started_at``: ISO timestamp when the task was dispatched
+        - ``finished_at``: ISO timestamp when the RESULT arrived
+        - ``duration_s``: wall-clock seconds from dispatch to RESULT
+        - ``status``: ``"success"`` or ``"error"``
+        - ``error``: error message string, or null on success
+
+        Results are ordered most-recent-first.  Pass ``?limit=N`` to control
+        how many records are returned (default 50, capped at 200).
+
+        Design reference: TAMAS (IBM, 2025) "Beyond Black-Box Benchmarking:
+        Observability, Analytics, and Optimization of Agentic Systems"
+        arXiv:2503.06745 — per-agent task history enables bottleneck analysis.
+        Langfuse "AI Agent Observability" (2024): tracing decision paths.
+        """
+        history = orchestrator.get_agent_history(agent_id, limit=min(limit, 200))
+        if history is None:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
+        return history
+
+    @app.post(
+        "/tasks/{task_id}/cancel",
+        summary="Cancel a pending task",
+        dependencies=[Depends(auth)],
+    )
+    async def cancel_task(task_id: str) -> dict:
+        """Remove *task_id* from the pending queue and discard it.
+
+        Returns:
+        - ``{"cancelled": true, "task_id": ..., "status": "cancelled"}``
+          if the task was successfully removed from the queue.
+        - ``{"cancelled": false, "task_id": ..., "status": "already_dispatched"}``
+          if the task was not in the pending queue (already dispatched or
+          currently in-flight).
+        - ``404`` if the task ID has never been submitted or tracked.
+
+        Design reference: Microsoft Azure "Asynchronous Request-Reply pattern"
+        (2024): "A client can send an HTTP DELETE request on the URL provided
+        by Location header when the task is submitted." We use POST on a verb
+        sub-resource (action endpoint) since DELETE on /tasks/{id} could be
+        ambiguous with resource deletion semantics.
+        DESIGN.md §11 (v0.17.0) — task cancellation.
+        """
+        # Snapshot the pending queue before attempting cancellation.
+        queued_ids = {t["task_id"] for t in orchestrator.list_tasks()}
+        was_queued = task_id in queued_ids
+
+        cancelled = await orchestrator.cancel_task(task_id)
+
+        if cancelled:
+            return {"cancelled": True, "task_id": task_id, "status": "cancelled"}
+
+        if was_queued:
+            # Was in queue but got dispatched between our snapshot and cancel_task().
+            # This is a race — treat as already dispatched, not as 404.
+            return {"cancelled": False, "task_id": task_id, "status": "already_dispatched"}
+
+        # Task was not in the queue — determine if it was ever tracked.
+        # Check in-flight tasks (dispatched but result not yet received).
+        in_flight = getattr(orchestrator, "_task_started_at", {})
+        if task_id in in_flight:
+            return {"cancelled": False, "task_id": task_id, "status": "already_dispatched"}
+
+        # Check completed tasks.
+        completed = getattr(orchestrator, "_completed_tasks", set())
+        if task_id in completed:
+            return {"cancelled": False, "task_id": task_id, "status": "already_dispatched"}
+
+        # Check DLQ — dead-lettered tasks were also "dispatched" in the broad sense.
+        dlq_ids = {e.get("task_id") for e in orchestrator.list_dlq()}
+        if task_id in dlq_ids:
+            return {"cancelled": False, "task_id": task_id, "status": "already_dispatched"}
+
+        raise HTTPException(status_code=404, detail=f"Task {task_id!r} not found")
+
     @app.post("/agents/{agent_id}/message", summary="Send a message to an agent", dependencies=[Depends(auth)])
     async def send_message(agent_id: str, body: SendMessage) -> dict:
         agent = orchestrator.get_agent(agent_id)

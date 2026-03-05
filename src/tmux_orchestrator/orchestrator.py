@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import logging
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from tmux_orchestrator.agents.base import Agent, AgentStatus, Task
@@ -91,6 +93,14 @@ class Orchestrator:
         # Shared mailbox used for reply_to routing (set by callers via _mailbox).
         # If None, reply_to routing falls back to agent.notify_stdin only (no file write).
         self._mailbox: "Mailbox | None" = None
+        # Per-agent task history: agent_id → list of completed task records.
+        # Capped at 200 entries per agent.  Records are appended in completion
+        # order; get_agent_history() reverses for most-recent-first presentation.
+        # Design reference: TAMAS "Beyond Black-Box Benchmarking" arXiv:2503.06745
+        self._agent_history: dict[str, list[dict]] = {}
+        # Tracks when each agent started its current task (for history duration).
+        self._task_started_at: dict[str, float] = {}
+        self._task_started_prompt: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -246,6 +256,78 @@ class Orchestrator:
             for p, _seq, t in sorted(items, key=lambda x: (x[0], x[1]))
         ]
 
+    async def cancel_task(self, task_id: str) -> bool:
+        """Remove *task_id* from the pending queue.
+
+        Returns True if the task was found and removed; False if not found
+        (already dispatched, never submitted, or already completed).
+
+        Cancelled tasks are discarded — they are NOT moved to the DLQ.
+        A ``task_cancelled`` STATUS event is published on successful cancellation.
+
+        Design: task cancellation via REST DELETE/POST follows the async
+        request-reply pattern described in Microsoft Azure Architecture Center
+        "Asynchronous Request-Reply pattern" (2024).
+        """
+        # Snapshot the underlying heap and rebuild it without the cancelled task.
+        items = list(self._task_queue._queue)  # type: ignore[attr-defined]
+        new_items = [(p, seq, t) for p, seq, t in items if t.id != task_id]
+        if len(new_items) == len(items):
+            # Task was not in the queue.
+            return False
+
+        # Rebuild the queue with remaining items.
+        # asyncio.PriorityQueue stores items in a list heap — replace it directly.
+        self._task_queue._queue.clear()  # type: ignore[attr-defined]
+        for item in new_items:
+            self._task_queue._queue.append(item)  # type: ignore[attr-defined]
+        heapq.heapify(self._task_queue._queue)  # type: ignore[attr-defined]
+        # Adjust the unfinished-tasks counter to avoid task_done() mismatch.
+        # _unfinished_tasks is incremented by put() and decremented by task_done().
+        # Since we removed one item without calling task_done(), decrement manually.
+        if self._task_queue._unfinished_tasks > 0:  # type: ignore[attr-defined]
+            self._task_queue._unfinished_tasks -= 1  # type: ignore[attr-defined]
+            if self._task_queue._unfinished_tasks == 0:  # type: ignore[attr-defined]
+                self._task_queue._finished.set()  # type: ignore[attr-defined]
+
+        await self.bus.publish(Message(
+            type=MessageType.STATUS,
+            from_id="__orchestrator__",
+            payload={
+                "event": "task_cancelled",
+                "task_id": task_id,
+            },
+        ))
+        logger.info("Task %s cancelled from queue", task_id)
+        return True
+
+    # ------------------------------------------------------------------
+    # Per-agent task history
+    # ------------------------------------------------------------------
+
+    def get_agent_history(
+        self, agent_id: str, *, limit: int = 50
+    ) -> list[dict] | None:
+        """Return the last *limit* completed task records for *agent_id*.
+
+        Returns ``None`` if *agent_id* is not registered.
+        Each entry is a dict with fields:
+          task_id, prompt, started_at, finished_at, duration_s,
+          status ("success" | "error"), error (str | null).
+
+        Ordered most-recent-first.  History is capped at 200 entries.
+
+        Design: per-agent task history enables identifying bottlenecks and
+        tracing decision paths, per TAMAS (IBM, 2025) "Beyond Black-Box
+        Benchmarking: Observability, Analytics, and Optimization of Agentic
+        Systems" arXiv:2503.06745.
+        """
+        if self.registry.get(agent_id) is None and agent_id not in self._agent_history:
+            return None
+        entries = self._agent_history.get(agent_id, [])
+        # most-recent-first
+        return list(reversed(entries[-200:]))[:limit]
+
     # ------------------------------------------------------------------
     # Dispatch loop
     # ------------------------------------------------------------------
@@ -323,6 +405,9 @@ class Orchestrator:
 
             logger.info("Dispatching task %s → agent %s", task.id, agent.id)
             self.registry.record_busy(agent.id)
+            # Record dispatch time for history duration tracking.
+            self._task_started_at[task.id] = time.monotonic()
+            self._task_started_prompt[task.id] = task.prompt
             await agent.send_task(task)
             self._task_queue.task_done()
             # Yield so the agent's _run_loop can dequeue and set status=BUSY
@@ -539,6 +624,8 @@ class Orchestrator:
                 task_id = msg.payload.get("task_id")
                 if not error and task_id:
                     self._completed_tasks.add(task_id)
+                # Record task in per-agent history.
+                self._record_agent_history(msg)
                 # reply_to routing: deliver RESULT to the requesting agent's mailbox.
                 # This closes the feedback loop for multi-level hierarchies where a
                 # parent agent submits a task and needs the result in its inbox.
@@ -571,6 +658,54 @@ class Orchestrator:
                 summary = f"[agent={agent_id} task={task_id}]\n{output}"
         self._director_pending.append(summary)
         logger.debug("Buffered worker result for director: agent=%s task=%s", agent_id, task_id)
+
+    def _record_agent_history(self, result_msg: Message) -> None:
+        """Append a completed task record to *agent_id*'s history.
+
+        Records are kept in chronological order (oldest first) and capped at
+        200 entries.  ``get_agent_history()`` reverses them for the caller.
+
+        Duration is computed using ``_task_started_at`` populated by the
+        dispatch loop.  If no start time is recorded (e.g., watchdog injection),
+        duration_s is None.
+        """
+        agent_id = result_msg.from_id
+        payload = result_msg.payload
+        task_id = payload.get("task_id")
+        if task_id is None:
+            return
+
+        now = time.monotonic()
+        now_iso = datetime.now(tz=timezone.utc).isoformat()
+        started_ts = self._task_started_at.pop(task_id, None)
+        prompt = self._task_started_prompt.pop(task_id, "")
+
+        if started_ts is not None:
+            duration_s = round(now - started_ts, 3)
+            started_iso = datetime.fromtimestamp(
+                datetime.now(tz=timezone.utc).timestamp() - duration_s,
+                tz=timezone.utc,
+            ).isoformat()
+        else:
+            duration_s = None
+            started_iso = None
+
+        error = payload.get("error") or None
+        record: dict = {
+            "task_id": task_id,
+            "prompt": prompt,
+            "started_at": started_iso,
+            "finished_at": now_iso,
+            "duration_s": duration_s,
+            "status": "error" if error else "success",
+            "error": error,
+        }
+
+        history = self._agent_history.setdefault(agent_id, [])
+        history.append(record)
+        # Cap at 200 entries: keep the newest 200.
+        if len(history) > 200:
+            self._agent_history[agent_id] = history[-200:]
 
     async def _route_result_reply(self, task_id: str, result_msg: Message) -> None:
         """Deliver *result_msg* to the reply_to agent's mailbox + notify_stdin.

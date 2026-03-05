@@ -324,6 +324,58 @@
         "summary": "Stop an agent"
       }
     },
+    "/agents/{agent_id}/history": {
+      "get": {
+        "description": "Return the last *limit* completed task records for *agent_id*.\n\nEach record contains:\n- ``task_id``: unique task identifier\n- ``prompt``: the task prompt text\n- ``started_at``: ISO timestamp when the task was dispatched\n- ``finished_at``: ISO timestamp when the RESULT arrived\n- ``duration_s``: wall-clock seconds from dispatch to RESULT\n- ``status``: ``\"success\"`` or ``\"error\"``\n- ``error``: error message string, or null on success\n\nResults are ordered most-recent-first.  Pass ``?limit=N`` to control\nhow many records are returned (default 50, capped at 200).\n\nDesign reference: TAMAS (IBM, 2025) \"Beyond Black-Box Benchmarking:\nObservability, Analytics, and Optimization of Agentic Systems\"\narXiv:2503.06745 \u2014 per-agent task history enables bottleneck analysis.\nLangfuse \"AI Agent Observability\" (2024): tracing decision paths.",
+        "operationId": "agent_history_agents__agent_id__history_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {},
+                  "title": "Response Agent History Agents  Agent Id  History Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Per-agent task history"
+      }
+    },
     "/agents/{agent_id}/message": {
       "post": {
         "operationId": "send_message_agents__agent_id__message_post",
@@ -777,6 +829,48 @@
           }
         },
         "summary": "Submit multiple tasks in one request"
+      }
+    },
+    "/tasks/{task_id}/cancel": {
+      "post": {
+        "description": "Remove *task_id* from the pending queue and discard it.\n\nReturns:\n- ``{\"cancelled\": true, \"task_id\": ..., \"status\": \"cancelled\"}``\n  if the task was successfully removed from the queue.\n- ``{\"cancelled\": false, \"task_id\": ..., \"status\": \"already_dispatched\"}``\n  if the task was not in the pending queue (already dispatched or\n  currently in-flight).\n- ``404`` if the task ID has never been submitted or tracked.\n\nDesign reference: Microsoft Azure \"Asynchronous Request-Reply pattern\"\n(2024): \"A client can send an HTTP DELETE request on the URL provided\nby Location header when the task is submitted.\" We use POST on a verb\nsub-resource (action endpoint) since DELETE on /tasks/{id} could be\nambiguous with resource deletion semantics.\nDESIGN.md \u00a711 (v0.17.0) \u2014 task cancellation.",
+        "operationId": "cancel_task_tasks__task_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "task_id",
+            "required": true,
+            "schema": {
+              "title": "Task Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Cancel Task Tasks  Task Id  Cancel Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel a pending task"
       }
     }
   }
