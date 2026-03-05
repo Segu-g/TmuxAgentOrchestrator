@@ -1132,6 +1132,61 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.23 調査記録 (v0.28.0, 2026-03-05)
+
+**実装テーマ: Agent Drain / Graceful Shutdown**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| グレースフルシャットダウン猶予期間 | Kubernetes Pod `terminationGracePeriodSeconds` | Kubernetes docs "Termination of Pods" https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination |
+| プロセス再起動時のコネクションドレイン | HAProxy graceful restart | HAProxy docs "Graceful Reload" https://www.haproxy.com/blog/zero-downtime-restarts-with-haproxy |
+| ソケットのグレースフルクローズ | UNIX `SO_LINGER` | Stevens "UNIX Network Programming" Vol.1 §7.5; POSIX.1-2017 `setsockopt(SO_LINGER)` |
+| コンテナ停止猶予期間 | AWS ECS `stopTimeout` | AWS docs "Amazon ECS task definition parameters — Container definitions" https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html |
+
+**主要知見:**
+
+1. **Kubernetes Pod `terminationGracePeriodSeconds`**: Kubernetes は Pod 削除時に
+   SIGTERM を送り、`terminationGracePeriodSeconds` (デフォルト 30s) 後に SIGKILL を送る。
+   本実装の DRAINING 状態はこの「SIGTERM を送った後、タスク完了を待つ」猶予期間に相当する。
+   Kubernetes のアプローチは「プロセスが自分でクリーンアップする機会を与える」という点で
+   本実装と一致している。
+
+2. **HAProxy graceful restart**: HAProxy はリロード時に新プロセスを起動し、既存の
+   コネクションが完了するまで旧プロセスを生かし続ける。`nbthread` やファイルディスクリプタを
+   新プロセスに引き渡しつつ、旧プロセスは「もう新コネクションを受け付けない」状態になる。
+   本実装の DRAINING エージェントが「新タスクを受け付けない」点が直接対応する。
+
+3. **UNIX `SO_LINGER`**: `SO_LINGER` オプションを設定した TCP ソケットは `close()` 呼び出し後も
+   送信バッファのデータが相手方に届くまで `close()` をブロックする。本実装では「エージェントを
+   ドレイン状態にして RESULT が返るまで stop() を呼ばない」点が `SO_LINGER` のセマンティクスと
+   構造的に同一である。
+
+4. **AWS ECS `stopTimeout`**: ECS は `SIGTERM` 送信後 `stopTimeout` 秒待ち、タイムアウト後に
+   `SIGKILL` を送る。本実装にはタイムアウト上限を設けていない (タスクが完了するまで無限待ち)
+   が、既存の Watchdog (`_watchdog_loop`) が過度に長い BUSY 状態を検出して強制 RESULT を
+   発行するため、実質的にタイムアウトが機能する。
+
+**設計上の注意点:**
+
+- `AgentStatus.DRAINING` は `_set_idle()` に追加された STOPPED/ERROR と同様の「IDLEに戻らない」
+  ガードによって保護される。これにより、`_dispatch_task()` 内で `_set_idle()` が呼ばれても
+  DRAINING 状態が失われない。
+- `find_idle_worker()` は `agent.status != AgentStatus.IDLE` の判定で DRAINING エージェントを
+  自動的にスキップするため、レジストリ側に追加のフィルタリングロジックは不要。
+- DRAINING 中にキャンセル操作 (`cancel_task()`) は従来どおり動作する — DRAINING エージェントの
+  現在のタスクもキャンセル可能。
+
+**デモシナリオ (v0.28.0):**
+- シナリオ: "Agent Drain — graceful shutdown"
+- デモフォルダ: `~/Demonstration/v0.28.0-agent-drain/`
+- 3 ClaudeCodeAgent インスタンスに各 1 タスクを提出
+- 最初のタスクがディスパッチされた後、そのエージェントを `POST /agents/{id}/drain`
+- 最初のエージェントがタスク完了後に自動停止
+- 残り 2 エージェントが正常完了
+- `POST /orchestrator/drain` で残りエージェントを一括ドレイン
+
+---
+
 ## 11. 今後の課題
 
 ### 機能
@@ -1152,6 +1207,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~高~~ ~~Workflow DAG API — パイプライン一括提出~~ | **完了 (v0.25.0)** — `WorkflowManager` + `validate_dag()` + `POST/GET /workflows`; Kahn's algorithm; local_id→task_id変換; 29テスト (438合計) |
 | ~~高~~ ~~Task retry on failure — per-task retry semantics~~ | **完了 (v0.26.0)** — `Task.max_retries`/`retry_count`; `_active_tasks` lookup; `task_retrying` STATUS イベント; `WorkflowManager.on_task_retrying()`; `GET /tasks` 全タスク一覧 (pagination); `GET /tasks/{id}`; REST `max_retries` パラメータ; 30テスト (468合計) |
 | ~~高~~ ~~Task cancellation — queued and in-progress~~ | **完了 (v0.27.0)** — `Agent.interrupt()`; `ClaudeCodeAgent.interrupt()` (Ctrl-C via tmux); `_cancelled_task_ids` tombstone; `cancel_task()` handles both queued and in-progress; `_dispatch_loop` tombstone check; `_route_loop` RESULT discard; `cancel_workflow()`; `WorkflowManager.cancel()` + no-ops after cancel; `DELETE /tasks/{id}`; `DELETE /workflows/{id}`; 29テスト (497合計) |
+| ~~高~~ ~~Agent drain / graceful shutdown~~ | **完了 (v0.28.0)** — `AgentStatus.DRAINING`; `_set_idle()` DRAINING ガード; `Orchestrator._draining_agents: set[str]`; `drain_agent()` (IDLE即停止/BUSY→DRAINING); `drain_all()`; `_route_loop` RESULT後の auto-stop; `POST /agents/{id}/drain`; `GET /agents/{id}/drain`; `POST /orchestrator/drain`; 23テスト (520合計) |
 | ~~低~~ ~~エージェントのコンテキスト使用量モニタリング~~ | **完了 (v0.21.0)** — `ContextMonitor` + `GET /agents/{id}/stats`, `GET /context-stats`; `context_warning`/`notes_updated`/`summarize_triggered` STATUS イベント; `context_auto_summarize`; 21 テスト (347 合計) |
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |
 | ~~低~~ ~~Prometheus メトリクス (`/metrics`)~~ | **完了 (v0.13.0)** — `GET /metrics` (prometheus_client 直接使用; 認証不要) |

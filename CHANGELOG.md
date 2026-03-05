@@ -6,6 +6,54 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.28.0] — 2026-03-05
+
+### Added
+
+**Agent Drain / Graceful Shutdown**
+
+Adds the ability to stop an agent after its current task completes without
+interrupting in-progress work.
+
+- **`AgentStatus.DRAINING`** (`agents/base.py`): new status value. An agent in
+  DRAINING state will not receive new tasks and will be automatically stopped
+  once its current task produces a RESULT.
+- **`Agent._set_idle()`** updated to preserve DRAINING status (does not overwrite
+  it with IDLE), so the orchestrator's post-RESULT drain check remains valid.
+- **`Orchestrator._draining_agents: set[str]`** (`orchestrator.py`): set of
+  agent IDs currently in drain mode.
+- **`Orchestrator.drain_agent(agent_id)`**:
+  - IDLE agent → stop immediately, unregister, publish `agent_drained`, return
+    `{status: "stopped_immediately"}`.
+  - BUSY agent → set `agent.status = DRAINING`, add to `_draining_agents`,
+    publish `agent_draining`, return `{status: "draining"}`.
+  - DRAINING → return `{status: "already_draining"}`.
+  - STOPPED / ERROR → return `{status: "already_stopped"}`.
+  - Unknown → raises `KeyError`.
+- **`Orchestrator.drain_all()`**: drains all registered agents, returns
+  `{draining: [...], stopped_immediately: [...], already_stopped: [...]}`.
+- **`Orchestrator._route_loop()`** updated: after processing a RESULT, checks
+  if the sender is in `_draining_agents`. If so, calls `agent.stop()`, unregisters
+  the agent, discards from `_draining_agents`, and publishes `agent_drained`.
+- **`AgentRegistry.find_idle_worker()`**: DRAINING agents are skipped automatically
+  because their status is not IDLE.
+- **`POST /agents/{agent_id}/drain`**: puts agent into drain mode; 404 if not
+  found, 409 if already draining/stopped.
+- **`GET /agents/{agent_id}/drain`**: returns `{agent_id, draining, status}`;
+  404 if not found.
+- **`POST /orchestrator/drain`**: drains all agents; returns summary dict.
+
+### Design references
+
+- Kubernetes Pod `terminationGracePeriodSeconds` — allow running tasks to finish
+  before the pod is killed.
+- HAProxy graceful restart — drain in-flight connections before reloading config.
+- UNIX `SO_LINGER` graceful socket close — wait for pending data before close.
+- AWS ECS `stopTimeout` — container stop grace period.
+- DESIGN.md §10.23 (v0.28.0).
+
+---
+
 ## [0.27.0] — 2026-03-05
 
 ### Added
