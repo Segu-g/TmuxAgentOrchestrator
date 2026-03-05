@@ -6,6 +6,54 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.12.0] — 2026-03-05
+
+### Added
+
+**ERROR state auto-recovery with exponential backoff (Issue #3)**
+- New `_recovery_loop` in `Orchestrator`: polls every `recovery_poll` seconds
+  (default 2s) for agents in ERROR state and attempts to restart them
+- Exponential backoff: each retry waits `recovery_backoff_base^attempt` seconds
+  (default: 5^1=5s, 5^2=25s, 5^3=125s) to prevent restart storms
+- Publishes `agent_recovered` STATUS event on successful restart
+- Publishes `agent_recovery_failed` STATUS event when `recovery_attempts`
+  exhausted (default 3); agent then excluded from further auto-recovery
+- Permanently-failed agents tracked in `_permanently_failed: set[str]`
+- New `OrchestratorConfig` fields: `recovery_attempts: int = 3`,
+  `recovery_backoff_base: float = 5.0`, `recovery_poll: float = 2.0`
+- YAML config keys: `recovery_attempts`, `recovery_backoff_base`, `recovery_poll`
+- 5 new tests in `tests/test_error_recovery.py`
+- Closes GitHub Issue #3
+
+**SSE push notifications — `GET /events` endpoint**
+- New `GET /events` endpoint using FastAPI native SSE (`EventSourceResponse`,
+  v0.135+ — zero external dependencies)
+- Auth via session cookie or `X-API-Key` header (same as all other API endpoints)
+- Each bus message is streamed as a typed SSE event with named `event=` field:
+  `status`, `result`, `peer_msg`, `control` — enables selective client listening
+- 15-second keep-alive comment prevents proxy/load-balancer timeout disconnection
+- Web UI upgraded from 3s polling to real-time SSE:
+  - `connectSSE()` subscribes to `/events` after successful authentication
+  - STATUS and RESULT events trigger immediate `refreshAgents()` + `refreshTasks()`
+  - PEER_MSG events update the conversation panel in real-time
+  - Director RESULT events directly update the chat bubble without polling
+  - Fallback 30s poll retained as belt-and-suspenders backstop
+- OpenAPI schema snapshot updated (`tests/fixtures/openapi_schema.json`)
+- 4 new tests in `tests/test_sse.py`
+
+### Fixed
+
+- **`tmux_interface.py`: missing `asyncio` import** — `asyncio.get_running_loop()`
+  and `asyncio.run_coroutine_threadsafe()` were called without the module being
+  imported, causing `NameError` at runtime during real-agent demo execution.
+  Also removed redundant string-quoted type annotation for `_loop`.
+
+### Tests
+
+- Total: **180 tests** (was 171), all passing.
+
+---
+
 ## [0.11.0] — 2026-03-05
 
 ### Added
