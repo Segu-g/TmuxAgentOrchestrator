@@ -210,6 +210,16 @@ class Orchestrator:
             agent_ids = grp.get("agent_ids", [])
             if name:
                 self._group_manager.create(name, agent_ids)
+        # Priority tracking for inheritance: task_id → priority at submission time.
+        # Populated for ALL tasks at submit_task() time.  Used to determine the
+        # effective priority of dependent tasks when inherit_priority=True.
+        # Only looks one level up (direct depends_on parents, not transitive closure).
+        # Reference: Liu & Layland "Scheduling Algorithms for Multiprogramming in a
+        # Hard Real-Time Environment" JACM (1973);
+        # Apache Airflow priority_weight upstream/downstream rules (2024);
+        # Sha, Rajkumar, Lehoczky "Priority Inheritance Protocols" IEEE (1990);
+        # DESIGN.md §10.27 (v0.32.0)
+        self._task_priorities: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -393,6 +403,7 @@ class Orchestrator:
         target_group: str | None = None,
         wait_for_token: bool = True,
         max_retries: int = 0,
+        inherit_priority: bool = True,
         _task_id: str | None = None,
     ) -> Task:
         """Submit a new task to the priority queue.
@@ -441,10 +452,25 @@ class Orchestrator:
             raise RuntimeError(
                 f"Task queue is full (maxsize={self.config.task_queue_maxsize})"
             )
+        # Priority inheritance: when inherit_priority=True and depends_on is non-empty,
+        # set the effective priority to min(own_priority, min(parent priorities)).
+        # This prevents high-priority dependent tasks from being blocked by the
+        # lower-priority work already queued ahead of them.
+        # Reference: Liu & Layland JACM (1973); Sha et al. IEEE (1990);
+        # Apache Airflow priority_weight rules; DESIGN.md §10.27 (v0.32.0)
+        effective_priority = priority
+        if inherit_priority and depends_on:
+            parent_priorities = [
+                self._task_priorities[dep]
+                for dep in depends_on
+                if dep in self._task_priorities
+            ]
+            if parent_priorities:
+                effective_priority = min(priority, min(parent_priorities))
         task = Task(
             id=_task_id if _task_id is not None else str(uuid.uuid4()),
             prompt=prompt,
-            priority=priority,
+            priority=effective_priority,
             metadata=metadata or {},
             depends_on=depends_on or [],
             reply_to=reply_to,
@@ -452,7 +478,10 @@ class Orchestrator:
             required_tags=required_tags or [],
             target_group=target_group,
             max_retries=max_retries,
+            inherit_priority=inherit_priority,
         )
+        # Record this task's priority for use by future dependent tasks.
+        self._task_priorities[task.id] = effective_priority
         if idempotency_key is not None:
             self._idempotency_keys[idempotency_key] = task.id
             self._ikey_timestamps[idempotency_key] = time.monotonic()

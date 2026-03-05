@@ -67,6 +67,14 @@ class Task:
     # DESIGN.md §10.21 (v0.26.0)
     max_retries: int = 0
     retry_count: int = 0
+    # Priority inheritance: when True and the task has depends_on, the effective
+    # priority is min(own_priority, min(priority of all direct parents)).
+    # Prevents high-priority sub-tasks from being blocked by lower-priority work
+    # already in the queue.
+    # Reference: Liu & Layland (1973) Priority Inheritance Protocol;
+    # Apache Airflow priority_weight upstream/downstream rules;
+    # DESIGN.md §10.27 (v0.32.0)
+    inherit_priority: bool = True
 
     def __lt__(self, other: "Task") -> bool:
         return self.priority < other.priority
@@ -85,6 +93,7 @@ class Task:
             "target_group": self.target_group,
             "max_retries": self.max_retries,
             "retry_count": self.retry_count,
+            "inherit_priority": self.inherit_priority,
             **({"metadata": self.metadata} if self.metadata else {}),
         }
 
