@@ -299,6 +299,60 @@ class TddWorkflowSubmit(BaseModel):
         return v
 
 
+class DebateWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/debate — 3-role multi-round debate workflow.
+
+    Submits an Advocate/Critic/Judge Workflow DAG with structured argumentation:
+
+    For each round 1..max_rounds:
+      - ``advocate_r{n}``: builds or refines the affirmative argument
+      - ``critic_r{n}``: challenges the argument (Devil's Advocate)
+    Final:
+      - ``judge``: synthesizes all rounds and writes ``DECISION.md`` to scratchpad
+
+    Artifacts are passed via the shared scratchpad (Blackboard pattern):
+      ``{scratchpad_prefix}_r{n}_advocate`` — advocate's argument for round n
+      ``{scratchpad_prefix}_r{n}_critic``   — critic's rebuttal for round n
+      ``{scratchpad_prefix}_decision``      — judge's final decision
+
+    Design references:
+    - Du et al. "Improving Factuality and Reasoning in Language Models through
+      Multiagent Debate" ICML 2024 (arXiv:2305.14325): multi-agent debate
+      significantly improves factuality and reasoning.
+    - DEBATE: Devil's Advocate-Based Assessment ACL 2024 (arXiv:2405.09935):
+      Commander + Scorer + Critic structure; terminates when critic outputs
+      "NO ISSUE" or max iterations reached.
+    - ChatEval ICLR 2024 (arXiv:2308.07201): role diversity (different
+      role_descriptions) is the most critical factor in debate quality.
+    - DESIGN.md §10.32 (v0.37.0)
+    """
+
+    topic: str
+    max_rounds: int = 2
+    # Optional per-role required_tags for agent capability routing
+    advocate_tags: list[str] = []
+    critic_tags: list[str] = []
+    judge_tags: list[str] = []
+    # When set, the judge RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    from pydantic import field_validator
+
+    @field_validator("topic")
+    @classmethod
+    def topic_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("topic must not be empty")
+        return v
+
+    @field_validator("max_rounds")
+    @classmethod
+    def max_rounds_must_be_valid(cls, v: int) -> int:
+        if v < 1 or v > 3:
+            raise ValueError("max_rounds must be between 1 and 3")
+        return v
+
+
 # ---------------------------------------------------------------------------
 # Module-level auth state
 # ---------------------------------------------------------------------------
@@ -1313,6 +1367,253 @@ def create_app(
                 "implementer": impl_task.id,
                 "refactorer": refactorer_task.id,
             },
+            "scratchpad_prefix": scratchpad_prefix,
+        }
+
+    @app.post(
+        "/workflows/debate",
+        summary="Submit a multi-round Advocate/Critic/Judge debate workflow",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_debate_workflow(body: DebateWorkflowSubmit) -> dict:
+        """Submit a structured multi-agent debate Workflow DAG.
+
+        Builds and submits a ``max_rounds``-round debate DAG:
+
+        For each round n in 1..max_rounds:
+          1. **advocate_r{n}**: presents or refines the affirmative argument for
+             *topic*, reading the previous critic's rebuttal from scratchpad
+             (round > 1).  Stores argument to scratchpad.
+          2. **critic_r{n}**: challenges the advocate's argument using a
+             Devil's Advocate persona, reading from scratchpad.  Stores rebuttal.
+
+        Final step:
+          - **judge**: reads all rounds from scratchpad, synthesizes the debate,
+            and writes ``DECISION.md`` content to ``{scratchpad_prefix}_decision``.
+
+        Returns:
+        - ``workflow_id``: workflow run UUID for status polling
+        - ``name``: human-readable name (``debate/{topic}``)
+        - ``task_ids``: dict mapping role keys to global task IDs.
+          Keys: ``advocate_r1``, ``critic_r1``, ..., ``advocate_rN``,
+          ``critic_rN``, ``judge``
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+
+        Design references:
+        - Du et al. ICML 2024 (arXiv:2305.14325): 2-3 rounds is optimal.
+        - DEBATE ACL 2024 (arXiv:2405.09935): Devil's Advocate prevents bias.
+        - ChatEval ICLR 2024 (arXiv:2308.07201): role diversity is critical.
+        - DESIGN.md §10.32 (v0.37.0)
+        """
+        import uuid as _uuid  # noqa: PLC0415
+
+        wm = orchestrator.get_workflow_manager()
+        wf_name = f"debate/{body.topic}"
+
+        pre_run_id = str(_uuid.uuid4())
+        scratchpad_prefix = f"debate_{pre_run_id[:8]}"
+
+        # Scratchpad helper snippet (shared across all prompts)
+        _ctx_snippet = (
+            "WEB_BASE_URL=$(python3 -c \""
+            "import json; d=json.load(open('__orchestrator_context__.json')); "
+            "print(d['web_base_url'])\")\n"
+            "   API_KEY=$(cat __orchestrator_api_key__ 2>/dev/null || "
+            "echo \"$TMUX_ORCHESTRATOR_API_KEY\")"
+        )
+
+        def _scratchpad_key(suffix: str) -> str:
+            """Derive a flat scratchpad key (no slashes)."""
+            return f"{scratchpad_prefix}_{suffix}"
+
+        def _write_snippet(key: str, var: str = "CONTENT") -> str:
+            """Bash snippet that writes $var to the scratchpad key."""
+            return (
+                f"   curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     -H 'Content-Type: application/json' \\\n"
+                f"     -d '{{\"value\": \"'${var}'\"}}'  "
+            )
+
+        def _read_snippet(key: str, varname: str) -> str:
+            """Bash snippet that reads scratchpad key into $varname."""
+            return (
+                f"   {varname}=$(curl -s -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"value\"])')\n"
+            )
+
+        all_tasks: list = []  # list of (role_key, task_coroutine_args)
+        prev_task_id: str | None = None
+        task_ids_map: dict[str, str] = {}
+
+        # Build tasks for each round
+        for rn in range(1, body.max_rounds + 1):
+            adv_key = _scratchpad_key(f"r{rn}_advocate")
+            crit_key = _scratchpad_key(f"r{rn}_critic")
+
+            # --- Advocate prompt ---
+            if rn == 1:
+                advocate_preamble = (
+                    f"You are the ADVOCATE agent in a structured debate workflow.\n"
+                    f"\n"
+                    f"**Debate topic:** {body.topic}\n"
+                    f"**Round:** {rn} of {body.max_rounds}\n"
+                    f"\n"
+                    f"Your task:\n"
+                    f"1. Present a clear, well-structured argument IN FAVOUR of one "
+                    f"position on '{body.topic}'.\n"
+                    f"   - Choose the stronger/more practical position.\n"
+                    f"   - Support your argument with concrete reasons, examples, "
+                    f"and trade-offs.\n"
+                    f"   - Be specific and technical where appropriate.\n"
+                )
+            else:
+                prev_crit_key = _scratchpad_key(f"r{rn - 1}_critic")
+                advocate_preamble = (
+                    f"You are the ADVOCATE agent in a structured debate workflow.\n"
+                    f"\n"
+                    f"**Debate topic:** {body.topic}\n"
+                    f"**Round:** {rn} of {body.max_rounds} (rebuttal round)\n"
+                    f"\n"
+                    f"Your task:\n"
+                    f"1. Read the critic's previous rebuttal from the scratchpad:\n"
+                    f"   ```bash\n"
+                    f"   {_ctx_snippet}\n"
+                    + _read_snippet(prev_crit_key, "CRITIC_ARG")
+                    + f"   echo \"Critic said: $CRITIC_ARG\"\n"
+                    f"   ```\n"
+                    f"2. Respond to the critic's points — defend your original position,\n"
+                    f"   concede weak points if warranted, and strengthen your argument.\n"
+                    f"   Be specific and address each critique directly.\n"
+                )
+            advocate_prompt = (
+                advocate_preamble
+                + f"\n"
+                f"3. Write your argument to a file `advocate_r{rn}.md` in your "
+                f"working directory.\n"
+                f"4. Store your argument in the shared scratchpad:\n"
+                f"   ```bash\n"
+                f"   {_ctx_snippet}\n"
+                f"   CONTENT=$(cat advocate_r{rn}.md)\n"
+                + _write_snippet(adv_key)
+                + f"\n"
+                f"   ```\n"
+                f"\n"
+                f"Write a structured, technical argument. Be concise (max 400 words)."
+            )
+
+            # --- Critic prompt ---
+            critic_prompt = (
+                f"You are the CRITIC agent (Devil's Advocate) in a structured "
+                f"debate workflow.\n"
+                f"\n"
+                f"**Debate topic:** {body.topic}\n"
+                f"**Round:** {rn} of {body.max_rounds}\n"
+                f"\n"
+                f"Your task:\n"
+                f"1. Read the advocate's argument from the shared scratchpad:\n"
+                f"   ```bash\n"
+                f"   {_ctx_snippet}\n"
+                + _read_snippet(adv_key, "ADVOCATE_ARG")
+                + f"   echo \"Advocate said: $ADVOCATE_ARG\"\n"
+                f"   ```\n"
+                f"2. Challenge the advocate's argument rigorously.\n"
+                f"   - Identify logical flaws, missing trade-offs, and counterexamples.\n"
+                f"   - Present the strongest possible counter-argument.\n"
+                f"   - Do NOT agree unless truly warranted — your role is to stress-test "
+                f"the argument.\n"
+                f"   - Be specific and technical.\n"
+                f"3. Write your rebuttal to a file `critic_r{rn}.md` in your "
+                f"working directory.\n"
+                f"4. Store your rebuttal in the shared scratchpad:\n"
+                f"   ```bash\n"
+                f"   CONTENT=$(cat critic_r{rn}.md)\n"
+                + _write_snippet(crit_key)
+                + f"\n"
+                f"   ```\n"
+                f"\n"
+                f"Write a rigorous critique. Be concise (max 400 words)."
+            )
+
+            # Determine dependencies
+            adv_depends = [prev_task_id] if prev_task_id else []
+            adv_task = await orchestrator.submit_task(
+                advocate_prompt,
+                required_tags=body.advocate_tags or None,
+                depends_on=adv_depends,
+            )
+            prev_task_id = adv_task.id
+            task_ids_map[f"advocate_r{rn}"] = adv_task.id
+
+            crit_task = await orchestrator.submit_task(
+                critic_prompt,
+                required_tags=body.critic_tags or None,
+                depends_on=[adv_task.id],
+            )
+            prev_task_id = crit_task.id
+            task_ids_map[f"critic_r{rn}"] = crit_task.id
+
+        # --- Judge prompt ---
+        # Collect all scratchpad keys for judge to read
+        round_keys_desc = "\n".join(
+            f"   - Round {rn} Advocate: key `{_scratchpad_key(f'r{rn}_advocate')}`\n"
+            f"   - Round {rn} Critic:   key `{_scratchpad_key(f'r{rn}_critic')}`"
+            for rn in range(1, body.max_rounds + 1)
+        )
+        decision_key = _scratchpad_key("decision")
+
+        judge_prompt = (
+            f"You are the JUDGE agent in a structured debate workflow.\n"
+            f"\n"
+            f"**Debate topic:** {body.topic}\n"
+            f"**Rounds completed:** {body.max_rounds}\n"
+            f"\n"
+            f"Your task:\n"
+            f"1. Read all debate rounds from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            f"   ```\n"
+            f"   Keys to read:\n"
+            f"{round_keys_desc}\n"
+            f"   Use curl to read each key: "
+            f"`curl -s -H \"X-API-Key: $API_KEY\" \"$WEB_BASE_URL/scratchpad/<key>\"`\n"
+            f"\n"
+            f"2. Write `DECISION.md` in your working directory containing:\n"
+            f"   - **Topic**: {body.topic}\n"
+            f"   - **Summary of advocate's position** (2-3 sentences)\n"
+            f"   - **Summary of critic's challenges** (2-3 sentences)\n"
+            f"   - **Decision**: which position is stronger and why\n"
+            f"   - **Rationale**: key factors that determined the decision\n"
+            f"   - **Caveats**: important trade-offs or conditions to consider\n"
+            f"\n"
+            f"3. Store the DECISION.md content in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   CONTENT=$(cat DECISION.md)\n"
+            + _write_snippet(decision_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Write a balanced, well-reasoned DECISION.md. Be objective and cite "
+            f"specific arguments from the debate."
+        )
+
+        judge_task = await orchestrator.submit_task(
+            judge_prompt,
+            required_tags=body.judge_tags or None,
+            depends_on=[prev_task_id] if prev_task_id else [],
+            reply_to=body.reply_to,
+        )
+        task_ids_map["judge"] = judge_task.id
+
+        # Register all tasks with WorkflowManager
+        all_task_ids = list(task_ids_map.values())
+        run = wm.submit(name=wf_name, task_ids=all_task_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids_map,
             "scratchpad_prefix": scratchpad_prefix,
         }
 

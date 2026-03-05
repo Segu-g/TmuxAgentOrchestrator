@@ -70,6 +70,60 @@
         "title": "AutoScalerUpdate",
         "type": "object"
       },
+      "DebateWorkflowSubmit": {
+        "description": "Request body for POST /workflows/debate \u2014 3-role multi-round debate workflow.\n\nSubmits an Advocate/Critic/Judge Workflow DAG with structured argumentation:\n\nFor each round 1..max_rounds:\n  - ``advocate_r{n}``: builds or refines the affirmative argument\n  - ``critic_r{n}``: challenges the argument (Devil's Advocate)\nFinal:\n  - ``judge``: synthesizes all rounds and writes ``DECISION.md`` to scratchpad\n\nArtifacts are passed via the shared scratchpad (Blackboard pattern):\n  ``{scratchpad_prefix}_r{n}_advocate`` \u2014 advocate's argument for round n\n  ``{scratchpad_prefix}_r{n}_critic``   \u2014 critic's rebuttal for round n\n  ``{scratchpad_prefix}_decision``      \u2014 judge's final decision\n\nDesign references:\n- Du et al. \"Improving Factuality and Reasoning in Language Models through\n  Multiagent Debate\" ICML 2024 (arXiv:2305.14325): multi-agent debate\n  significantly improves factuality and reasoning.\n- DEBATE: Devil's Advocate-Based Assessment ACL 2024 (arXiv:2405.09935):\n  Commander + Scorer + Critic structure; terminates when critic outputs\n  \"NO ISSUE\" or max iterations reached.\n- ChatEval ICLR 2024 (arXiv:2308.07201): role diversity (different\n  role_descriptions) is the most critical factor in debate quality.\n- DESIGN.md \u00a710.32 (v0.37.0)",
+        "properties": {
+          "advocate_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Advocate Tags",
+            "type": "array"
+          },
+          "critic_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Critic Tags",
+            "type": "array"
+          },
+          "judge_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Judge Tags",
+            "type": "array"
+          },
+          "max_rounds": {
+            "default": 2,
+            "title": "Max Rounds",
+            "type": "integer"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "topic": {
+            "title": "Topic",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic"
+        ],
+        "title": "DebateWorkflowSubmit",
+        "type": "object"
+      },
       "DirectorChat": {
         "properties": {
           "message": {
@@ -2544,6 +2598,47 @@
           }
         },
         "summary": "Submit a multi-step workflow DAG"
+      }
+    },
+    "/workflows/debate": {
+      "post": {
+        "description": "Submit a structured multi-agent debate Workflow DAG.\n\nBuilds and submits a ``max_rounds``-round debate DAG:\n\nFor each round n in 1..max_rounds:\n  1. **advocate_r{n}**: presents or refines the affirmative argument for\n     *topic*, reading the previous critic's rebuttal from scratchpad\n     (round > 1).  Stores argument to scratchpad.\n  2. **critic_r{n}**: challenges the advocate's argument using a\n     Devil's Advocate persona, reading from scratchpad.  Stores rebuttal.\n\nFinal step:\n  - **judge**: reads all rounds from scratchpad, synthesizes the debate,\n    and writes ``DECISION.md`` content to ``{scratchpad_prefix}_decision``.\n\nReturns:\n- ``workflow_id``: workflow run UUID for status polling\n- ``name``: human-readable name (``debate/{topic}``)\n- ``task_ids``: dict mapping role keys to global task IDs.\n  Keys: ``advocate_r1``, ``critic_r1``, ..., ``advocate_rN``,\n  ``critic_rN``, ``judge``\n- ``scratchpad_prefix``: scratchpad namespace for this run\n\nDesign references:\n- Du et al. ICML 2024 (arXiv:2305.14325): 2-3 rounds is optimal.\n- DEBATE ACL 2024 (arXiv:2405.09935): Devil's Advocate prevents bias.\n- ChatEval ICLR 2024 (arXiv:2308.07201): role diversity is critical.\n- DESIGN.md \u00a710.32 (v0.37.0)",
+        "operationId": "submit_debate_workflow_workflows_debate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DebateWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Debate Workflow Workflows Debate Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a multi-round Advocate/Critic/Judge debate workflow"
       }
     },
     "/workflows/tdd": {
