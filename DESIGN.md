@@ -1442,6 +1442,80 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.29 調査記録 (v0.34.0, 2026-03-05)
+
+#### Step 0 — 選択根拠
+
+**選択した機能:** `/plan` と `/tdd` の出力を RESULT メッセージとして親エージェントに自動送信
+
+**選択理由:**
+- §11 に残る唯一の未完了機能候補。他の全 §11 項目は完了済み。
+- v0.33.0 (Task TTL) の build-log に失敗なし — 前回デモの技術的負債はゼロ。
+- `/plan` と `/tdd` コマンドは既に実装済みだが、出力が親エージェントに届かない。
+  Director → Workers パターンにおいて、Sub-agent が計画完了・TDD サイクル完了を
+  親に通知できないため協調が途切れる。本機能でこのギャップを埋める。
+- `/progress` コマンドが既に「親への通知」を実装しているので、同パターンを `/plan` と `/tdd` に適用するだけで済む — 実装コストが低い。
+
+**選択しなかったもの (検討事項):**
+- §11 に他の未完了項目はなかった。本機能が唯一の選択肢であった。
+- 新機能の追加 (e.g. 分散トレーシング、Kafka ブリッジ) は §11 に未記載であり、今回のスコープ外。
+
+**前回 build-log からの影響:**
+- v0.33.0 build-log は全 15 チェックが一発 PASS。未解決の問題なし。
+- 特に課題なし。
+
+#### Step 1 — 調査記録 (WebSearch)
+
+**調査観点:**
+
+| テーマ | 参考文献 |
+|--------|---------|
+| Multi-agent child→parent result forwarding | Google ADK "Multi-agent systems" https://google.github.io/adk-docs/agents/multi-agents/ |
+| Agent response callback / structured output | Semantic Kernel "Agent Orchestration Advanced Topics" https://learn.microsoft.com/en-us/semantic-kernel/frameworks/agent/agent-orchestration/advanced-topics |
+| TDD orchestrator with completion notification | "TDD-Plan completion in multi-agent workflows" dev.to / github.com/catlog22 2024 |
+| Sub-agent output reporting to parent | "Multi-agent patterns in LlamaIndex" https://developers.llamaindex.ai/python/framework/understanding/agent/multi_agent/ |
+
+**主要知見:**
+
+1. **Google ADK — Shared Session State & output_key (adk-docs)**:
+   - Child agents write results to `session.state` via `output_key`; parent reads them downstream.
+   - `AgentTool` pattern: child agent's final response is captured and returned as a tool result to the parent, automatically forwarding state and artifact changes.
+   - `LoopAgent` uses `Event(escalate=True)` for child→parent completion signaling without explicit callbacks.
+   - **本実装への適用**: `/plan` 完了時に生成した PLAN.md の内容を RESULT メッセージとして親に送信するのは
+     AgentTool の "capture final response and forward to parent" パターンと同等。
+
+2. **Semantic Kernel — ResponseCallback & Structured Outputs (Microsoft Docs 2025)**:
+   - `ResponseCallback` は orchestration の各エージェント応答を observe する仕組み。親が子の出力をリアルタイムに受け取れる。
+   - Structured output: `ConcurrentOrchestration[str, ArticleAnalysis]` — 型付きで子エージェント結果を集約。
+   - **本実装への適用**: `/plan` と `/tdd` は構造化テキスト (Markdown) を生成する。これを
+     PEER_MSG payload `{"event": "plan_complete", "plan": "..."}` として親に送るのは
+     Semantic Kernel の structured output forwarding と同等。
+
+3. **Slash command output forwarding pattern**:
+   - Claude Code slash commands store their output as Markdown files (PLAN.md, etc.).
+   - 既存の `/progress` コマンドが「子→親」通知の先例を実装している。
+     同パターン (REST `POST /agents/{parent_id}/message`) を `/plan` と `/tdd` に適用する。
+
+4. **Multi-agent TDD orchestrator (github.com/digitarald/chatarald/tdd.agent.md)**:
+   - TDD agent emits structured completion signal at end of RED/GREEN/REFACTOR cycle.
+   - Orchestrator subscribes to completion events and advances pipeline.
+   - **本実装**: `/tdd` 完了時に `{"event": "tdd_complete", "feature": "...", "phase": "checklist_shown"}` を親に送信。
+
+**設計決定:**
+
+- **`/plan` の通知**: PLAN.md 書き込み後に `/progress` と同じ REST 経路で親に
+  `{"event": "plan_created", "plan_path": "PLAN.md", "description": "..."}` を送信。
+  親が存在しない場合はローカル出力のみ (no-op)。
+- **`/tdd` の通知**: TDD チェックリスト表示後に
+  `{"event": "tdd_cycle_started", "feature": "...", "phase": "red"}` を送信。
+  (TDD は非同期サイクルなので "started" として通知する。完了は `/progress` で行う。)
+- **Opt-out**: `__orchestrator_context__.json` が存在しない場合はサイレントに何もしない。
+  これにより、オーケストレーター外で使用しても副作用なし。
+- **メッセージタイプ**: `PEER_MSG` ではなく `STATUS` に変更 — 親への通知は「状態変化の報告」であり
+  P2P 会話ではない。`POST /agents/{parent_id}/message` は `type` フィールドを受け付けるため対応可能。
+
+---
+
 ## 11. 今後の課題
 
 ### 機能
