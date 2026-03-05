@@ -43,6 +43,7 @@ class TaskSubmit(BaseModel):
     prompt: str
     priority: int = 0
     metadata: dict[str, Any] = {}
+    reply_to: str | None = None  # agent_id that receives the RESULT in its mailbox
 
 
 class AgentKillResponse(BaseModel):
@@ -313,9 +314,15 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
     @app.post("/tasks", summary="Submit a new task", dependencies=[Depends(auth)])
     async def submit_task(body: TaskSubmit) -> dict:
         task = await orchestrator.submit_task(
-            body.prompt, priority=body.priority, metadata=body.metadata
+            body.prompt,
+            priority=body.priority,
+            metadata=body.metadata,
+            reply_to=body.reply_to,
         )
-        return {"task_id": task.id, "prompt": task.prompt, "priority": task.priority}
+        result: dict = {"task_id": task.id, "prompt": task.prompt, "priority": task.priority}
+        if task.reply_to is not None:
+            result["reply_to"] = task.reply_to
+        return result
 
     @app.get("/tasks", summary="List pending tasks", dependencies=[Depends(auth)])
     async def list_tasks() -> list[dict]:

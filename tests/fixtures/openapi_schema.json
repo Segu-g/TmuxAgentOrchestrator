@@ -96,6 +96,17 @@
           "prompt": {
             "title": "Prompt",
             "type": "string"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
           }
         },
         "required": [

@@ -40,6 +40,11 @@ class Task:
     metadata: dict[str, Any] = field(default_factory=dict)
     trace_id: str = field(default_factory=lambda: secrets.token_hex(8))
     depends_on: list[str] = field(default_factory=list)  # task IDs that must complete first
+    # When set, the RESULT for this task is delivered directly to this agent's
+    # mailbox in addition to being broadcast on the bus.  Implements the
+    # request-reply pattern for hierarchical parent→child result routing.
+    # Reference: "Learning Notes #15 – Request Reply Pattern | RabbitMQ" (2024)
+    reply_to: str | None = None  # agent_id that should receive the RESULT in its mailbox
 
     def __lt__(self, other: "Task") -> bool:
         return self.priority < other.priority

@@ -80,6 +80,17 @@ class Orchestrator:
         self._idempotency_keys: dict[str, str] = {}
         self._ikey_timestamps: dict[str, float] = {}
         self._ikey_ttl: float = _IKEY_TTL
+        # Result-routing table: task_id → reply_to agent_id.
+        # When a RESULT arrives for a task that has a reply_to entry, the
+        # orchestrator writes the RESULT to that agent's mailbox and notifies
+        # it via notify_stdin.  Implements the request-reply pattern for
+        # multi-level hierarchy feedback loops.
+        # Reference: "Learning Notes #15 – Request Reply Pattern | RabbitMQ" (2024)
+        # Moore, David J. "A Taxonomy of Hierarchical Multi-Agent Systems" (2025)
+        self._task_reply_to: dict[str, str] = {}
+        # Shared mailbox used for reply_to routing (set by callers via _mailbox).
+        # If None, reply_to routing falls back to agent.notify_stdin only (no file write).
+        self._mailbox: "Mailbox | None" = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -172,6 +183,7 @@ class Orchestrator:
         metadata: dict | None = None,
         depends_on: list[str] | None = None,
         idempotency_key: str | None = None,
+        reply_to: str | None = None,
     ) -> Task:
         # Idempotency deduplication: return existing task for duplicate keys.
         if idempotency_key is not None:
@@ -192,19 +204,27 @@ class Orchestrator:
             priority=priority,
             metadata=metadata or {},
             depends_on=depends_on or [],
+            reply_to=reply_to,
         )
         if idempotency_key is not None:
             self._idempotency_keys[idempotency_key] = task.id
             self._ikey_timestamps[idempotency_key] = time.monotonic()
             self._cleanup_expired_ikeys()
+        if reply_to is not None:
+            self._task_reply_to[task.id] = reply_to
         self._task_seq += 1
         await self._task_queue.put((priority, self._task_seq, task))
         await self.bus.publish(Message(
             type=MessageType.STATUS,
             from_id="__orchestrator__",
-            payload={"event": "task_queued", "task_id": task.id, "prompt": prompt},
+            payload={
+                "event": "task_queued",
+                "task_id": task.id,
+                "prompt": prompt,
+                **({"reply_to": reply_to} if reply_to is not None else {}),
+            },
         ))
-        logger.info("Task %s queued (priority=%d)", task.id, priority)
+        logger.info("Task %s queued (priority=%d, reply_to=%s)", task.id, priority, reply_to)
         return task
 
     def _cleanup_expired_ikeys(self) -> None:
@@ -486,10 +506,17 @@ class Orchestrator:
                 self._buffer_director_result(msg)
                 error = msg.payload.get("error")
                 self.registry.record_result(msg.from_id, error=bool(error))
-                if not error:
-                    task_id = msg.payload.get("task_id")
-                    if task_id:
-                        self._completed_tasks.add(task_id)
+                task_id = msg.payload.get("task_id")
+                if not error and task_id:
+                    self._completed_tasks.add(task_id)
+                # reply_to routing: deliver RESULT to the requesting agent's mailbox.
+                # This closes the feedback loop for multi-level hierarchies where a
+                # parent agent submits a task and needs the result in its inbox.
+                if task_id:
+                    asyncio.create_task(
+                        self._route_result_reply(task_id, msg),
+                        name=f"reply-to-route-{task_id[:8]}",
+                    )
             self._bus_queue.task_done()
 
     def _buffer_director_result(self, result_msg: Message) -> None:
@@ -514,6 +541,73 @@ class Orchestrator:
                 summary = f"[agent={agent_id} task={task_id}]\n{output}"
         self._director_pending.append(summary)
         logger.debug("Buffered worker result for director: agent=%s task=%s", agent_id, task_id)
+
+    async def _route_result_reply(self, task_id: str, result_msg: Message) -> None:
+        """Deliver *result_msg* to the reply_to agent's mailbox + notify_stdin.
+
+        When a task was submitted with ``reply_to="<agent_id>"``, the orchestrator
+        records ``task_id → reply_to`` in ``_task_reply_to``.  On RESULT, this
+        method looks up the mapping and:
+
+        1. Writes the RESULT message to the reply_to agent's mailbox file.
+        2. Calls ``agent.notify_stdin("__MSG__:<msg_id>")`` so the agent's
+           ``_message_loop`` triggers and the operator slash commands work.
+
+        If the reply_to agent is not registered (already stopped, or an external
+        agent ID), the mailbox write is still attempted if ``self._mailbox`` is
+        set, but ``notify_stdin`` is skipped gracefully.
+
+        The ``_task_reply_to`` entry is cleaned up after delivery to prevent
+        unbounded growth.
+
+        Design: request-reply pattern with correlation IDs — the task_id is the
+        correlation identifier that links the RESULT back to the originating agent.
+        Reference: "Learning Notes #15 – Request Reply Pattern | RabbitMQ" (2024)
+        Moore, David J. "A Taxonomy of Hierarchical Multi-Agent Systems" (2025)
+        """
+        reply_to_id = self._task_reply_to.pop(task_id, None)
+        if reply_to_id is None:
+            return
+
+        logger.debug(
+            "Result-reply: routing task %s result to agent %s", task_id, reply_to_id
+        )
+
+        # Write to mailbox if available
+        if self._mailbox is not None:
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(
+                    None, self._mailbox.write, reply_to_id, result_msg
+                )
+                logger.debug(
+                    "Result-reply: wrote result for task %s to mailbox of %s",
+                    task_id, reply_to_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Result-reply: failed to write mailbox for agent %s", reply_to_id
+                )
+
+        # Notify the agent if it is registered
+        agent = self.registry.get(reply_to_id)
+        if agent is not None:
+            try:
+                await agent.notify_stdin(f"__MSG__:{result_msg.id}")
+                logger.debug(
+                    "Result-reply: notified agent %s of result for task %s",
+                    reply_to_id, task_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Result-reply: failed to notify_stdin for agent %s", reply_to_id
+                )
+        else:
+            logger.warning(
+                "Result-reply: reply_to agent %r not registered — mailbox written "
+                "but notify_stdin skipped",
+                reply_to_id,
+            )
 
     async def route_message(self, msg: Message) -> None:
         """Forward a PEER_MSG if the sender/receiver pair is permitted."""
