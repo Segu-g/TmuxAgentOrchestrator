@@ -184,6 +184,7 @@ class Orchestrator:
         depends_on: list[str] | None = None,
         idempotency_key: str | None = None,
         reply_to: str | None = None,
+        target_agent: str | None = None,
     ) -> Task:
         # Idempotency deduplication: return existing task for duplicate keys.
         if idempotency_key is not None:
@@ -205,6 +206,7 @@ class Orchestrator:
             metadata=metadata or {},
             depends_on=depends_on or [],
             reply_to=reply_to,
+            target_agent=target_agent,
         )
         if idempotency_key is not None:
             self._idempotency_keys[idempotency_key] = task.id
@@ -222,6 +224,7 @@ class Orchestrator:
                 "task_id": task.id,
                 "prompt": prompt,
                 **({"reply_to": reply_to} if reply_to is not None else {}),
+                **({"target_agent": target_agent} if target_agent is not None else {}),
             },
         ))
         logger.info("Task %s queued (priority=%d, reply_to=%s)", task.id, priority, reply_to)
@@ -279,7 +282,34 @@ class Orchestrator:
                     await asyncio.sleep(0.05)
                 continue
 
-            agent = self.registry.find_idle_worker()
+            # --- Agent selection: respect target_agent routing ---
+            if task.target_agent is not None:
+                # Task must be routed to a specific agent.
+                target = self.registry.get(task.target_agent)
+                if target is None:
+                    # Named agent does not exist — dead letter immediately.
+                    await self._dead_letter(
+                        task,
+                        f"unknown target_agent={task.target_agent!r}",
+                    )
+                    continue
+                if target.status != AgentStatus.IDLE:
+                    # Target exists but is busy — re-queue and wait.
+                    retry_count = task.metadata.get("_retry_count", 0) + 1
+                    task.metadata["_retry_count"] = retry_count
+                    if retry_count >= self.config.dlq_max_retries:
+                        await self._dead_letter(
+                            task,
+                            f"target_agent={task.target_agent!r} not idle after {retry_count} retries",
+                        )
+                    else:
+                        self._task_seq += 1
+                        await self._task_queue.put((task.priority, self._task_seq, task))
+                        await asyncio.sleep(0.2)
+                    continue
+                agent = target
+            else:
+                agent = self.registry.find_idle_worker()
             if agent is None:
                 retry_count = task.metadata.get("_retry_count", 0) + 1
                 task.metadata["_retry_count"] = retry_count

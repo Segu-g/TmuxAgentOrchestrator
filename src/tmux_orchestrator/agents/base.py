@@ -45,6 +45,11 @@ class Task:
     # request-reply pattern for hierarchical parent→child result routing.
     # Reference: "Learning Notes #15 – Request Reply Pattern | RabbitMQ" (2024)
     reply_to: str | None = None  # agent_id that should receive the RESULT in its mailbox
+    # When set, the task is ONLY dispatched to this specific agent.
+    # The dispatch loop skips other idle agents and waits until the named
+    # agent becomes idle.  Unknown target_agent IDs are dead-lettered.
+    # Reference: Hohpe & Woolf "Enterprise Integration Patterns" (2003) — Message Router.
+    target_agent: str | None = None
 
     def __lt__(self, other: "Task") -> bool:
         return self.priority < other.priority

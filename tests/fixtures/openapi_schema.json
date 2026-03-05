@@ -137,6 +137,17 @@
               }
             ],
             "title": "Reply To"
+          },
+          "target_agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Agent"
           }
         },
         "required": [
