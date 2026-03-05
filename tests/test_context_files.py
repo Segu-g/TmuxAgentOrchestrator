@@ -227,3 +227,79 @@ async def test_start_copies_context_files(tmp_path: Path) -> None:
 
     # Clean up
     await agent.stop()
+
+
+# ---------------------------------------------------------------------------
+# Bug regression: isolate=False must not overwrite existing CLAUDE.md
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_non_isolated_agent_does_not_overwrite_claude_md(tmp_path: Path) -> None:
+    """When isolate=False, the agent must NOT write CLAUDE.md into the cwd.
+
+    Reproduces the bug where running ClaudeCodeAgent with isolate=False and
+    cwd_override pointing to a shared directory (e.g. the project root) caused
+    the auto-generated agent CLAUDE.md to overwrite the project's own CLAUDE.md.
+    """
+    from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent
+
+    bus = make_bus()
+    tmux = make_tmux_mock()
+
+    # Simulate a shared cwd that already has a project-level CLAUDE.md
+    project_claude_md = tmp_path / "CLAUDE.md"
+    original_content = "# My Project\nThis is the real project instructions."
+    project_claude_md.write_text(original_content)
+
+    agent = ClaudeCodeAgent(
+        agent_id="worker",
+        bus=bus,
+        tmux=tmux,
+        isolate=False,
+        cwd_override=tmp_path,
+    )
+
+    with patch.object(agent, "_wait_for_ready", new_callable=AsyncMock):
+        with patch.object(agent, "_setup_worktree", new_callable=AsyncMock, return_value=tmp_path):
+            await agent.start()
+
+    # Project CLAUDE.md must remain unchanged
+    assert project_claude_md.read_text() == original_content, (
+        "isolate=False agent must not overwrite the directory's existing CLAUDE.md"
+    )
+
+    await agent.stop()
+
+
+@pytest.mark.asyncio
+async def test_isolated_agent_writes_agent_claude_md(tmp_path: Path) -> None:
+    """When isolate=True (default), the agent SHOULD write its own CLAUDE.md."""
+    from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent
+
+    bus = make_bus()
+    tmux = make_tmux_mock()
+
+    # Fresh worktree directory — no existing CLAUDE.md
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    wm = MagicMock()
+    wm.setup = MagicMock(return_value=worktree)
+
+    agent = ClaudeCodeAgent(
+        agent_id="isolated-worker",
+        bus=bus,
+        tmux=tmux,
+        worktree_manager=wm,
+        isolate=True,
+    )
+
+    with patch.object(agent, "_wait_for_ready", new_callable=AsyncMock):
+        await agent.start()
+
+    claude_md = worktree / "CLAUDE.md"
+    assert claude_md.exists(), "isolated agent must write CLAUDE.md to its worktree"
+    assert "isolated-worker" in claude_md.read_text()
+
+    await agent.stop()

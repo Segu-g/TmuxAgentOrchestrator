@@ -101,7 +101,11 @@ class ClaudeCodeAgent(Agent):
         cwd = await self._setup_worktree()
         if cwd is not None:
             await loop.run_in_executor(None, self._write_context_file, cwd)
-            await loop.run_in_executor(None, self._write_agent_claude_md, cwd)
+            # Only write agent-specific CLAUDE.md in isolated worktrees.
+            # Non-isolated agents share an existing directory that may already have
+            # a project-level CLAUDE.md — overwriting it would destroy project context.
+            if self._isolate:
+                await loop.run_in_executor(None, self._write_agent_claude_md, cwd)
             await loop.run_in_executor(None, self._write_notes_template, cwd)
             await loop.run_in_executor(None, self._copy_context_files, cwd)
         launch = (
