@@ -119,9 +119,19 @@ Each step is **required**. Never skip to the next step until the current one is 
 - After each feature set, create `~/Demonstration/v<version>-<topic>/demo.py`.
   Folder name format: `v{major}.{minor}.{patch}-{kebab-case-topic}`
   Example: `v0.13.0-reset-and-metrics`
-- **Write `demo.py`, then immediately run it from the project root:**
+- **The demo folder is a separate git repository** (independent of TmuxAgentOrchestrator).
+  Initialise it before writing `demo.py`:
   ```
-  PYTHONPATH=src uv run python ~/Demonstration/v<version>-<topic>/demo.py
+  git init ~/Demonstration/v<version>-<topic>/
+  ```
+  This ensures `WorktreeManager` uses the demo folder as its repo root, so agent worktrees
+  and any files written by agents stay inside `~/Demonstration/v<version>-<topic>/`
+  and never pollute the TmuxAgentOrchestrator repository.
+- **Write `demo.py`, then immediately run it from the demo folder:**
+  ```
+  cd ~/Demonstration/v<version>-<topic>/
+  PYTHONPATH=/home/segument/Projects/TmuxAgentOrchestrator/src \
+    uv run --project /home/segument/Projects/TmuxAgentOrchestrator python demo.py
   ```
   Running the demo is not optional — writing the script without executing it does not count.
 - If the demo fails, debug and fix the root cause before proceeding to Step 4.
