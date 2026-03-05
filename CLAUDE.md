@@ -82,20 +82,29 @@ be resolved with research alone.
 ### The Mandatory Cycle
 
 ```
-Research → Implement → Unit Tests → E2E Demo → Feedback → Research → …
+Choose → Research → Implement → Unit Tests → E2E Demo → Feedback → Choose → …
 ```
 
 Each step is **required**. Never skip to the next step until the current one is complete.
 
-#### Step 1 — Research first (before every iteration) — MANDATORY, NO EXCEPTIONS
-- **The very first action in every iteration MUST be `WebSearch`.**
+#### Step 0 — Choose the next feature — MANDATORY, NO EXCEPTIONS
+- **The very first action of every iteration is to choose what to build.**
+- Read `DESIGN.md §11` (候補一覧) and the most recent `build-log.md` under `~/Demonstration/`.
+- Select the highest-priority uncompleted item from `DESIGN.md §11`, taking into account
+  any bugs or quality gaps surfaced in the previous demo's `build-log.md`.
+- Write a brief selection rationale in `DESIGN.md §10.N` (the new research section for this
+  iteration) before proceeding:
+  - *What* you chose and *why* (priority, dependency on previous work, demo feedback)
+  - *What* you decided NOT to choose and why
+- Do not begin WebSearch or any implementation until the choice is written down.
+
+#### Step 1 — Research (before any code) — MANDATORY, NO EXCEPTIONS
+- **Search before reading code.**
   Do NOT read any code file, do NOT write any code, until web research is complete.
 - Search for academic papers, blog posts, RFC specifications, and SE books relevant
-  to the planned feature. Minimum 3 queries with `WebSearch`; follow up with `WebFetch`
+  to the chosen feature. Minimum 3 queries with `WebSearch`; follow up with `WebFetch`
   for relevant pages.
-- Record findings in `DESIGN.md §10.N` with full citations (author, title, URL, year).
-- Write a brief justification: *why* this improvement, *what* the literature says, *how*
-  it maps to the codebase.
+- Record findings in the same `DESIGN.md §10.N` section with full citations (author, title, URL, year).
 - **References must come from actual web searches, not from training knowledge alone.**
   Verify URLs are reachable. Then and only then begin implementation.
 
