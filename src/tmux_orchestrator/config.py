@@ -43,6 +43,10 @@ class OrchestratorConfig:
     dlq_max_retries: int = 50  # re-queue attempts before dead-lettering a task
     task_queue_maxsize: int = 0  # 0 = unbounded; >0 = bounded (submit_task raises when full)
     watchdog_poll: float = 10.0  # seconds between watchdog checks (lower in tests)
+    # --- ERROR state auto-recovery ---
+    recovery_attempts: int = 3   # max restart attempts per agent before giving up
+    recovery_backoff_base: float = 5.0  # seconds; attempt N waits backoff_base^N seconds
+    recovery_poll: float = 2.0   # seconds between recovery checks
 
 
 def load_config(path: str | Path) -> OrchestratorConfig:
@@ -75,4 +79,7 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         circuit_breaker_threshold=data.get("circuit_breaker_threshold", 3),
         circuit_breaker_recovery=data.get("circuit_breaker_recovery", 60.0),
         dlq_max_retries=data.get("dlq_max_retries", 50),
+        recovery_attempts=data.get("recovery_attempts", 3),
+        recovery_backoff_base=data.get("recovery_backoff_base", 5.0),
+        recovery_poll=data.get("recovery_poll", 2.0),
     )

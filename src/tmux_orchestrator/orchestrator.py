@@ -8,7 +8,7 @@ import time
 import uuid
 from typing import TYPE_CHECKING
 
-from tmux_orchestrator.agents.base import Agent, Task
+from tmux_orchestrator.agents.base import Agent, AgentStatus, Task
 from tmux_orchestrator.bus import Bus, Message, MessageType
 from tmux_orchestrator.messaging import Mailbox
 from tmux_orchestrator.registry import AgentRegistry
@@ -63,6 +63,11 @@ class Orchestrator:
         self._dispatch_task: asyncio.Task | None = None
         self._router_task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
+        self._recovery_task: asyncio.Task | None = None
+        # Per-agent recovery attempt counters (reset on manual restart or stop)
+        self._recovery_attempts: dict[str, int] = {}
+        # Agents permanently failed (exhausted retries) — excluded from dispatch
+        self._permanently_failed: set[str] = set()
         self._bus_queue: asyncio.Queue[Message] | None = None
         # Worker results waiting to be injected into the next Director chat turn
         self._director_pending: list[str] = []
@@ -101,12 +106,23 @@ class Orchestrator:
             self._watchdog_loop(poll=self.config.watchdog_poll),
             name="orchestrator-watchdog",
         )
+        self._recovery_task = asyncio.create_task(
+            self._recovery_loop(
+                poll=self.config.recovery_poll,
+                backoff_base=self.config.recovery_backoff_base,
+                max_attempts=self.config.recovery_attempts,
+            ),
+            name="orchestrator-recovery",
+        )
         logger.info("Orchestrator started with %d agents", len(self.registry.all_agents()))
 
     async def stop(self) -> None:
         """Stop dispatch, routing, watchdog, and all agents."""
         internal_tasks = [
-            t for t in [self._dispatch_task, self._router_task, self._watchdog_task] if t
+            t for t in [
+                self._dispatch_task, self._router_task,
+                self._watchdog_task, self._recovery_task,
+            ] if t
         ]
         for t in internal_tasks:
             t.cancel()
@@ -330,6 +346,114 @@ class Orchestrator:
                     from_id=agent_id,
                     payload={"task_id": task_id, "error": "watchdog_timeout", "output": None},
                 ))
+
+    # ------------------------------------------------------------------
+    # ERROR state recovery loop
+    # ------------------------------------------------------------------
+
+    async def _recovery_loop(
+        self,
+        *,
+        poll: float = 2.0,
+        backoff_base: float = 5.0,
+        max_attempts: int = 3,
+    ) -> None:
+        """Detect agents in ERROR state and attempt to restart them.
+
+        Recovery strategy (Erlang OTP supervisor restart_one_for_one pattern):
+        - Poll all registered agents for ERROR status.
+        - For each ERROR agent not already permanently failed:
+          - Increment per-agent attempt counter.
+          - If attempts > max_attempts: mark permanently failed, publish
+            ``agent_recovery_failed`` STATUS event, skip.
+          - Otherwise: compute exponential backoff = ``backoff_base ^ attempt``
+            seconds, stop the agent, wait, restart it.
+          - On success (agent reaches IDLE): reset attempt counter, publish
+            ``agent_recovered`` STATUS event.
+
+        Reference:
+        - Erlang OTP supervisor behaviour: https://www.erlang.org/docs/24/design_principles/sup_princ
+        - Nygard "Release It!" (2018) Ch. 5 — Stability Patterns (Timeout + Restart)
+        - DESIGN.md §10.8 (v0.12.0, 2026-03-05)
+        """
+        while True:
+            try:
+                await asyncio.sleep(poll)
+            except asyncio.CancelledError:
+                break
+
+            for agent_id, agent in list(self.registry.all_agents().items()):
+                if agent.status != AgentStatus.ERROR:
+                    continue
+                if agent_id in self._permanently_failed:
+                    continue
+
+                attempt = self._recovery_attempts.get(agent_id, 0) + 1
+                self._recovery_attempts[agent_id] = attempt
+
+                if attempt > max_attempts:
+                    self._permanently_failed.add(agent_id)
+                    logger.error(
+                        "Recovery: agent %s permanently failed after %d attempts",
+                        agent_id, max_attempts,
+                    )
+                    await self.bus.publish(Message(
+                        type=MessageType.STATUS,
+                        from_id="__orchestrator__",
+                        payload={
+                            "event": "agent_recovery_failed",
+                            "agent_id": agent_id,
+                            "attempts": attempt - 1,
+                        },
+                    ))
+                    continue
+
+                backoff = backoff_base ** attempt
+                logger.warning(
+                    "Recovery: agent %s in ERROR (attempt %d/%d) — restarting in %.1fs",
+                    agent_id, attempt, max_attempts, backoff,
+                )
+
+                try:
+                    await agent.stop()
+                except Exception:  # noqa: BLE001
+                    logger.exception("Recovery: error stopping agent %s", agent_id)
+
+                try:
+                    await asyncio.sleep(backoff)
+                except asyncio.CancelledError:
+                    return
+
+                try:
+                    await agent.start()
+                except Exception:  # noqa: BLE001
+                    logger.exception("Recovery: error restarting agent %s", agent_id)
+                    agent.status = AgentStatus.ERROR
+                    continue
+
+                # Give the agent a moment to reach IDLE
+                for _ in range(int(min(backoff * 2, 10) / poll) + 5):
+                    await asyncio.sleep(poll)
+                    if agent.status == AgentStatus.IDLE:
+                        break
+
+                if agent.status == AgentStatus.IDLE:
+                    self._recovery_attempts.pop(agent_id, None)
+                    logger.info("Recovery: agent %s successfully restarted", agent_id)
+                    await self.bus.publish(Message(
+                        type=MessageType.STATUS,
+                        from_id="__orchestrator__",
+                        payload={
+                            "event": "agent_recovered",
+                            "agent_id": agent_id,
+                            "attempt": attempt,
+                        },
+                    ))
+                else:
+                    logger.warning(
+                        "Recovery: agent %s did not reach IDLE after restart (status=%s)",
+                        agent_id, agent.status,
+                    )
 
     # ------------------------------------------------------------------
     # Supervision callback
