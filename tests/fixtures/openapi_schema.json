@@ -45,6 +45,19 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "ScratchpadWrite": {
+        "description": "Request body for PUT /scratchpad/{key}.",
+        "properties": {
+          "value": {
+            "title": "Value"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "title": "ScratchpadWrite",
+        "type": "object"
+      },
       "SendMessage": {
         "properties": {
           "payload": {
@@ -498,6 +511,159 @@
           }
         },
         "summary": "Real-time bus event stream (Server-Sent Events)"
+      }
+    },
+    "/scratchpad/": {
+      "get": {
+        "description": "Return all scratchpad key-value pairs.\n\nThe shared scratchpad implements the Blackboard architectural pattern\n(Buschmann et al., 1996): a shared working memory that multiple agents\ncan read and write independently.  It is especially useful for pipeline\nworkflows where one agent writes results that a downstream agent reads.\n\nReference: DESIGN.md \u00a711 (architecture) \u2014 shared scratchpad (v0.16.0)",
+        "operationId": "scratchpad_list_scratchpad__get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Scratchpad List Scratchpad  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List all scratchpad entries"
+      }
+    },
+    "/scratchpad/{key}": {
+      "delete": {
+        "description": "Remove *key* from the scratchpad.  Returns 404 if not found.",
+        "operationId": "scratchpad_delete_scratchpad__key__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Scratchpad Delete Scratchpad  Key  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete a scratchpad entry"
+      },
+      "get": {
+        "description": "Return the value stored under *key*, or 404 if not found.",
+        "operationId": "scratchpad_get_scratchpad__key__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Scratchpad Get Scratchpad  Key  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read a value from the scratchpad"
+      },
+      "put": {
+        "description": "Write *value* under *key*.  Creates or overwrites the entry.",
+        "operationId": "scratchpad_put_scratchpad__key__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScratchpadWrite"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Scratchpad Put Scratchpad  Key  Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Write a value to the scratchpad"
       }
     },
     "/tasks": {

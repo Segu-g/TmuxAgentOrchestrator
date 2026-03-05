@@ -71,6 +71,12 @@ class DirectorChat(BaseModel):
     message: str
 
 
+class ScratchpadWrite(BaseModel):
+    """Request body for PUT /scratchpad/{key}."""
+
+    value: Any
+
+
 # ---------------------------------------------------------------------------
 # Module-level auth state
 # ---------------------------------------------------------------------------
@@ -80,6 +86,12 @@ _sign_counts: dict[str, int] = {}      # b64url(cred_id) → sign_count
 _sessions: dict[str, float] = {}       # session_token  → expiry (unix ts)
 _pending_challenge: bytes | None = None
 _SESSION_TTL = 86_400  # 24 h
+
+# ---------------------------------------------------------------------------
+# Shared scratchpad — in-process key/value store (cleared on restart)
+# ---------------------------------------------------------------------------
+
+_scratchpad: dict[str, Any] = {}  # key → arbitrary JSON-serialisable value
 
 
 def _new_session() -> str:
@@ -496,6 +508,56 @@ def create_app(
         else:
             await director.send_task(task)
             return {"task_id": task_id}
+
+    # ------------------------------------------------------------------
+    # Shared scratchpad — key/value store for inter-agent data sharing
+    # ------------------------------------------------------------------
+
+    @app.get("/scratchpad/", summary="List all scratchpad entries", dependencies=[Depends(auth)])
+    async def scratchpad_list() -> dict:
+        """Return all scratchpad key-value pairs.
+
+        The shared scratchpad implements the Blackboard architectural pattern
+        (Buschmann et al., 1996): a shared working memory that multiple agents
+        can read and write independently.  It is especially useful for pipeline
+        workflows where one agent writes results that a downstream agent reads.
+
+        Reference: DESIGN.md §11 (architecture) — shared scratchpad (v0.16.0)
+        """
+        return dict(_scratchpad)
+
+    @app.put(
+        "/scratchpad/{key}",
+        summary="Write a value to the scratchpad",
+        dependencies=[Depends(auth)],
+    )
+    async def scratchpad_put(key: str, body: ScratchpadWrite) -> dict:
+        """Write *value* under *key*.  Creates or overwrites the entry."""
+        _scratchpad[key] = body.value
+        return {"key": key, "updated": True}
+
+    @app.get(
+        "/scratchpad/{key}",
+        summary="Read a value from the scratchpad",
+        dependencies=[Depends(auth)],
+    )
+    async def scratchpad_get(key: str) -> dict:
+        """Return the value stored under *key*, or 404 if not found."""
+        if key not in _scratchpad:
+            raise HTTPException(status_code=404, detail=f"Scratchpad key {key!r} not found")
+        return {"key": key, "value": _scratchpad[key]}
+
+    @app.delete(
+        "/scratchpad/{key}",
+        summary="Delete a scratchpad entry",
+        dependencies=[Depends(auth)],
+    )
+    async def scratchpad_delete(key: str) -> dict:
+        """Remove *key* from the scratchpad.  Returns 404 if not found."""
+        if key not in _scratchpad:
+            raise HTTPException(status_code=404, detail=f"Scratchpad key {key!r} not found")
+        del _scratchpad[key]
+        return {"key": key, "deleted": True}
 
     # ------------------------------------------------------------------
     # Health probes (no auth required for infrastructure compatibility)
