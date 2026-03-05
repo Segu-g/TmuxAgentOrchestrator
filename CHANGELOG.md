@@ -6,6 +6,62 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.27.0] — 2026-03-05
+
+### Added
+
+**Task Cancellation — `cancel_task()`, `Agent.interrupt()`, `DELETE /tasks/{id}`, `DELETE /workflows/{id}`**
+
+Tasks can now be cancelled whether they are queued or currently in-progress:
+
+- **`Agent.interrupt()`** (`agents/base.py`): new non-abstract method with default
+  no-op implementation (returns `False`). Subclasses override to send interrupt
+  signal to the running process.
+- **`ClaudeCodeAgent.interrupt()`** (`agents/claude_code.py`): sends `C-c` key
+  sequence to the tmux pane via `pane.send_keys("C-c")`, returns `True`.
+- **`Orchestrator._cancelled_task_ids: set[str]`** (`orchestrator.py`): tombstone set.
+  Tasks added here are: skipped by `_dispatch_loop` if still queued; silently
+  discarded by `_route_loop` if in-progress (RESULT arrives after interrupt).
+- **`Orchestrator.cancel_task(task_id)`**: extended to handle both cases:
+  - *Queued*: removes from heap, publishes `task_cancelled` with `was_running=False`.
+  - *In-progress*: adds to `_cancelled_task_ids`, calls `agent.interrupt()`,
+    publishes `task_cancelled` with `was_running=True`.
+- **`Orchestrator.cancel_workflow(workflow_id)`**: cancels all tasks in a workflow,
+  marks workflow as `"cancelled"`, returns summary `{cancelled: [...], already_done: [...]}`.
+- **`WorkflowManager.cancel(workflow_id)`**: sets `run.status = "cancelled"`,
+  sets `completed_at`, returns `task_ids`. `on_task_complete()` and
+  `on_task_failed()` are no-ops for cancelled workflows.
+- **`DELETE /tasks/{task_id}`** (`web/app.py`): REST endpoint; returns 200 with
+  `{cancelled: true, task_id: ..., was_running: <bool>}` or 404.
+- **`DELETE /workflows/{workflow_id}`** (`web/app.py`): REST endpoint; returns 200
+  with `{workflow_id: ..., cancelled: [...], already_done: [...]}` or 404.
+- `_dispatch_loop` tombstone check: skips tasks in `_cancelled_task_ids` and
+  emits `task_cancelled` STATUS event with `was_running=False`.
+- `_route_loop` discard: when a RESULT arrives for a cancelled task, cleans up
+  `_active_tasks`, `_task_started_at`, `_task_started_prompt`, `_task_reply_to`
+  and skips all callbacks (workflow, reply_to, history recording).
+
+Design references:
+- Kubernetes Pod deletion grace period — SIGTERM → grace → SIGKILL
+- POSIX SIGTERM/SIGKILL model — cooperative interrupt before forced kill
+- Java `Future.cancel(mayInterruptIfRunning=true)` — in-flight interruption
+- Go `context.Context` cancellation — propagated cancellation token
+- DESIGN.md §10.22 (v0.27.0)
+
+Changes:
+- `agents/base.py`: `Agent.interrupt() -> bool` (non-abstract, default returns `False`)
+- `agents/claude_code.py`: `ClaudeCodeAgent.interrupt()` sends `C-c` to pane
+- `orchestrator.py`: `_cancelled_task_ids`, updated `cancel_task()`, new
+  `cancel_workflow()`, tombstone check in `_dispatch_loop`, discard in `_route_loop`
+- `workflow_manager.py`: `WorkflowManager.cancel()`, no-ops in `on_task_complete/failed`
+  when status is `"cancelled"`, `"cancelled"` added as valid status value
+- `web/app.py`: `DELETE /tasks/{task_id}`, `DELETE /workflows/{workflow_id}`
+- `tests/test_task_cancellation.py`: 29 new tests
+- `tests/test_task_cancel.py`: updated `test_cancel_dispatched_task_returns_false`
+  → `test_cancel_dispatched_task_returns_true` to match new semantics
+
+---
+
 ## [0.26.0] — 2026-03-05
 
 ### Added

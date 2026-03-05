@@ -1062,6 +1062,76 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.22 調査記録 (v0.27.0, 2026-03-05)
+
+**実装テーマ: Task Cancellation — queued and in-progress task cancellation**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| キャンセレーション信号 | POSIX SIGTERM/SIGKILL model | POSIX.1-2017 §12.2 — Signal concepts; `SIGINT`/`SIGTERM`/`SIGKILL` |
+| 協調キャンセレーション | Go `context.Context` cancellation | Rob Pike "Go Concurrency Patterns: Context" (2014) https://go.dev/blog/context |
+| 実行中タスクキャンセル | Java `Future.cancel(mayInterruptIfRunning)` | Java SE 21 `java.util.concurrent.Future` javadoc https://docs.oracle.com/en/java/docs/api/java.base/java/util/concurrent/Future.html |
+| グレースフルシャットダウン | Kubernetes Pod deletion grace period | Kubernetes docs "Termination of Pods" https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-termination |
+
+**主要知見:**
+
+1. **POSIX SIGTERM/SIGKILL model**: UNIX プロセスキャンセレーションの標準パターンは「まず SIGTERM で協調終了を要求し、タイムアウト後に SIGKILL で強制終了する」二段階プロセス。本実装では `interrupt()` が SIGTERM 相当 (Ctrl-C / SIGINT をエージェントプロセスに送信)、オーケストレーターがその後の RESULT を tombstone で廃棄するのが「後始末」に相当する。SIGKILL 相当 (強制停止) は `agent.stop()` が担う。
+
+2. **Go `context.Context` cancellation**: Go の context パッケージはキャンセレーションシグナルをコールスタック全体に伝播させる。`context.WithCancel()` は `cancel()` 関数を返し、呼び出し元がいつでもキャンセルできる。本実装の `_cancelled_task_ids` セットは「context のキャンセルフラグ」に相当し、`_dispatch_loop` と `_route_loop` がそれを確認して処理をスキップする。
+
+3. **Java `Future.cancel(mayInterruptIfRunning=true)`**: Java の `Future.cancel(true)` は実行中スレッドに `InterruptedException` を投げる。本実装の `agent.interrupt()` がこれに相当し、tmux pane に Ctrl-C を送信することで実行中プロセスに SIGINT が届く。`mayInterruptIfRunning=false` 相当 (キュー内のみキャンセル) は元の実装。新実装は `true` を常に意味する。
+
+4. **Kubernetes Pod deletion grace period**: Kubernetes では `kubectl delete pod` が SIGTERM を送り、`terminationGracePeriodSeconds`（デフォルト 30s）の間プロセスが自発的に終了するのを待ち、その後 SIGKILL で強制終了する。本実装では `interrupt()` (Ctrl-C) 後、エージェントが prompt に戻るまで `_wait_for_completion` ポーリングが続く。tombstone (`_cancelled_task_ids`) が RESULT を廃棄することで「grace period 後のクリーンアップ」を実現。
+
+**設計決定:**
+
+- **tombstone セット (`_cancelled_task_ids`)**: `asyncio.PriorityQueue` は任意アイテム削除をサポートしないため、tombstone アプローチを採用。`cancel_task()` でセットに追加し、`_dispatch_loop` がデキュー時にスキップ、`_route_loop` が RESULT 受信時に廃棄する。これにより再エントランス安全で、ヒープの整合性を壊さない。
+- **`interrupt()` のデフォルト no-op**: `Agent` 抽象クラスの `interrupt()` は非抽象メソッド (デフォルト `return False`)。すべての Agent サブクラスが interrupt を実装する必要はなく、`ClaudeCodeAgent` のみが tmux pane への Ctrl-C を実装。将来の HTTP/gRPC エージェントは HTTP キャンセレーションリクエストを実装できる。
+- **`_route_loop` での RESULT 廃棄**: キャンセルされた in-progress タスクの RESULT は silent discard。workflow callbacks (`on_task_complete`/`on_task_failed`)、`reply_to` routing、`_agent_history` 記録、`_completed_tasks` 追加、いずれも実行しない。完全なキャンセルセマンティクスを保証する。
+- **`WorkflowManager.cancel()` + no-op callbacks**: ワークフローキャンセル後に遅れて到着する RESULT が `on_task_complete`/`on_task_failed` を呼び出しても状態が汚染されない。これは Kubernetes の `DeletionTimestamp` パターンに類似 — リソースが「削除中」状態である間、コントローラーは新しい操作を受け付けない。
+- **`DELETE /tasks/{id}` vs `POST /tasks/{id}/cancel`**: 既存の `POST /tasks/{id}/cancel` はキュー内のみキャンセル。新しい `DELETE /tasks/{id}` は in-progress を含む完全キャンセル。REST の DELETE セマンティクス「リソースを削除する」に一致。Kubernetes の `kubectl delete` も同様に DELETE メソッドを使用。
+
+**テスト (29テスト, 合計497テスト):**
+- `Agent.interrupt()` デフォルト実装は no-op で `False` を返す
+- `cancel_task()` — unknown task_id は `False` を返す
+- `cancel_task()` — queued task: `True`、キューから削除
+- `cancel_task()` — queued task: STATUS `task_cancelled` (was_running=False) を発行
+- `cancel_task()` — 他のキュー内タスクに影響しない
+- `cancel_task()` — in-progress task: `True`、`_cancelled_task_ids` に追加
+- `cancel_task()` — in-progress task: `agent.interrupt()` が呼ばれる
+- `cancel_task()` — in-progress task: STATUS `task_cancelled` (was_running=True) を発行
+- `_route_loop` — キャンセル済み RESULT は廃棄、`_completed_tasks` に追加されない
+- `_route_loop` — キャンセル済み RESULT でワークフロー callback は呼ばれない
+- `WorkflowManager.cancel()` — status が "cancelled" になる
+- `WorkflowManager.cancel()` — `completed_at` が設定される
+- `WorkflowManager.cancel()` — unknown id は空リストを返す
+- `WorkflowManager.on_task_complete()` — "cancelled" 後は no-op
+- `WorkflowManager.on_task_failed()` — "cancelled" 後は no-op
+- `cancel_workflow()` — すべてのキュー内タスクをキャンセル
+- `cancel_workflow()` — unknown workflow_id は `None` を返す
+- `cancel_workflow()` — 部分完了タスクは `already_done` に分類
+- REST `DELETE /tasks/{id}` — queued task: 200 + `cancelled=true`
+- REST `DELETE /tasks/{id}` — in-progress task: 200 + `cancelled=true`
+- REST `DELETE /tasks/{id}` — unknown: 404
+- REST `DELETE /tasks/{id}` — 認証なし: 401
+- REST `DELETE /workflows/{id}` — known: 200 + `cancelled`/`already_done` リスト
+- REST `DELETE /workflows/{id}` — unknown: 404
+- REST `DELETE /workflows/{id}` — 認証なし: 401
+- `ClaudeCodeAgent.interrupt()` — `pane.send_keys("C-c")` を呼び出して `True` を返す
+- `ClaudeCodeAgent.interrupt()` — pane なしは `False` を返す
+- retry 付き in-progress task のキャンセル — RESULT 廃棄後 `_active_tasks` がクリーンアップ
+- 既存テスト更新: `test_cancel_dispatched_task_returns_false` → `test_cancel_dispatched_task_returns_true`
+
+**デモシナリオ (v0.27.0):**
+- シナリオ: "Task Cancellation Mix"
+- デモフォルダ: `~/Demonstration/v0.27.0-task-cancellation/`
+- 2 DemoAgent インスタンス (slow + fast)
+- 5 タスクを提出 → 3/4 をキュー中にキャンセル → Task-1 の実行中キャンセル (interrupt 呼び出し確認)
+- 残り 2 タスク (Task-2, Task-5) が正常完了
+- 最終サマリ: completed=2, cancelled_queued=2, cancelled_running=1
+
+---
+
 ## 11. 今後の課題
 
 ### 機能
@@ -1081,6 +1151,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~中~~ ~~タスク結果の永続化（Event Sourcing）~~ | **完了 (v0.24.0)** — `ResultStore` 追記専用 JSONL; `GET /results`, `GET /results/dates`; `OrchestratorConfig.result_store_enabled/dir`; 23テスト (409合計) |
 | ~~高~~ ~~Workflow DAG API — パイプライン一括提出~~ | **完了 (v0.25.0)** — `WorkflowManager` + `validate_dag()` + `POST/GET /workflows`; Kahn's algorithm; local_id→task_id変換; 29テスト (438合計) |
 | ~~高~~ ~~Task retry on failure — per-task retry semantics~~ | **完了 (v0.26.0)** — `Task.max_retries`/`retry_count`; `_active_tasks` lookup; `task_retrying` STATUS イベント; `WorkflowManager.on_task_retrying()`; `GET /tasks` 全タスク一覧 (pagination); `GET /tasks/{id}`; REST `max_retries` パラメータ; 30テスト (468合計) |
+| ~~高~~ ~~Task cancellation — queued and in-progress~~ | **完了 (v0.27.0)** — `Agent.interrupt()`; `ClaudeCodeAgent.interrupt()` (Ctrl-C via tmux); `_cancelled_task_ids` tombstone; `cancel_task()` handles both queued and in-progress; `_dispatch_loop` tombstone check; `_route_loop` RESULT discard; `cancel_workflow()`; `WorkflowManager.cancel()` + no-ops after cancel; `DELETE /tasks/{id}`; `DELETE /workflows/{id}`; 29テスト (497合計) |
 | ~~低~~ ~~エージェントのコンテキスト使用量モニタリング~~ | **完了 (v0.21.0)** — `ContextMonitor` + `GET /agents/{id}/stats`, `GET /context-stats`; `context_warning`/`notes_updated`/`summarize_triggered` STATUS イベント; `context_auto_summarize`; 21 テスト (347 合計) |
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |
 | ~~低~~ ~~Prometheus メトリクス (`/metrics`)~~ | **完了 (v0.13.0)** — `GET /metrics` (prometheus_client 直接使用; 認証不要) |
