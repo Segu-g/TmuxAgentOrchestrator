@@ -83,7 +83,13 @@ class WorktreeManager:
             self._owned[agent_id] = path
             return path
 
-    def teardown(self, agent_id: str, *, merge_to_base: bool = False) -> None:
+    def teardown(
+        self,
+        agent_id: str,
+        *,
+        merge_to_base: bool = False,
+        merge_target: str | None = None,
+    ) -> None:
         """Remove the worktree and branch for *agent_id*.
 
         No-op (beyond deregistration) for shared-worktree agents.
@@ -94,14 +100,24 @@ class WorktreeManager:
             The agent whose worktree should be torn down.
         merge_to_base:
             When ``True``, attempt a ``git merge --squash`` of the agent's
-            branch into the current HEAD of the main repo before removing the
-            worktree.  If the merge fails (conflicts, no new commits, etc.)
-            the error is logged and teardown continues — the branch is still
-            deleted, so callers should consider using ``keep_branch()`` first
-            if a conflict-resolution retry is needed.
+            branch into *merge_target* (or HEAD when *merge_target* is
+            ``None``) before removing the worktree.  If the merge fails
+            (conflicts, no new commits, etc.) the error is logged and
+            teardown continues.
 
             Useful when the agent was asked to produce code that should land
-            on the main branch automatically after the task completes.
+            on a specific branch automatically after the task completes.
+        merge_target:
+            Name of the branch to merge into when *merge_to_base* is
+            ``True``.  Defaults to ``None``, which keeps the main repo on
+            whatever branch it is currently checked out to.
+
+            Example::
+
+                wm.teardown("agent-1", merge_to_base=True, merge_target="develop")
+
+            The main repo will temporarily switch to *merge_target*, merge
+            the squash commit, then switch back to the original branch.
         """
         with self._lock:
             if agent_id in self._shared:
@@ -115,7 +131,7 @@ class WorktreeManager:
             branch = f"worktree/{agent_id}"
 
             if merge_to_base:
-                self._merge_branch(branch)
+                self._merge_branch(branch, target=merge_target)
 
             subprocess.run(
                 ["git", "worktree", "remove", "--force", str(path)],
@@ -166,58 +182,99 @@ class WorktreeManager:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _merge_branch(self, branch: str) -> None:
-        """Squash-merge *branch* into the current HEAD of the main repo.
+    def _merge_branch(self, branch: str, *, target: str | None = None) -> None:
+        """Squash-merge *branch* into *target* (or the current HEAD).
+
+        When *target* is given the main repo temporarily switches to that
+        branch, performs the squash merge, then switches back to the branch
+        that was checked out before.  If the checkout fails (dirty tree,
+        branch does not exist, etc.) the error is logged and the merge is
+        skipped.
 
         Uses ``--squash`` so the merge produces a single commit rather than
-        replaying each agent commit, keeping the main branch history clean.
+        replaying each agent commit, keeping the target branch history clean.
         On failure the error is logged but execution continues.
         """
         import logging as _logging  # noqa: PLC0415
         _log = _logging.getLogger(__name__)
 
-        # Check if branch has any commits not in HEAD
-        diff = subprocess.run(
-            ["git", "log", f"HEAD..{branch}", "--oneline"],
-            cwd=self._repo_root,
-            capture_output=True,
-            text=True,
-        )
-        if not diff.stdout.strip():
-            _log.info("merge_to_base: branch %s has no new commits — skipping", branch)
-            return
-
-        result = subprocess.run(
-            ["git", "merge", "--squash", branch],
-            cwd=self._repo_root,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            _log.warning(
-                "merge_to_base: squash merge of %s failed (conflicts?):\n%s",
-                branch,
-                result.stderr,
-            )
-            # Abort any partial merge
-            subprocess.run(
-                ["git", "merge", "--abort"],
+        # Determine the currently checked-out branch so we can restore it.
+        original_branch: str | None = None
+        if target is not None:
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                 cwd=self._repo_root,
                 capture_output=True,
+                text=True,
             )
-            return
+            original_branch = result.stdout.strip() if result.returncode == 0 else None
 
-        # Commit the squash result
-        commit = subprocess.run(
-            ["git", "commit", "-m", f"merge: squash worktree branch {branch}"],
-            cwd=self._repo_root,
-            capture_output=True,
-            text=True,
-        )
-        if commit.returncode == 0:
-            _log.info("merge_to_base: squash-merged %s into HEAD", branch)
-        else:
-            _log.warning("merge_to_base: commit failed: %s", commit.stderr)
+            # Switch to the requested merge target
+            checkout = subprocess.run(
+                ["git", "checkout", target],
+                cwd=self._repo_root,
+                capture_output=True,
+                text=True,
+            )
+            if checkout.returncode != 0:
+                _log.warning(
+                    "merge_to_base: cannot checkout target branch %r: %s",
+                    target,
+                    checkout.stderr,
+                )
+                return
+
+        try:
+            # Check if branch has any commits not in HEAD
+            diff = subprocess.run(
+                ["git", "log", f"HEAD..{branch}", "--oneline"],
+                cwd=self._repo_root,
+                capture_output=True,
+                text=True,
+            )
+            if not diff.stdout.strip():
+                _log.info("merge_to_base: branch %s has no new commits — skipping", branch)
+                return
+
+            result = subprocess.run(
+                ["git", "merge", "--squash", branch],
+                cwd=self._repo_root,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                _log.warning(
+                    "merge_to_base: squash merge of %s failed (conflicts?):\n%s",
+                    branch,
+                    result.stderr,
+                )
+                subprocess.run(
+                    ["git", "merge", "--abort"],
+                    cwd=self._repo_root,
+                    capture_output=True,
+                )
+                return
+
+            # Commit the squash result
+            target_label = target or "HEAD"
+            commit = subprocess.run(
+                ["git", "commit", "-m", f"merge: squash worktree branch {branch} into {target_label}"],
+                cwd=self._repo_root,
+                capture_output=True,
+                text=True,
+            )
+            if commit.returncode == 0:
+                _log.info("merge_to_base: squash-merged %s into %s", branch, target_label)
+            else:
+                _log.warning("merge_to_base: commit failed: %s", commit.stderr)
+        finally:
+            # Always restore the original branch when we switched away
+            if target is not None and original_branch and original_branch != target:
+                subprocess.run(
+                    ["git", "checkout", original_branch],
+                    cwd=self._repo_root,
+                    capture_output=True,
+                )
 
     def _ensure_gitignore(self) -> None:
         """Ensure ``.worktrees/`` is listed in the repo's ``.gitignore``."""

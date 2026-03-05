@@ -196,3 +196,50 @@ def test_teardown_merge_no_commits_is_noop(git_repo: Path) -> None:
     after = _git("rev-list", "--count", "HEAD", cwd=git_repo).stdout.strip()
 
     assert before == after
+
+
+def test_teardown_merge_to_target_branch(git_repo: Path) -> None:
+    """teardown(merge_to_base=True, merge_target='feature') merges into specified branch."""
+    # Create a feature branch to merge into
+    _git("checkout", "-b", "feature", cwd=git_repo)
+    _git("checkout", "master", cwd=git_repo)
+
+    wm = WorktreeManager(git_repo)
+    worktree = wm.setup("target-agent")
+
+    _git("config", "user.email", "test@example.com", cwd=worktree)
+    _git("config", "user.name", "Test", cwd=worktree)
+
+    # Commit inside the worktree
+    (worktree / "feature_output.txt").write_text("feature agent work\n")
+    _git("add", "feature_output.txt", cwd=worktree)
+    _git("commit", "-m", "agent: add feature output", cwd=worktree)
+
+    # Teardown merging into 'feature' branch (not current 'master')
+    wm.teardown("target-agent", merge_to_base=True, merge_target="feature")
+
+    # The commit should be on 'feature', not 'master'
+    master_log = _git("log", "--oneline", "-3", cwd=git_repo).stdout
+    feature_log = _git("log", "--oneline", "-3", "feature", cwd=git_repo).stdout
+
+    assert "merge: squash" in feature_log
+    assert "merge: squash" not in master_log
+
+    # Main repo should still be on master
+    current = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=git_repo).stdout.strip()
+    assert current == "master"
+
+
+def test_teardown_merge_target_restores_original_branch(git_repo: Path) -> None:
+    """After merge_to_base with merge_target, the main repo returns to its original branch."""
+    _git("checkout", "-b", "develop", cwd=git_repo)
+    _git("checkout", "master", cwd=git_repo)
+
+    wm = WorktreeManager(git_repo)
+    wm.setup("restore-agent")
+
+    wm.teardown("restore-agent", merge_to_base=True, merge_target="develop")
+
+    # Should be back on master
+    current = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=git_repo).stdout.strip()
+    assert current == "master"

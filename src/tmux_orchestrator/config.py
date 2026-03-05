@@ -38,6 +38,7 @@ class AgentConfig:
     # by the agent inside its worktree therefore land on the original branch
     # automatically.  Set to False (default) to delete commits on stop.
     merge_on_stop: bool = False
+    merge_target: str | None = None  # target branch for merge_on_stop; None = merge into current HEAD
 
 
 @dataclass
@@ -75,6 +76,25 @@ class OrchestratorConfig:
     context_warn_threshold: float = 0.75
     context_auto_summarize: bool = False
     context_monitor_poll: float = 5.0
+    # --- Queue-depth autoscaling ---
+    # autoscale_min: minimum number of autoscaled agents (0 = scale to zero).
+    # autoscale_max: maximum number of autoscaled agents (0 = disabled).
+    # autoscale_threshold: queue depth per idle agent before scaling up.
+    # autoscale_cooldown: seconds of queue-empty before scaling down.
+    # autoscale_poll: seconds between scale checks.
+    # autoscale_agent_tags: capability tags assigned to auto-created agents.
+    # autoscale_system_prompt: system prompt for auto-created agents.
+    # References:
+    #   Kubernetes HPA https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/
+    #   Thijssen "Autonomic Computing" (MIT Press, 2009) — MAPE-K loop
+    #   AWS Auto Scaling cooldowns https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-cooldowns.html
+    autoscale_min: int = 0
+    autoscale_max: int = 0          # 0 = autoscaling disabled
+    autoscale_threshold: int = 3
+    autoscale_cooldown: float = 30.0
+    autoscale_poll: float = 5.0
+    autoscale_agent_tags: list[str] = field(default_factory=list)
+    autoscale_system_prompt: str | None = None
 
 
 def load_config(path: str | Path) -> OrchestratorConfig:
@@ -93,6 +113,7 @@ def load_config(path: str | Path) -> OrchestratorConfig:
             context_files=a.get("context_files", []),
             tags=a.get("tags", []),
             merge_on_stop=a.get("merge_on_stop", False),
+            merge_target=a.get("merge_target"),
         )
         for a in data.get("agents", [])
     ]
@@ -118,4 +139,11 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         context_warn_threshold=data.get("context_warn_threshold", 0.75),
         context_auto_summarize=data.get("context_auto_summarize", False),
         context_monitor_poll=data.get("context_monitor_poll", 5.0),
+        autoscale_min=data.get("autoscale_min", 0),
+        autoscale_max=data.get("autoscale_max", 0),
+        autoscale_threshold=data.get("autoscale_threshold", 3),
+        autoscale_cooldown=data.get("autoscale_cooldown", 30.0),
+        autoscale_poll=data.get("autoscale_poll", 5.0),
+        autoscale_agent_tags=data.get("autoscale_agent_tags", []),
+        autoscale_system_prompt=data.get("autoscale_system_prompt"),
     )

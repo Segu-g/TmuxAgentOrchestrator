@@ -64,6 +64,7 @@ class ClaudeCodeAgent(Agent):
         tags: list[str] | None = None,
         # --- Worktree lifecycle ---
         merge_on_stop: bool = False,
+        merge_target: str | None = None,
     ) -> None:
         super().__init__(agent_id, bus, task_timeout=task_timeout)
         self.mailbox = mailbox
@@ -74,6 +75,7 @@ class ClaudeCodeAgent(Agent):
         self._worktree_manager = worktree_manager
         self._isolate = isolate
         self._merge_on_stop = merge_on_stop
+        self._merge_target = merge_target
         self._cwd_override = cwd_override
         self._session_name = session_name
         self._web_base_url = web_base_url

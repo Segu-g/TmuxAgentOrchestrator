@@ -83,6 +83,7 @@ class Agent(ABC):
         self._worktree_manager: "WorktreeManager | None" = None
         self._isolate: bool = True
         self._merge_on_stop: bool = False
+        self._merge_target: str | None = None
         self._cwd_override: Path | None = None
         self.worktree_path: Path | None = None
 
@@ -243,7 +244,9 @@ class Agent(ABC):
         await loop.run_in_executor(
             None,
             lambda: self._worktree_manager.teardown(  # type: ignore[union-attr]
-                self.id, merge_to_base=self._merge_on_stop
+                self.id,
+                merge_to_base=self._merge_on_stop,
+                merge_target=self._merge_target,
             ),
         )
         self.worktree_path = None

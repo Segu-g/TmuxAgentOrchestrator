@@ -129,6 +129,14 @@ class Orchestrator:
             auto_summarize=config.context_auto_summarize,
             poll_interval=config.context_monitor_poll,
         )
+        # Queue-depth autoscaler — only created when autoscale_max > 0.
+        # Reference: Kubernetes HPA; Thijssen "Autonomic Computing"; AWS cooldowns.
+        # DESIGN.md §10.18 (v0.23.0)
+        if config.autoscale_max > 0:
+            from tmux_orchestrator.autoscaler import AutoScaler
+            self._autoscaler: "AutoScaler | None" = AutoScaler(self, config)
+        else:
+            self._autoscaler = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -164,10 +172,14 @@ class Orchestrator:
             name="orchestrator-recovery",
         )
         self._context_monitor.start()
+        if self._autoscaler is not None:
+            self._autoscaler.start()
         logger.info("Orchestrator started with %d agents", len(self.registry.all_agents()))
 
     async def stop(self) -> None:
         """Stop dispatch, routing, watchdog, context monitor, and all agents."""
+        if self._autoscaler is not None:
+            self._autoscaler.stop()
         self._context_monitor.stop()
         internal_tasks = [
             t for t in [
@@ -210,6 +222,35 @@ class Orchestrator:
         items = self._director_pending.copy()
         self._director_pending.clear()
         return items
+
+    # ------------------------------------------------------------------
+    # Queue depth
+    # ------------------------------------------------------------------
+
+    def queue_depth(self) -> int:
+        """Return the number of tasks currently waiting in the priority queue."""
+        return self._task_queue.qsize()
+
+    # ------------------------------------------------------------------
+    # Autoscaler
+    # ------------------------------------------------------------------
+
+    async def get_autoscaler_status(self) -> dict:
+        """Return current autoscaler status, or a disabled-stub when not active."""
+        if self._autoscaler is None:
+            return {
+                "enabled": False,
+                "agent_count": 0,
+                "queue_depth": self.queue_depth(),
+                "last_scale_up": None,
+                "last_scale_down": None,
+                "autoscaled_ids": [],
+                "min": 0,
+                "max": 0,
+                "threshold": self.config.autoscale_threshold,
+                "cooldown": self.config.autoscale_cooldown,
+            }
+        return await self._autoscaler.status()
 
     # ------------------------------------------------------------------
     # Context monitor
@@ -1016,6 +1057,7 @@ class Orchestrator:
                     system_prompt=msg.payload.get("system_prompt"),
                     isolate=msg.payload.get("isolate", True),
                     merge_on_stop=msg.payload.get("merge_on_stop", False),
+                    merge_target=msg.payload.get("merge_target"),
                     command=msg.payload.get("command"),
                     role=msg.payload.get("role", "worker"),
                     task_timeout=msg.payload.get("task_timeout"),
@@ -1069,6 +1111,7 @@ class Orchestrator:
             context_files_root=_Path.cwd() if template_cfg.context_files else None,
             tags=template_cfg.tags,
             merge_on_stop=template_cfg.merge_on_stop,
+            merge_target=template_cfg.merge_target,
         )
 
         self.registry.register(agent, parent_id=parent_id)
@@ -1097,6 +1140,7 @@ class Orchestrator:
         system_prompt: str | None = None,
         isolate: bool = True,
         merge_on_stop: bool = False,
+        merge_target: str | None = None,
         command: str | None = None,
         role: str = "worker",
         task_timeout: int | None = None,
@@ -1171,6 +1215,7 @@ class Orchestrator:
             worktree_manager=effective_wm,
             isolate=isolate,
             merge_on_stop=merge_on_stop,
+            merge_target=merge_target,
             session_name=self.config.session_name,
             web_base_url=self.config.web_base_url,
             task_timeout=effective_timeout,

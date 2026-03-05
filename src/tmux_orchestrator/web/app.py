@@ -84,6 +84,7 @@ class DynamicAgentCreate(BaseModel):
     system_prompt: str | None = None
     isolate: bool = True
     merge_on_stop: bool = False
+    merge_target: str | None = None
     command: str | None = None
     role: str = "worker"
     task_timeout: int | None = None
@@ -114,6 +115,18 @@ class RateLimitUpdate(BaseModel):
 
     rate: float
     burst: int = 0
+
+
+class AutoScalerUpdate(BaseModel):
+    """Request body for PUT /orchestrator/autoscaler.
+
+    All fields are optional — only supplied fields are updated.
+    """
+
+    min: int | None = None
+    max: int | None = None
+    threshold: int | None = None
+    cooldown: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -742,6 +755,43 @@ def create_app(
         """
         return orchestrator.reconfigure_rate_limiter(rate=body.rate, burst=body.burst)
 
+    @app.get(
+        "/orchestrator/autoscaler",
+        summary="Get autoscaler status",
+        dependencies=[Depends(auth)],
+    )
+    async def get_autoscaler_status() -> dict:
+        """Return the current autoscaler state.
+
+        Returns ``{"enabled": false, ...}`` when autoscaling is not configured
+        (``autoscale_max=0`` in config).
+        """
+        return await orchestrator.get_autoscaler_status()
+
+    @app.put(
+        "/orchestrator/autoscaler",
+        summary="Reconfigure autoscaler parameters",
+        dependencies=[Depends(auth)],
+    )
+    async def put_autoscaler(body: AutoScalerUpdate) -> dict:
+        """Update autoscaling parameters at runtime.
+
+        Only supplied fields are changed; omit a field to leave it unchanged.
+        Returns 409 when autoscaling is not enabled (``autoscale_max=0``).
+        """
+        if orchestrator._autoscaler is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Autoscaling is not enabled (autoscale_max=0 in config)",
+            )
+        result = orchestrator._autoscaler.reconfigure(
+            min=body.min,
+            max=body.max,
+            threshold=body.threshold,
+            cooldown=body.cooldown,
+        )
+        return result
+
     @app.post("/agents/{agent_id}/message", summary="Send a message to an agent", dependencies=[Depends(auth)])
     async def send_message(agent_id: str, body: SendMessage) -> dict:
         agent = orchestrator.get_agent(agent_id)
@@ -778,6 +828,7 @@ def create_app(
                 system_prompt=body.system_prompt,
                 isolate=body.isolate,
                 merge_on_stop=body.merge_on_stop,
+                merge_target=body.merge_target,
                 command=body.command,
                 role=body.role,
                 task_timeout=body.task_timeout,
