@@ -6,6 +6,46 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.32.0] — 2026-03-05
+
+### Added
+
+**Priority Inheritance for Sub-tasks**
+
+When a high-priority task spawns sub-tasks (via `depends_on`), those sub-tasks
+now automatically inherit the parent's priority, preventing them from being
+blocked by lower-priority work already in the queue.
+
+- **`Task.inherit_priority: bool = True`**: new field on the `Task` dataclass.
+  When `True` and `depends_on` is non-empty, the task's effective priority is
+  `min(own_priority, min(priority of all direct parents))`.
+  When `False`, the task keeps its own priority unchanged.
+- **`Orchestrator._task_priorities: dict[str, int]`**: new tracking dict populated
+  at `submit_task()` time for all tasks. Stores the effective (post-inheritance)
+  priority for each task ID. Used by dependent tasks to look up parent priorities.
+- **`submit_task(inherit_priority: bool = True)`**: new parameter. Applies priority
+  inheritance before creating the `Task` object.
+- **REST `TaskSubmit`**: new `inherit_priority: bool = True` field.
+  `POST /tasks` now accepts and returns `inherit_priority`.
+- **REST `WorkflowTaskSpec`**: new `inherit_priority: bool = True` field.
+  `POST /workflows` applies per-task `inherit_priority` during topological
+  submission — priorities propagate through the DAG in dependency order.
+- **REST `GET /tasks/{task_id}`**: response now includes `inherit_priority` field
+  for waiting, queued, and in-progress tasks.
+- **OpenAPI snapshot** regenerated.
+
+Design references:
+- Liu & Layland "Scheduling Algorithms for Multiprogramming in a Hard Real-Time
+  Environment" JACM 20(1) (1973) — Priority Inheritance Protocol
+- Sha, Rajkumar, Lehoczky "Priority Inheritance Protocols" IEEE (1990)
+- Apache Airflow `priority_weight` upstream/downstream rules (2024)
+- DESIGN.md §10.27 (v0.32.0)
+
+**Tests**: 22 new tests in `tests/test_priority_inheritance.py`.
+Total test count: 636 (was 614).
+
+---
+
 ## [0.31.0] — 2026-03-05
 
 ### Added

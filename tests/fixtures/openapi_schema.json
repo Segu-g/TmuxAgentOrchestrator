@@ -426,6 +426,11 @@
             "title": "Depends On",
             "type": "array"
           },
+          "inherit_priority": {
+            "default": true,
+            "title": "Inherit Priority",
+            "type": "boolean"
+          },
           "max_retries": {
             "default": 0,
             "title": "Max Retries",
@@ -599,6 +604,11 @@
             },
             "title": "Depends On",
             "type": "array"
+          },
+          "inherit_priority": {
+            "default": true,
+            "title": "Inherit Priority",
+            "type": "boolean"
           },
           "local_id": {
             "title": "Local Id",

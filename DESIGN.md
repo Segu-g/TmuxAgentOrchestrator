@@ -1334,6 +1334,54 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.27 調査記録 (v0.32.0, 2026-03-05)
+
+#### 実装: Priority Inheritance for Sub-tasks — 優先度継承
+
+**調査観点:**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| Priority inversion / inheritance in RTOS | Priority Inheritance Protocol | Liu & Layland, JACM 20(1), 1973 |
+| Mutex-based priority inheritance | FreeRTOS / POSIX priority inheritance | https://www.digikey.com/en/maker/projects/introduction-to-rtos-solution-to-part-11-priority-inversion/abf4b8f7cd4a4c70bece35678d178321 |
+| Workflow task priority weighting | Apache Airflow priority_weight | https://airflow.apache.org/docs/apache-airflow/2.1.2/concepts/priority-weight.html |
+| Priority inversion vs inheritance | GeeksforGeeks OS article | https://www.geeksforgeeks.org/operating-systems/difference-between-priority-inversion-and-priority-inheritance/ |
+| Task priority propagation in distributed systems | IEEE Xplore / ScienceDirect | https://ieeexplore.ieee.org/document/8750747/ |
+
+**主要知見:**
+
+1. **Liu & Layland (1973) — Priority Inheritance Protocol (PIP)**:
+   リアルタイムスケジューリングの基礎論文。ミューテックスを保持する低優先度タスクが、そのミューテックスを待つ高優先度タスクの優先度を一時的に継承することで、優先度逆転 (priority inversion) を防ぐ。本実装はミューテックスではなくタスク依存関係 (`depends_on`) を通じた同様の継承を実装。
+
+2. **Priority Inversion の古典的問題 — Mars Pathfinder (1997)**:
+   低優先度タスクがミューテックスを保持し、中優先度タスクが横取りすることで高優先度タスクが間接的にブロックされた。ウォッチドッグタイマーが作動してシステムリセット。`inherit_priority=True` でこのクラスの問題を防ぐ。GeeksforGeeks 記事 (2024) 参照。
+
+3. **Apache Airflow `priority_weight` — 上流/下流の重み付け**:
+   Airflow のデフォルトは「downstream」ルール: 各タスクの有効重みは全下流タスクの重みの合計。これにより上流タスクが積極的にスケジュールされる（全 DAG ランが完了してから次のランを開始する動作）。本実装はより単純な「直接親の最小優先度を採用」方式を採用 (one-level lookup, not transitive closure)。Apache Airflow ドキュメント (2024) 参照。
+
+4. **FreeRTOS / POSIX Mutex Priority Inheritance**:
+   POSIX リアルタイム拡張と FreeRTOS、QNX、VxWorks などの商用 RTOS は優先度継承を標準サポート。ミューテックスを取得した低優先度タスクは、ブロック中の高優先度タスクの優先度に一時的に引き上げられる。DigiKey / FreeRTOS チュートリアル参照。
+
+5. **分散ワークフローでの優先度伝播**:
+   IEEE Xplore (2019) の大規模分散ワークフローシステムに関する研究では、タスク優先度をワークフロー DAG のトポロジカル順序で伝播することが有効と示されている。本実装はこれを単純化した形で採用: `submit_task()` の topological order (ワークフロー DAG では保証済み) で `_task_priorities` を参照して effective_priority を計算。
+
+**設計決定:**
+
+- **one-level lookup (直接親のみ)**: 推移的閉包 (transitive closure) ではなく直接 `depends_on` の親のみ参照。理由: (1) ワークフロー DAG をトポロジカル順序で提出するため、祖先の継承は中間ノードで自動的に伝播する。(2) 実装が単純で O(1) ルックアップで済む。(3) 意図しない遠距離依存による不可解な優先度変化を防ぐ。
+- **`_task_priorities` は immutable after submit**: 提出時に一度記録した後は変更しない。`update_task_priority()` は `_task_priorities` を更新しない設計（既存の依存タスクが再計算されないため一貫性が保たれる）。
+- **`inherit_priority=False` で明示的無効化**: デフォルト True だが、タスク単位で False にできる。`POST /workflows` の `WorkflowTaskSpec` でも per-task 設定可能。
+- **`min()` セマンティクス**: Airflow の `downstream` ルールとは異なり、本実装は min() (低番号=高優先度) を採用。これは Python `asyncio.PriorityQueue` の convention (lower = dispatched first) と一致。
+
+**デモシナリオ (v0.32.0):**
+- シナリオ: Priority Inheritance Queue Inspection
+- デモフォルダ: `~/Demonstration/v0.32.0-priority-inheritance/`
+- Task A (priority=10), B (priority=1), C (priority=1, no deps)
+- Task D (priority=10, depends on B, inherit_priority=True) → effective priority=1
+- Task E (priority=10, depends on B, inherit_priority=False) → keeps priority=10
+- Queue inspection: B and C dispatched before A
+
+---
+
 ## 11. 今後の課題
 
 ### 機能
@@ -1358,6 +1406,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~高~~ ~~Task-level depends_on — first-class dependency tracking~~ | **完了 (v0.29.0)** — `_waiting_tasks: dict[str, Task]`; `_task_dependents: dict[str, list[str]]`; `_failed_tasks: set[str]`; `_on_dep_satisfied()` / `_on_dep_failed()` (cascade); `_task_blocking()`; `submit_task(depends_on=...)` hold-and-release; `cancel_task()` waiting-task case; `POST /tasks` + `POST /tasks/batch` (local_id sibling resolution); `GET /tasks/{id}` (depends_on + blocking + status="waiting"); `GET /tasks` list; 23テスト (543合計) |
 | ~~高~~ ~~Webhook notifications — outbound event delivery~~ | **完了 (v0.30.0)** — `WebhookManager` (register/unregister/deliver/sign); `Webhook`/`WebhookDelivery` dataclasses; `collections.deque(maxlen=50)` circular buffer; HMAC-SHA256 signing; fire-and-forget `asyncio.create_task`; `POST/GET/DELETE /webhooks`, `GET /webhooks/{id}/deliveries`; `OrchestratorConfig.webhook_timeout`; 33テスト (576合計) |
 | ~~高~~ ~~Agent Groups / Named Pools~~ | **完了 (v0.31.0)** — `GroupManager` (create/delete/get/list_all/add_agent/remove_agent); `Task.target_group`; `AgentConfig.groups`; `OrchestratorConfig.groups`; `find_idle_worker(allowed_agent_ids=...)`; `POST/GET/DELETE /groups`, `POST/DELETE /groups/{name}/agents`; `target_group` in TaskSubmit/TaskBatchItem/WorkflowTaskSpec; 38テスト (614合計) |
+| ~~高~~ ~~Priority inheritance for sub-tasks~~ | **完了 (v0.32.0)** — `Task.inherit_priority: bool = True`; `Orchestrator._task_priorities: dict[str, int]`; `submit_task(inherit_priority=)` — `min(own, parent_priorities)` when True; `TaskSubmit.inherit_priority`; `WorkflowTaskSpec.inherit_priority`; `GET /tasks/{id}` returns `inherit_priority`; OpenAPI snapshot updated; 22テスト (636合計) |
 | ~~低~~ ~~エージェントのコンテキスト使用量モニタリング~~ | **完了 (v0.21.0)** — `ContextMonitor` + `GET /agents/{id}/stats`, `GET /context-stats`; `context_warning`/`notes_updated`/`summarize_triggered` STATUS イベント; `context_auto_summarize`; 21 テスト (347 合計) |
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |
 | ~~低~~ ~~Prometheus メトリクス (`/metrics`)~~ | **完了 (v0.13.0)** — `GET /metrics` (prometheus_client 直接使用; 認証不要) |
