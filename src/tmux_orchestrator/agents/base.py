@@ -30,6 +30,7 @@ class AgentStatus(str, Enum):
     BUSY = "BUSY"
     ERROR = "ERROR"
     STOPPED = "STOPPED"
+    DRAINING = "DRAINING"
 
 
 @dataclass
@@ -317,7 +318,7 @@ class Agent(ABC):
 
     def _set_idle(self) -> None:
         self._current_task = None
-        if self.status not in (AgentStatus.STOPPED, AgentStatus.ERROR):
+        if self.status not in (AgentStatus.STOPPED, AgentStatus.ERROR, AgentStatus.DRAINING):
             self.status = AgentStatus.IDLE
             # Always publish agent_idle so orchestrator, TUI, and WebSocket hub
             # receive consistent notification regardless of which code path triggered the transition.

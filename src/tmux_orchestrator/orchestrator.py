@@ -115,6 +115,12 @@ class Orchestrator:
         # Reference: Kubernetes Pod deletion grace period; POSIX SIGTERM/SIGKILL;
         # Go context.Context cancellation; Java Future.cancel(). DESIGN.md §10.22 (v0.27.0)
         self._cancelled_task_ids: set[str] = set()
+        # Set of agent IDs that are in "drain" mode — they will not receive new tasks
+        # and will be automatically stopped when their current task completes.
+        # Reference: Kubernetes Pod terminationGracePeriodSeconds; HAProxy graceful
+        # restart; UNIX SO_LINGER graceful socket close; AWS ECS stopTimeout.
+        # DESIGN.md §10.23 (v0.28.0)
+        self._draining_agents: set[str] = set()
         # Token-bucket rate limiter for task submission backpressure.
         # None → unlimited (default).  Set via set_rate_limiter() or
         # reconfigure_rate_limiter(), or auto-created from config if
@@ -643,6 +649,94 @@ class Orchestrator:
         }
 
     # ------------------------------------------------------------------
+    # Agent drain / graceful shutdown
+    # ------------------------------------------------------------------
+
+    async def drain_agent(self, agent_id: str) -> dict:
+        """Put *agent_id* into graceful drain mode.
+
+        - IDLE: stop immediately, remove from registry, return ``{status: "stopped_immediately"}``.
+        - BUSY: mark as DRAINING; auto-stopped when current task completes.
+          Returns ``{status: "draining"}``.
+        - DRAINING: returns ``{status: "already_draining"}`` (409 semantics).
+        - STOPPED / ERROR: returns ``{status: "already_stopped"}`` (409 semantics).
+        - Not found: raises ``KeyError``.
+
+        Design references:
+        - Kubernetes Pod ``terminationGracePeriodSeconds`` — allow running tasks to
+          finish before the pod is killed.
+        - HAProxy graceful restart — drain in-flight connections before reload.
+        - UNIX ``SO_LINGER`` graceful socket close — wait for pending data before close.
+        - AWS ECS ``stopTimeout`` — container stop grace period.
+        - DESIGN.md §10.23 (v0.28.0)
+        """
+        agent = self.registry.get(agent_id)
+        if agent is None:
+            raise KeyError(agent_id)
+
+        if agent.status == AgentStatus.DRAINING:
+            return {"agent_id": agent_id, "status": "already_draining"}
+
+        if agent.status in (AgentStatus.STOPPED, AgentStatus.ERROR):
+            return {"agent_id": agent_id, "status": "already_stopped"}
+
+        if agent.status == AgentStatus.IDLE:
+            await agent.stop()
+            self.registry.unregister(agent_id)
+            self._draining_agents.discard(agent_id)
+            await self.bus.publish(Message(
+                type=MessageType.STATUS,
+                from_id="__orchestrator__",
+                payload={"event": "agent_drained", "agent_id": agent_id},
+            ))
+            logger.info("Agent %s drained immediately (was IDLE)", agent_id)
+            return {"agent_id": agent_id, "status": "stopped_immediately"}
+
+        # BUSY — mark as DRAINING; _route_loop will auto-stop on RESULT
+        agent.status = AgentStatus.DRAINING
+        self._draining_agents.add(agent_id)
+        await self.bus.publish(Message(
+            type=MessageType.STATUS,
+            from_id="__orchestrator__",
+            payload={"event": "agent_draining", "agent_id": agent_id},
+        ))
+        logger.info("Agent %s marked DRAINING (will stop after current task)", agent_id)
+        return {"agent_id": agent_id, "status": "draining"}
+
+    async def drain_all(self) -> dict:
+        """Drain all registered agents.
+
+        Calls ``drain_agent()`` for every registered agent and returns a summary::
+
+            {
+                "draining":       [agent_ids that are now draining (were BUSY)],
+                "stopped_immediately": [agent_ids stopped immediately (were IDLE)],
+                "already_stopped": [agent_ids skipped (already STOPPED/ERROR/DRAINING)],
+            }
+
+        Design reference: DESIGN.md §10.23 (v0.28.0).
+        """
+        draining_ids: list[str] = []
+        stopped_immediately_ids: list[str] = []
+        already_stopped_ids: list[str] = []
+
+        for agent_id in list(self.registry.all_agents()):
+            result = await self.drain_agent(agent_id)
+            s = result["status"]
+            if s == "draining":
+                draining_ids.append(agent_id)
+            elif s == "stopped_immediately":
+                stopped_immediately_ids.append(agent_id)
+            else:
+                already_stopped_ids.append(agent_id)
+
+        return {
+            "draining": draining_ids,
+            "stopped_immediately": stopped_immediately_ids,
+            "already_stopped": already_stopped_ids,
+        }
+
+    # ------------------------------------------------------------------
     # Per-agent task history
     # ------------------------------------------------------------------
 
@@ -1048,6 +1142,25 @@ class Orchestrator:
                         self._route_result_reply(task_id, msg),
                         name=f"reply-to-route-{task_id[:8]}",
                     )
+                # Drain auto-stop: if the agent that sent this RESULT is in drain mode,
+                # stop it now that its task has completed.
+                # Reference: Kubernetes terminationGracePeriodSeconds; DESIGN.md §10.23 (v0.28.0)
+                drain_agent_id = msg.from_id
+                if drain_agent_id in self._draining_agents:
+                    drained_agent = self.registry.get(drain_agent_id)
+                    if drained_agent is not None:
+                        try:
+                            await drained_agent.stop()
+                        except Exception:  # noqa: BLE001
+                            logger.exception("Drain: error stopping agent %s", drain_agent_id)
+                        self.registry.unregister(drain_agent_id)
+                    self._draining_agents.discard(drain_agent_id)
+                    await self.bus.publish(Message(
+                        type=MessageType.STATUS,
+                        from_id="__orchestrator__",
+                        payload={"event": "agent_drained", "agent_id": drain_agent_id},
+                    ))
+                    logger.info("Agent %s drained and stopped after task completion", drain_agent_id)
             self._bus_queue.task_done()
 
     def _buffer_director_result(self, result_msg: Message) -> None:
