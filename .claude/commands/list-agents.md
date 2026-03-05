@@ -3,15 +3,27 @@ List all registered agents and their current status (IDLE, BUSY, ERROR, STOPPED)
 Execute this Python snippet:
 
 ```python
-import json, urllib.request
+import json, os, urllib.request
 from pathlib import Path
 
 ctx      = json.loads(Path("__orchestrator_context__.json").read_text())
 my_id    = ctx["agent_id"]
 base_url = ctx["web_base_url"].rstrip("/")
 
+# Read API key securely: env var takes priority, then __orchestrator_api_key__ file
+api_key = os.environ.get("TMUX_ORCHESTRATOR_API_KEY", "")
+if not api_key:
+    key_file = Path("__orchestrator_api_key__")
+    if key_file.exists():
+        api_key = key_file.read_text().strip()
+
+headers = {}
+if api_key:
+    headers["X-API-Key"] = api_key
+
 try:
-    with urllib.request.urlopen(f"{base_url}/agents", timeout=10) as resp:
+    req = urllib.request.Request(f"{base_url}/agents", headers=headers)
+    with urllib.request.urlopen(req, timeout=10) as resp:
         agents = json.loads(resp.read())
 except OSError as e:
     print(f"Connection failed — is the web server running at {base_url}?")

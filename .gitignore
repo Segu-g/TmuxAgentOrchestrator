@@ -7,3 +7,4 @@ dist/
 .worktrees/
 .hypothesis/
 __orchestrator_context__.json
+__orchestrator_api_key__

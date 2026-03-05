@@ -9,7 +9,7 @@ Usage: `/progress <summary of what you've done and what's next>`
 Execute this Python snippet:
 
 ```python
-import json, urllib.request, urllib.error
+import json, os, urllib.request, urllib.error
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -27,6 +27,17 @@ if not ctx_path.exists():
 ctx    = json.loads(ctx_path.read_text())
 my_id  = ctx["agent_id"]
 api    = ctx["web_base_url"].rstrip("/")
+
+# Read API key securely: env var takes priority, then __orchestrator_api_key__ file
+api_key = os.environ.get("TMUX_ORCHESTRATOR_API_KEY", "")
+if not api_key:
+    key_file = Path("__orchestrator_api_key__")
+    if key_file.exists():
+        api_key = key_file.read_text().strip()
+
+_auth_headers = {"Content-Type": "application/json"}
+if api_key:
+    _auth_headers["X-API-Key"] = api_key
 
 # Read NOTES.md for additional context if it exists
 notes_snippet = ""
@@ -76,7 +87,7 @@ full_message = (
 # Try to find parent_id from list_agents
 parent_id = None
 try:
-    req = urllib.request.Request(f"{api}/agents", headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(f"{api}/agents", headers=_auth_headers)
     with urllib.request.urlopen(req, timeout=5) as resp:
         agents = json.loads(resp.read())
     for a in agents:
@@ -96,7 +107,7 @@ if parent_id:
     }).encode()
     try:
         req = urllib.request.Request(target_url, data=body,
-                                     headers={"Content-Type": "application/json"}, method="POST")
+                                     headers=_auth_headers, method="POST")
         with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read())
         print(f"✓ Progress reported to parent agent: {parent_id}")

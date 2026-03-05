@@ -10,7 +10,7 @@ Usage: `/delegate <task description>`
 Execute this Python snippet:
 
 ```python
-import json, urllib.request, urllib.error
+import json, os, urllib.request, urllib.error
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -30,9 +30,20 @@ my_id  = ctx["agent_id"]
 api    = ctx["web_base_url"].rstrip("/")
 now    = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
+# Read API key securely: env var takes priority, then __orchestrator_api_key__ file
+api_key = os.environ.get("TMUX_ORCHESTRATOR_API_KEY", "")
+if not api_key:
+    key_file = Path("__orchestrator_api_key__")
+    if key_file.exists():
+        api_key = key_file.read_text().strip()
+
+_auth_headers = {"Content-Type": "application/json"}
+if api_key:
+    _auth_headers["X-API-Key"] = api_key
+
 # Fetch available templates (registered agents in config)
 try:
-    req = urllib.request.Request(f"{api}/agents", headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(f"{api}/agents", headers=_auth_headers)
     with urllib.request.urlopen(req, timeout=5) as resp:
         agents = json.loads(resp.read())
     worker_templates = [a["id"] for a in agents if a.get("role") == "worker" and a.get("id") != my_id]

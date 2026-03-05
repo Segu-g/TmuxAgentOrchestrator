@@ -17,6 +17,7 @@ Usage (from a slash command Python snippet):
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -32,6 +33,46 @@ from typing import Any
 def _cwd() -> Path:
     """Return current working directory (override in tests via mock)."""
     return Path.cwd()
+
+
+def _read_api_key(cwd: Path | None = None) -> str:
+    """Read the API key for authenticating REST calls.
+
+    Resolution order (highest priority first):
+
+    1. ``TMUX_ORCHESTRATOR_API_KEY`` environment variable — set by the
+       orchestrator via ``libtmux Session.set_environment()``.  Available
+       in all panes created after the session was started.
+    2. ``__orchestrator_api_key__`` file in *cwd* — written with
+       ``chmod 600`` by ``ClaudeCodeAgent._write_api_key_file()``.
+
+    Returns an empty string when neither source is available.
+
+    This function replaces reading ``api_key`` from
+    ``__orchestrator_context__.json``, which stored the key in plaintext
+    alongside non-sensitive context data.
+
+    References:
+      - DESIGN.md §3 "API キー配送のセキュリティ方針" フェーズ 1 + 2
+      - OpenStack Security Guidelines "Apply Restrictive File Permissions"
+      - OWASP Secrets Management Cheat Sheet (2025)
+    """
+    # Phase 2: environment variable (tmux session env, no file on disk)
+    env_key = os.environ.get("TMUX_ORCHESTRATOR_API_KEY", "")
+    if env_key:
+        return env_key
+
+    # Phase 1: dedicated key file with chmod 600
+    if cwd is None:
+        cwd = _cwd()
+    key_file = cwd / "__orchestrator_api_key__"
+    if key_file.exists():
+        try:
+            return key_file.read_text().strip()
+        except OSError:
+            pass
+
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +160,10 @@ def notify_parent(
 
     agent_id: str = ctx.get("agent_id", "unknown")
     api: str = ctx.get("web_base_url", "http://localhost:8000").rstrip("/")
-    api_key: str = ctx.get("api_key", "")
+    # Read API key via the secure resolution chain (env var → key file).
+    # The key is no longer stored in __orchestrator_context__.json.
+    # See DESIGN.md §3 "API キー配送のセキュリティ方針" and _read_api_key().
+    api_key: str = _read_api_key(cwd)
 
     # Enrich extra: attach plan content when available
     enriched = dict(extra)

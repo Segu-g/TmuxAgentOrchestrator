@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import shlex
 import shutil
@@ -112,6 +113,13 @@ class ClaudeCodeAgent(Agent):
         cwd = await self._setup_worktree()
         if cwd is not None:
             await loop.run_in_executor(None, self._write_context_file, cwd)
+            # Write API key to a separate 0o600 file (not in __orchestrator_context__.json).
+            # Also inject as tmux session environment variable so panes can inherit it.
+            if self._api_key:
+                await loop.run_in_executor(None, self._write_api_key_file, cwd)
+                await loop.run_in_executor(
+                    None, self._set_session_env_api_key
+                )
             # Only write agent-specific CLAUDE.md in isolated worktrees.
             # Non-isolated agents share an existing directory that may already have
             # a project-level CLAUDE.md — overwriting it would destroy project context.
@@ -136,13 +144,71 @@ class ClaudeCodeAgent(Agent):
         logger.info("ClaudeCodeAgent %s started in pane %s (role=%s)", self.id, pane.id, self.role)
 
     def _context_extras(self) -> dict[str, Any]:
-        extras: dict[str, Any] = {
+        # NOTE: api_key is intentionally excluded from the context file.
+        # It is written to a separate __orchestrator_api_key__ file (chmod 600)
+        # and injected as TMUX_ORCHESTRATOR_API_KEY tmux session environment
+        # variable.  See DESIGN.md §3 "API キー配送のセキュリティ方針" and
+        # §10.30 for the security rationale.
+        return {
             "session_name": self._session_name,
             "web_base_url": self._web_base_url,
         }
-        if self._api_key:
-            extras["api_key"] = self._api_key
-        return extras
+
+    def _write_api_key_file(self, cwd: Path) -> None:
+        """Write the API key to ``__orchestrator_api_key__`` with mode 0o600.
+
+        The file is created atomically using ``os.open()`` with ``O_CREAT |
+        O_TRUNC | O_WRONLY`` and explicit permission bits, preventing the
+        system umask from widening the permissions.
+
+        If *api_key* is empty, no file is created.
+
+        References:
+          - OpenStack Security Guidelines "Apply Restrictive File Permissions"
+            https://security.openstack.org/guidelines/dg_apply-restrictive-file-permissions.html
+          - OWASP Secrets Management Cheat Sheet (2025)
+        """
+        if not self._api_key:
+            return
+        key_path = cwd / "__orchestrator_api_key__"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(str(key_path), flags, 0o600)
+        try:
+            os.write(fd, (self._api_key + "\n").encode())
+        finally:
+            os.close(fd)
+        logger.debug("Agent %s wrote API key file to %s", self.id, key_path)
+
+    def _set_session_env_api_key(self) -> None:
+        """Inject TMUX_ORCHESTRATOR_API_KEY as a tmux session environment variable.
+
+        libtmux's ``Session.set_environment()`` calls ``tmux set-environment``,
+        which causes subsequently created panes to inherit the variable.
+        This means the API key is available in the agent's shell without being
+        written to a world-readable file or appearing in shell history.
+
+        References:
+          - libtmux docs: https://libtmux.readthedocs.io/en/latest/api.html
+          - tmux GitHub Discussion #3997 "Session environment variables"
+            https://github.com/orgs/tmux/discussions/3997
+          - DESIGN.md §3, §10.30 "API キー配送のセキュリティ方針"
+        """
+        if not self._api_key:
+            return
+        try:
+            session = self._tmux.ensure_session()
+            session.set_environment("TMUX_ORCHESTRATOR_API_KEY", self._api_key)
+            logger.debug(
+                "Agent %s set TMUX_ORCHESTRATOR_API_KEY on tmux session %s",
+                self.id, session.id,
+            )
+        except Exception:  # noqa: BLE001
+            # Non-fatal: the key file is the primary delivery mechanism;
+            # the session env var is an additional layer.
+            logger.warning(
+                "Agent %s: could not set TMUX_ORCHESTRATOR_API_KEY on tmux session",
+                self.id, exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Context localization — writes agent-specific files to worktree

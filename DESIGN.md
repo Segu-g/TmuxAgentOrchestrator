@@ -1596,6 +1596,57 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.30 調査記録 (v0.35.0, 2026-03-05)
+
+#### 選択した機能: API キーセキュリティ修正 (フェーズ1 + フェーズ2)
+
+**選択理由:**
+
+DESIGN.md §3「API キー配送のセキュリティ方針」に高優先度のセキュリティバグとして記載されている問題を解決する。
+v0.34.0 で `OrchestratorConfig.api_key` を導入した際に、API キーが `__orchestrator_context__.json` にプレーンテキストで書き込まれる問題が発生した。
+
+**選択しなかった候補:**
+
+- `POST /workflows/tdd` (3エージェント TDD ワークフロー) — 高優先度の新機能だが、セキュリティバグを先に修正すべき。セキュリティ問題を放置したまま新機能を追加することは適切ではない。
+- `役割別 system_prompt テンプレートライブラリ` — 有用だが緊急性なし。
+- `ProcessPort` 抽象インターフェース — アーキテクチャ改善だが緊急度は低い。
+
+**実装スコープ:**
+
+フェーズ 1: `__orchestrator_context__.json` から `api_key` を除外し、`__orchestrator_api_key__` 専用ファイル (`chmod 600`) に分離する。
+フェーズ 2: libtmux `session.set_environment("TMUX_ORCHESTRATOR_API_KEY", api_key)` によってセッション環境変数としても注入する。これにより、スラッシュコマンドは環境変数を優先し、フォールバックとして専用ファイルを読む。
+
+**調査結果 (§3 既存調査の補足):**
+
+§3 に既存の詳細調査が存在する。以下は WebSearch による追加調査。
+
+#### 参考文献
+
+| テーマ | 参考文献 |
+|--------|---------|
+| ファイルパーミッション `chmod 600` + `os.open()` atomic creation | OpenStack Security Guidelines "Apply Restrictive File Permissions" https://security.openstack.org/guidelines/dg_apply-restrictive-file-permissions.html |
+| OWASP シークレット管理: ファイル vs 環境変数 | OWASP Cheat Sheet Series "Secrets Management" https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html |
+| tmux `set-environment` によるセッション環境変数継承 | tmux GitHub Discussion #3997 "Session environment variables" https://github.com/orgs/tmux/discussions/3997 |
+| 環境変数の安全なハンドリング (2025) | Secure Coding Practices "Secure Environment Variable Handling" https://securecodingpractices.com/secure-environment-variable-handling-scripts-secrets-management/ |
+
+**主要知見:**
+
+1. **OpenStack セキュリティガイドライン**: `os.open(..., os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)` パターンを使用し `O_EXCL` でアトミック作成を保証することを推奨。umask の影響を受けない。
+2. **OWASP Secrets Management**: 動的な短命トークンを推奨。ファイルベースでは `readOnly` マウントと最小権限原則を適用する。
+3. **tmux `set-environment`**: tmux セッションの環境変数は `set-environment` で動的に設定でき、セッション後から生成されたウィンドウ/ペインには継承されるが、セッション作成時の最初のウィンドウは `-e` フラグで明示的に設定する必要がある場合がある。libtmux の `Session.set_environment()` はこれをラップしている。
+4. **セキュリティ優先順位**: ファイル (`chmod 600`) → tmux セッション環境変数 → 短命トークンの順でセキュリティが向上するが、実装コストも増大する。フェーズ1+2 の組み合わせが現実的な改善。
+
+**設計決定:**
+
+- `__orchestrator_context__.json`: `api_key` フィールドを削除する (非機密情報のみ残す)
+- `__orchestrator_api_key__`: 新規ファイル、`os.open(..., 0o600)` で作成。単一行に API キーを書く
+- libtmux `session.set_environment("TMUX_ORCHESTRATOR_API_KEY", api_key)`: ファイルに加えてセッション環境変数にも設定
+- スラッシュコマンド: `os.environ.get("TMUX_ORCHESTRATOR_API_KEY")` を優先し、なければ `__orchestrator_api_key__` を読む
+- `slash_notify.py`: `api_key` の取得元を `__orchestrator_context__.json` から変更
+- `.gitignore`: `__orchestrator_api_key__` を追加
+
+---
+
 ## 11. 今後の課題
 
 > 以下のバックログは、完了済み項目（旧 §11 テーブルの全 ~~完了~~ エントリ、§10.N 実装履歴）を除去し、

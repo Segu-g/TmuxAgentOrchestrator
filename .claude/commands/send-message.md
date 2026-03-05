@@ -7,7 +7,7 @@ The first word is the target agent's ID. Everything after is the message body.
 Execute this Python snippet:
 
 ```python
-import json, urllib.request, urllib.error
+import json, os, urllib.request, urllib.error
 from pathlib import Path
 
 args = """$ARGUMENTS""".strip()
@@ -23,6 +23,17 @@ ctx    = json.loads(Path("__orchestrator_context__.json").read_text())
 my_id  = ctx["agent_id"]
 url    = f"{ctx['web_base_url'].rstrip('/')}/agents/{target_id}/message"
 
+# Read API key securely: env var takes priority, then __orchestrator_api_key__ file
+api_key = os.environ.get("TMUX_ORCHESTRATOR_API_KEY", "")
+if not api_key:
+    key_file = Path("__orchestrator_api_key__")
+    if key_file.exists():
+        api_key = key_file.read_text().strip()
+
+headers = {"Content-Type": "application/json"}
+if api_key:
+    headers["X-API-Key"] = api_key
+
 body = json.dumps({
     "type": "PEER_MSG",
     "payload": {
@@ -33,7 +44,7 @@ body = json.dumps({
 
 req = urllib.request.Request(
     url, data=body,
-    headers={"Content-Type": "application/json"},
+    headers=headers,
     method="POST",
 )
 try:

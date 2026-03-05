@@ -234,6 +234,35 @@ Contents:
 
 Read this file to know your `agent_id`, where your mailbox is, and the REST API base URL.
 
+### API Key for Authenticated Requests
+
+REST endpoints require an `X-API-Key` header. The key is delivered securely through two channels:
+
+1. **Environment variable** `TMUX_ORCHESTRATOR_API_KEY` — set on the tmux session; your shell
+   inherits it automatically. Use `os.environ.get("TMUX_ORCHESTRATOR_API_KEY", "")` in Python
+   or `$TMUX_ORCHESTRATOR_API_KEY` in shell scripts.
+2. **Key file** `__orchestrator_api_key__` in your working directory — written with `chmod 600`;
+   contains the raw key on a single line.  Read it as a fallback when the env var is absent.
+
+Quick pattern for Python slash commands:
+
+```python
+import os
+from pathlib import Path
+
+api_key = os.environ.get("TMUX_ORCHESTRATOR_API_KEY", "")
+if not api_key:
+    kf = Path("__orchestrator_api_key__")
+    if kf.exists():
+        api_key = kf.read_text().strip()
+
+headers = {"Content-Type": "application/json"}
+if api_key:
+    headers["X-API-Key"] = api_key
+```
+
+The key is **not** stored in `__orchestrator_context__.json` (security fix v0.35.0).
+
 ### Receiving Messages
 
 When a message is sent to you, the orchestrator types `__MSG__:{msg_id}` into your pane as a notification. **Do not respond to this text literally** — it is a trigger to check your inbox.
@@ -286,18 +315,18 @@ The shared scratchpad is a server-side key/value store for passing data between 
 ```bash
 # Write a value
 curl -X PUT {web_base_url}/scratchpad/my-key \
-  -H "X-API-Key: $API_KEY" \
+  -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"value": "result data here"}'
 
 # Read a value
-curl {web_base_url}/scratchpad/my-key -H "X-API-Key: $API_KEY"
+curl {web_base_url}/scratchpad/my-key -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY"
 
 # List all entries
-curl {web_base_url}/scratchpad/ -H "X-API-Key: $API_KEY"
+curl {web_base_url}/scratchpad/ -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY"
 
 # Delete an entry
-curl -X DELETE {web_base_url}/scratchpad/my-key -H "X-API-Key: $API_KEY"
+curl -X DELETE {web_base_url}/scratchpad/my-key -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY"
 ```
 
 Use the scratchpad for pipeline workflows (agent-a writes an artefact path, agent-b reads it) rather than embedding large payloads in P2P messages.
