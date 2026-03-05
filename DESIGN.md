@@ -654,6 +654,44 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.14 調査記録 (v0.18.0, 2026-03-05)
+
+#### 実装: エージェント能力タグ + スマートディスパッチ
+
+**調査観点:**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| 能力ベースルーティング | FIPA Directory Facilitator (DF) — 能力広告とマッチング | FIPA Agent Communication Language Specifications (2002) [smythos.com](https://smythos.com/developers/agent-development/fipa-agent-communication-language/) |
+| ラベルベースワークロード割り当て | Kubernetes nodeSelector / Node Affinity | Kubernetes Docs "Assigning Pods to Nodes" (2024) [kubernetes.io](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/) |
+| シナリオ対応エージェント選択 | COLA: Collaborative Multi-Agent Framework | COLA "Dynamic Collaboration" EMNLP 2025 [aclanthology.org](https://aclanthology.org/2025.emnlp-main.227.pdf) |
+| マルチエージェント能力プランニング | Agent-Oriented Planning | arXiv:2410.02189 (2024) [arxiv.org](https://arxiv.org/html/2410.02189v1) |
+
+**主要知見:**
+
+1. **FIPA Directory Facilitator (2002)**: FIPA準拠システムの Directory Facilitator (DF) はエージェントの能力（サービス記述）を登録・検索するサービスレジストリ。エージェントAがサービスSを必要とする場合、DFに問い合わせてSを提供するエージェントを取得する。本実装では静的な `AgentConfig.tags` リストがこの「能力広告」に相当し、オーケストレーターがディスパッチ時に `set(required_tags) <= set(agent.tags)` で評価する。
+
+2. **Kubernetes Node Affinity (2024)**: Kubernetes の nodeSelector はポッドを特定のラベルを持つノードにのみスケジュールする。`RequiredDuringSchedulingIgnoredDuringExecution` は「条件を満たすノードがなければスケジュール不可」を意味し、本実装の「capable な idle エージェントがなければ再キューに戻す → max_retries 後に DLQ」に対応する。
+
+3. **COLA フレームワーク (EMNLP 2025)**: Task Scheduler がシナリオ対応のマッチングで最適エージェントを動的に選択する。本実装の `find_idle_worker(required_tags)` は簡略化されたタグ部分集合マッチング版。将来的にはスコアリング（過去の成功率、負荷状況）を組み合わせた拡張が可能。
+
+**設計決定:**
+
+- **`AgentConfig.tags: list[str]`** — YAML で宣言的に定義する静的能力広告。実行時に変更しない（ephemeral な能力変化には向かない）。Kubernetes のノードラベルと同様の考え方。
+- **`Task.required_tags: list[str]`** — タスク提出時に ALL-must-match 制約として指定。OR/NOT などの複雑な論理式は実装しない（YAGNI）。Kubernetes の `matchLabels` と同一のセマンティクス。
+- **`find_idle_worker(required_tags)` のシグネチャ**: デフォルト `required_tags=None`（空リスト扱い）で後方互換性を維持。`set(required_tags).issubset(set(agent.tags))` で O(n) の評価。エージェント数が少ない（10〜100）ため線形スキャンで十分。
+- **DLQ への移行**: capable な idle エージェントがいない場合は `no idle agent with required_tags=... after N retries` というメッセージで dead-letter。known target_agent not idle と同じ再試行パスを使用するため、追加のループ分岐は不要。
+- **`list_all()` の `tags` フィールド**: エージェントスナップショットに `tags` を含めることで、Web UI や API クライアントが能力マップを可視化できる。
+- **`list_tasks()` の `required_tags` フィールド**: 待機中タスクに `required_tags` を含めることで、どのタスクがどの能力を必要としているかを確認できる。
+
+**デモシナリオ (v0.18.0):**
+- Agent `python-expert` (tags: `["python", "testing"]`) と `docs-writer` (tags: `["markdown", "documentation"]`)
+- タスク「Write unit tests for the knapsack solver」(required_tags: `["python", "testing"]`) → python-expert にのみ配送
+- タスク「Write README.md for the project」(required_tags: `["markdown", "documentation"]`) → docs-writer にのみ配送
+- 2エージェントが並列稼働し、タグマッチングで正しいエージェントにのみ配送されることを実証
+
+---
+
 ## 11. 今後の課題
 
 ### 機能
@@ -665,6 +703,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~中~~ ~~Web UI のエージェント階層ビジュアライゼーション（ツリー表示）~~ | **完了 (v0.11.0)** — `/agents/tree` エンドポイント + List/Tree トグル |
 | ~~中~~ ~~タスク結果を親エージェントのメールボックスに直接配送 (`reply_to`)~~ | **完了 (v0.14.0)** — `Task.reply_to` フィールド + `Orchestrator._route_result_reply()` + REST `POST /tasks` の `reply_to` パラメータ |
 | ~~中~~ ~~`POST /tasks/batch` — 複数タスクを一括提出~~ | **完了 (v0.15.0)** — `TaskBatchSubmit` + `POST /tasks/batch`; AHC デモで 3 タスクを並列提出 |
+| ~~中~~ ~~エージェント能力タグ + スマートディスパッチ~~ | **完了 (v0.18.0)** — `AgentConfig.tags` + `Task.required_tags` + `find_idle_worker(required_tags)` + REST `required_tags` パラメータ; 23 テスト |
 | 中 | `/plan` と `/tdd` の出力を RESULT メッセージとして親に自動送信 |
 | 低 | エージェントのコンテキスト使用量モニタリング |
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |
@@ -677,6 +716,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~**高**~~ ~~**AtCoder Heuristic Contest (AHC) best-of-N**~~ | **完了 (v0.15.0)** — 3 ClaudeCodeAgent 並列実行、Weighted Knapsack 問題、`POST /tasks/batch` で一括提出、スコアで勝者選択 |
 | ~~中~~ ~~Director → Workers でマイクロサービス API を分割実装~~ | **完了 (v0.17.0)** — 4 ClaudeCodeAgent 並列、3 ワーカーが FastAPI エンドポイントを並列実装、Director が `integration_report.md` 生成 |
 | ~~中~~ ~~agent-a が実装 → agent-b がレビュー → agent-a が修正~~ | **完了 (v0.16.0)** — Peer review pipeline デモ |
+| ~~中~~ ~~能力タグによる専門エージェント自動選択~~ | **完了 (v0.18.0)** — python-expert / docs-writer; タスクが正しいエージェントにのみ配送されることを実証 |
 
 **AHC best-of-N デモ完了 (v0.15.0)**:
 - 問題: Weighted Knapsack (N=15, C=50) — 最適解 score=154 (DP で検証済み)

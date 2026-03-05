@@ -195,6 +195,7 @@ class Orchestrator:
         idempotency_key: str | None = None,
         reply_to: str | None = None,
         target_agent: str | None = None,
+        required_tags: list[str] | None = None,
     ) -> Task:
         # Idempotency deduplication: return existing task for duplicate keys.
         if idempotency_key is not None:
@@ -217,6 +218,7 @@ class Orchestrator:
             depends_on=depends_on or [],
             reply_to=reply_to,
             target_agent=target_agent,
+            required_tags=required_tags or [],
         )
         if idempotency_key is not None:
             self._idempotency_keys[idempotency_key] = task.id
@@ -235,9 +237,11 @@ class Orchestrator:
                 "prompt": prompt,
                 **({"reply_to": reply_to} if reply_to is not None else {}),
                 **({"target_agent": target_agent} if target_agent is not None else {}),
+                **({"required_tags": required_tags} if required_tags else {}),
             },
         ))
-        logger.info("Task %s queued (priority=%d, reply_to=%s)", task.id, priority, reply_to)
+        logger.info("Task %s queued (priority=%d, reply_to=%s, required_tags=%s)",
+                    task.id, priority, reply_to, required_tags)
         return task
 
     def _cleanup_expired_ikeys(self) -> None:
@@ -252,7 +256,13 @@ class Orchestrator:
         """Return a snapshot of the pending task queue (non-destructive)."""
         items = list(self._task_queue._queue)  # type: ignore[attr-defined]
         return [
-            {"priority": p, "task_id": t.id, "prompt": t.prompt}
+            {
+                "priority": p,
+                "task_id": t.id,
+                "prompt": t.prompt,
+                **({"required_tags": t.required_tags} if t.required_tags else {}),
+                **({"target_agent": t.target_agent} if t.target_agent else {}),
+            }
             for p, _seq, t in sorted(items, key=lambda x: (x[0], x[1]))
         ]
 
@@ -391,12 +401,18 @@ class Orchestrator:
                     continue
                 agent = target
             else:
-                agent = self.registry.find_idle_worker()
+                agent = self.registry.find_idle_worker(required_tags=task.required_tags)
             if agent is None:
                 retry_count = task.metadata.get("_retry_count", 0) + 1
                 task.metadata["_retry_count"] = retry_count
                 if retry_count >= self.config.dlq_max_retries:
-                    await self._dead_letter(task, f"no idle agent after {retry_count} retries")
+                    reason = (
+                        f"no idle agent with required_tags={task.required_tags!r} "
+                        f"after {retry_count} retries"
+                        if task.required_tags
+                        else f"no idle agent after {retry_count} retries"
+                    )
+                    await self._dead_letter(task, reason)
                 else:
                     self._task_seq += 1
                     await self._task_queue.put((task.priority, self._task_seq, task))
@@ -858,6 +874,7 @@ class Orchestrator:
             system_prompt=template_cfg.system_prompt,
             context_files=template_cfg.context_files,
             context_files_root=_Path.cwd() if template_cfg.context_files else None,
+            tags=template_cfg.tags,
         )
 
         self.registry.register(agent, parent_id=parent_id)

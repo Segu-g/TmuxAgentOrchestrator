@@ -50,6 +50,10 @@ class Task:
     # agent becomes idle.  Unknown target_agent IDs are dead-lettered.
     # Reference: Hohpe & Woolf "Enterprise Integration Patterns" (2003) — Message Router.
     target_agent: str | None = None
+    # Capability tags: ALL listed tags must be present in the target agent's
+    # ``tags`` list.  Empty list = no constraint (any idle worker matches).
+    # Reference: FIPA Directory Facilitator (2002); Kubernetes nodeSelector.
+    required_tags: list[str] = field(default_factory=list)
 
     def __lt__(self, other: "Task") -> bool:
         return self.priority < other.priority

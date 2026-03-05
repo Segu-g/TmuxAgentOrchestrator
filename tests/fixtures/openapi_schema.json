@@ -138,6 +138,14 @@
             ],
             "title": "Reply To"
           },
+          "required_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Tags",
+            "type": "array"
+          },
           "target_agent": {
             "anyOf": [
               {

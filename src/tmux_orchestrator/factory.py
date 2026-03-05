@@ -92,6 +92,7 @@ def build_system(
                 system_prompt=agent_cfg.system_prompt,
                 context_files=agent_cfg.context_files,
                 context_files_root=cwd if agent_cfg.context_files else None,
+                tags=agent_cfg.tags,
             )
         else:
             raise ValueError(f"Unknown agent type: {agent_cfg.type!r}")

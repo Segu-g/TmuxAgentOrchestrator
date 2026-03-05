@@ -45,6 +45,9 @@ class TaskSubmit(BaseModel):
     metadata: dict[str, Any] = {}
     reply_to: str | None = None  # agent_id that receives the RESULT in its mailbox
     target_agent: str | None = None  # when set, task is only dispatched to this agent
+    # Capability tags: ALL tags must be present in the target agent's tags list.
+    # Reference: FIPA Directory Facilitator (2002); Kubernetes nodeSelector.
+    required_tags: list[str] = []
 
 
 class TaskBatchSubmit(BaseModel):
@@ -357,12 +360,15 @@ def create_app(
             metadata=body.metadata,
             reply_to=body.reply_to,
             target_agent=body.target_agent,
+            required_tags=body.required_tags or None,
         )
         result: dict = {"task_id": task.id, "prompt": task.prompt, "priority": task.priority}
         if task.reply_to is not None:
             result["reply_to"] = task.reply_to
         if task.target_agent is not None:
             result["target_agent"] = task.target_agent
+        if task.required_tags:
+            result["required_tags"] = task.required_tags
         return result
 
     @app.post("/tasks/batch", summary="Submit multiple tasks in one request", dependencies=[Depends(auth)])
@@ -386,12 +392,15 @@ def create_app(
                 metadata=item.metadata,
                 reply_to=item.reply_to,
                 target_agent=item.target_agent,
+                required_tags=item.required_tags or None,
             )
             record: dict = {"task_id": task.id, "prompt": task.prompt, "priority": task.priority}
             if task.reply_to is not None:
                 record["reply_to"] = task.reply_to
             if task.target_agent is not None:
                 record["target_agent"] = task.target_agent
+            if task.required_tags:
+                record["required_tags"] = task.required_tags
             results.append(record)
         return {"tasks": results}
 

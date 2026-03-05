@@ -60,6 +60,8 @@ class ClaudeCodeAgent(Agent):
         system_prompt: str | None = None,
         context_files: list[str] | None = None,
         context_files_root: Path | None = None,
+        # --- Capability tags ---
+        tags: list[str] | None = None,
     ) -> None:
         super().__init__(agent_id, bus, task_timeout=task_timeout)
         self.mailbox = mailbox
@@ -82,6 +84,8 @@ class ClaudeCodeAgent(Agent):
         # Root directory from which context_files paths are resolved.
         # Defaults to None (not set); callers must provide this if context_files is non-empty.
         self._context_files_root: Path | None = context_files_root
+        # Capability tags: advertised capabilities used for smart dispatch.
+        self.tags: list[str] = tags or []
 
     # ------------------------------------------------------------------
     # Lifecycle

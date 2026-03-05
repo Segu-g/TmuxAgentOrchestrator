@@ -103,17 +103,28 @@ class AgentRegistry:
             None,
         )
 
-    def find_idle_worker(self) -> Agent | None:
-        """Return the first IDLE worker whose circuit is not OPEN, or None."""
+    def find_idle_worker(self, required_tags: list[str] | None = None) -> Agent | None:
+        """Return the first IDLE worker whose circuit is not OPEN, or None.
+
+        When *required_tags* is non-empty, only agents whose ``tags`` attribute
+        is a superset of *required_tags* are eligible.
+
+        Design reference:
+        - FIPA Directory Facilitator (2002) — capability-based agent selection.
+        - Kubernetes Node Affinity nodeSelector — label-set subset matching.
+        - DESIGN.md §10.14 (v0.18.0, 2026-03-05).
+        """
+        needed: set[str] = set(required_tags) if required_tags else set()
         for agent in self._agents.values():
-            if (
-                agent.status == AgentStatus.IDLE
-                and getattr(agent, "role", AgentRole.WORKER) == AgentRole.WORKER
-                and self._breakers.get(
-                    agent.id, CircuitBreaker(agent.id)
-                ).is_allowed()
-            ):
-                return agent
+            if agent.status != AgentStatus.IDLE:
+                continue
+            if getattr(agent, "role", AgentRole.WORKER) != AgentRole.WORKER:
+                continue
+            if not self._breakers.get(agent.id, CircuitBreaker(agent.id)).is_allowed():
+                continue
+            if needed and not needed.issubset(set(getattr(agent, "tags", []))):
+                continue
+            return agent
         return None
 
     def list_all(self, drop_counts: dict[str, int] | None = None) -> list[dict]:
@@ -130,6 +141,7 @@ class AgentRegistry:
                 "current_task": a._current_task.id if a._current_task else None,
                 "role": getattr(a, "role", AgentRole.WORKER),
                 "parent_id": self._agent_parents.get(a.id),
+                "tags": list(getattr(a, "tags", [])),
                 "bus_drops": drops.get(a.id, 0),
                 "circuit_breaker": (
                     self._breakers[a.id].state.value

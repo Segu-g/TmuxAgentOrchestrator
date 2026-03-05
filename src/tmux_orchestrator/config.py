@@ -27,6 +27,11 @@ class AgentConfig:
     # --- Context engineering fields ---
     system_prompt: str | None = None  # injected into agent's CLAUDE.md at startup
     context_files: list[str] = field(default_factory=list)  # paths (relative to cwd) to pre-load
+    # --- Capability tags for smart dispatch ---
+    # Tasks with required_tags are only dispatched to agents whose tags include
+    # ALL required tags.  Reference: FIPA Directory Facilitator (2002),
+    # Kubernetes Node Affinity (nodeSelector pattern).
+    tags: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -63,6 +68,7 @@ def load_config(path: str | Path) -> OrchestratorConfig:
             command=a.get("command"),
             system_prompt=a.get("system_prompt"),
             context_files=a.get("context_files", []),
+            tags=a.get("tags", []),
         )
         for a in data.get("agents", [])
     ]
