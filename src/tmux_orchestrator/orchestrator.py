@@ -17,6 +17,7 @@ from tmux_orchestrator.messaging import Mailbox
 from tmux_orchestrator.rate_limiter import RateLimitExceeded, TokenBucketRateLimiter
 from tmux_orchestrator.registry import AgentRegistry
 from tmux_orchestrator.supervision import supervised_task
+from tmux_orchestrator.webhook_manager import WebhookManager
 
 if TYPE_CHECKING:
     from tmux_orchestrator.config import AgentConfig, OrchestratorConfig
@@ -190,6 +191,11 @@ class Orchestrator:
         # AWS Step Functions; Prefect "Modern Data Stack". DESIGN.md §10.20 (v0.25.0)
         from tmux_orchestrator.workflow_manager import WorkflowManager
         self._workflow_manager = WorkflowManager()
+        # Outbound webhook notification manager.
+        # Fire-and-forget delivery of task/agent/workflow events to registered URLs.
+        # Reference: GitHub Webhooks; Stripe Webhooks; RFC 2104 HMAC;
+        # Zalando RESTful API Guidelines §webhook. DESIGN.md §10.25 (v0.30.0)
+        self._webhook_manager = WebhookManager(timeout=config.webhook_timeout)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -660,6 +666,13 @@ class Orchestrator:
                     "was_running": True,
                 },
             ))
+            asyncio.create_task(
+                self._webhook_manager.deliver("task_cancelled", {
+                    "task_id": task_id,
+                    "was_running": True,
+                }),
+                name=f"wh-task-cancelled-{task_id[:8]}",
+            )
             logger.info("Task %s cancelled (in-progress, interrupt sent)", task_id)
             return True
 
@@ -683,6 +696,14 @@ class Orchestrator:
                     "was_waiting": True,
                 },
             ))
+            asyncio.create_task(
+                self._webhook_manager.deliver("task_cancelled", {
+                    "task_id": task_id,
+                    "was_running": False,
+                    "was_waiting": True,
+                }),
+                name=f"wh-task-cancelled-w-{task_id[:8]}",
+            )
             logger.info("Task %s cancelled from waiting (dependency hold)", task_id)
             return True
 
@@ -716,6 +737,13 @@ class Orchestrator:
                 "was_running": False,
             },
         ))
+        asyncio.create_task(
+            self._webhook_manager.deliver("task_cancelled", {
+                "task_id": task_id,
+                "was_running": False,
+            }),
+            name=f"wh-task-cancelled-q-{task_id[:8]}",
+        )
         logger.info("Task %s cancelled from queue", task_id)
         return True
 
@@ -1194,9 +1222,39 @@ class Orchestrator:
                 self.registry.record_result(msg.from_id, error=bool(error))
                 if not error and task_id:
                     self._completed_tasks.add(task_id)
+                    wf_status_before = self._workflow_manager.get_workflow_status_for_task(task_id)
                     self._workflow_manager.on_task_complete(task_id)
                     # Clean up active task tracking on success.
                     self._active_tasks.pop(task_id, None)
+                    # Webhook: task_complete event
+                    asyncio.create_task(
+                        self._webhook_manager.deliver("task_complete", {
+                            "task_id": task_id,
+                            "agent_id": msg.from_id,
+                            "output": (msg.payload.get("output") or "")[:2000],
+                        }),
+                        name=f"wh-task-complete-{task_id[:8]}",
+                    )
+                    # Webhook: workflow_complete event if workflow just finished
+                    wf_status_after = self._workflow_manager.get_workflow_status_for_task(task_id)
+                    if wf_status_after == "complete" and wf_status_before != "complete":
+                        wf_id = self._workflow_manager.get_workflow_id_for_task(task_id)
+                        asyncio.create_task(
+                            self._webhook_manager.deliver("workflow_complete", {
+                                "workflow_id": wf_id,
+                                "task_id": task_id,
+                            }),
+                            name=f"wh-wf-complete-{task_id[:8]}",
+                        )
+                    elif wf_status_after == "failed" and wf_status_before != "failed":
+                        wf_id = self._workflow_manager.get_workflow_id_for_task(task_id)
+                        asyncio.create_task(
+                            self._webhook_manager.deliver("workflow_failed", {
+                                "workflow_id": wf_id,
+                                "task_id": task_id,
+                            }),
+                            name=f"wh-wf-failed-{task_id[:8]}",
+                        )
                     # Wake up any tasks waiting on this dependency.
                     # Reference: GNU Make prerequisite resolution; Dask task graph;
                     # Apache Spark DAG scheduler. DESIGN.md §10.24 (v0.29.0)
@@ -1221,6 +1279,17 @@ class Orchestrator:
                                 "error": error,
                             },
                         ))
+                        # Webhook: task_retrying event
+                        asyncio.create_task(
+                            self._webhook_manager.deliver("task_retrying", {
+                                "task_id": task_id,
+                                "retry_count": task.retry_count,
+                                "max_retries": task.max_retries,
+                                "error": error,
+                                "agent_id": msg.from_id,
+                            }),
+                            name=f"wh-task-retrying-{task_id[:8]}",
+                        )
                         logger.info(
                             "Task %s retry %d/%d after error: %s",
                             task_id, task.retry_count, task.max_retries, error,
@@ -1228,6 +1297,7 @@ class Orchestrator:
                         self._bus_queue.task_done()
                         continue
                     else:
+                        wf_status_before_fail = self._workflow_manager.get_workflow_status_for_task(task_id)
                         self._workflow_manager.on_task_failed(task_id)
                         self._active_tasks.pop(task_id, None)
                         # Mark as finally failed and cascade to waiting dependents.
@@ -1236,6 +1306,27 @@ class Orchestrator:
                         # DESIGN.md §10.24 (v0.29.0)
                         self._failed_tasks.add(task_id)
                         await self._on_dep_failed(task_id)
+                        # Webhook: task_failed event
+                        asyncio.create_task(
+                            self._webhook_manager.deliver("task_failed", {
+                                "task_id": task_id,
+                                "agent_id": msg.from_id,
+                                "error": error,
+                            }),
+                            name=f"wh-task-failed-{task_id[:8]}",
+                        )
+                        # Webhook: workflow_failed event if workflow just failed
+                        wf_status_after_fail = self._workflow_manager.get_workflow_status_for_task(task_id)
+                        if wf_status_after_fail == "failed" and wf_status_before_fail != "failed":
+                            wf_id = self._workflow_manager.get_workflow_id_for_task(task_id)
+                            asyncio.create_task(
+                                self._webhook_manager.deliver("workflow_failed", {
+                                    "workflow_id": wf_id,
+                                    "task_id": task_id,
+                                    "error": error,
+                                }),
+                                name=f"wh-wf-failed-err-{task_id[:8]}",
+                            )
                 # Record task in per-agent history.
                 self._record_agent_history(msg)
                 # reply_to routing: deliver RESULT to the requesting agent's mailbox.
@@ -1357,6 +1448,14 @@ class Orchestrator:
                     "error": f"dependency_failed:{failed_task_id}",
                 },
             ))
+            asyncio.create_task(
+                self._webhook_manager.deliver("task_dependency_failed", {
+                    "task_id": waiting_id,
+                    "failed_dep": failed_task_id,
+                    "error": f"dependency_failed:{failed_task_id}",
+                }),
+                name=f"wh-dep-failed-{waiting_id[:8]}",
+            )
             logger.warning(
                 "Task %s failed: dependency %s failed (cascade)",
                 waiting_id, failed_task_id,

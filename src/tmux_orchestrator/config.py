@@ -106,6 +106,12 @@ class OrchestratorConfig:
     #   Rich Hickey "The Value of Values" (Datomic, 2012)
     result_store_enabled: bool = False
     result_store_dir: str = "~/.tmux_orchestrator/results"
+    # --- Webhook notifications ---
+    # webhook_timeout: HTTP timeout (seconds) per delivery attempt.
+    # Reference: GitHub Webhooks; Stripe Webhooks; RFC 2104 HMAC;
+    # Zalando RESTful API Guidelines §webhook; Shopify webhook verification.
+    # DESIGN.md §10.25 (v0.30.0)
+    webhook_timeout: float = 5.0
 
 
 def load_config(path: str | Path) -> OrchestratorConfig:
@@ -159,4 +165,5 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         autoscale_system_prompt=data.get("autoscale_system_prompt"),
         result_store_enabled=data.get("result_store_enabled", False),
         result_store_dir=data.get("result_store_dir", "~/.tmux_orchestrator/results"),
+        webhook_timeout=data.get("webhook_timeout", 5.0),
     )

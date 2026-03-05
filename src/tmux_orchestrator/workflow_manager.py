@@ -240,6 +240,26 @@ class WorkflowManager:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def get_workflow_status_for_task(self, task_id: str) -> str | None:
+        """Return the current status string of the workflow that contains *task_id*.
+
+        Returns ``None`` when *task_id* is not part of any tracked workflow.
+        Used by the orchestrator to detect workflow state transitions for webhook delivery.
+        DESIGN.md §10.25 (v0.30.0).
+        """
+        run = self._get_run_for_task(task_id)
+        if run is None:
+            return None
+        return run.status
+
+    def get_workflow_id_for_task(self, task_id: str) -> str | None:
+        """Return the workflow ID that contains *task_id*, or None.
+
+        Used by the orchestrator to include workflow_id in webhook payloads.
+        DESIGN.md §10.25 (v0.30.0).
+        """
+        return self._task_to_workflow.get(task_id)
+
     def _get_run_for_task(self, task_id: str) -> WorkflowRun | None:
         wf_id = self._task_to_workflow.get(task_id)
         if wf_id is None:
