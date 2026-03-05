@@ -6,6 +6,21 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.37.0] — 2026-03-06
+
+### Added
+
+**`POST /workflows/debate` — Advocate/Critic/Judge multi-round debate workflow**
+
+3-agent deliberation pipeline: Advocate argues a position, Critic rebuts, agents
+exchange N rounds, Judge delivers final verdict. Artifact handoff via scratchpad
+(Blackboard pattern). 29 new tests (710 → 739 total).
+
+Demo: SQLite vs PostgreSQL debate (2 rounds). All 5 tasks completed successfully.
+Judge verdict: PostgreSQL (Advocate wins).
+
+---
+
 ## [0.36.0] — 2026-03-06
 
 ### Added
