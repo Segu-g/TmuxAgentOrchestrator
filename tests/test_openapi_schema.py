@@ -71,6 +71,10 @@ class _MockOrchestrator:
     def get_agent_history(self, agent_id: str, limit: int = 50) -> list | None:
         return None
 
+    def get_workflow_manager(self):
+        from tmux_orchestrator.workflow_manager import WorkflowManager
+        return WorkflowManager()
+
 
 @pytest.fixture
 def fastapi_app():

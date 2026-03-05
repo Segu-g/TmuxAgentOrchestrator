@@ -150,6 +150,12 @@ class Orchestrator:
             )
         else:
             self._result_store = None
+        # Workflow DAG tracker — always enabled (zero overhead when no workflows
+        # are submitted).  Tracks multi-step pipelines submitted via POST /workflows.
+        # Reference: Apache Airflow DAG model; Tomasulo's algorithm (IBM 1967);
+        # AWS Step Functions; Prefect "Modern Data Stack". DESIGN.md §10.20 (v0.25.0)
+        from tmux_orchestrator.workflow_manager import WorkflowManager
+        self._workflow_manager = WorkflowManager()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -868,6 +874,9 @@ class Orchestrator:
                 task_id = msg.payload.get("task_id")
                 if not error and task_id:
                     self._completed_tasks.add(task_id)
+                    self._workflow_manager.on_task_complete(task_id)
+                elif error and task_id:
+                    self._workflow_manager.on_task_failed(task_id)
                 # Record task in per-agent history.
                 self._record_agent_history(msg)
                 # reply_to routing: deliver RESULT to the requesting agent's mailbox.
@@ -1273,6 +1282,21 @@ class Orchestrator:
         ))
         logger.info("Dynamic agent %s created (parent=%s, tags=%s)", agent_id, parent_id, tags)
         return agent
+
+    # ------------------------------------------------------------------
+    # Workflow DAG tracking
+    # ------------------------------------------------------------------
+
+    def get_workflow_manager(self):
+        """Return the WorkflowManager instance.
+
+        The WorkflowManager tracks multi-step workflow DAGs submitted via
+        ``POST /workflows``.  It is always instantiated (never None) so callers
+        can call its methods without a None check.
+
+        Design reference: DESIGN.md §10.20 (v0.25.0).
+        """
+        return self._workflow_manager
 
     # ------------------------------------------------------------------
     # Controls

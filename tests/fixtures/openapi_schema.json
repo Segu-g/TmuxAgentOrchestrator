@@ -383,6 +383,79 @@
         ],
         "title": "ValidationError",
         "type": "object"
+      },
+      "WorkflowSubmit": {
+        "description": "Request body for POST /workflows.",
+        "properties": {
+          "name": {
+            "default": "workflow",
+            "title": "Name",
+            "type": "string"
+          },
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowTaskSpec"
+            },
+            "title": "Tasks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "tasks"
+        ],
+        "title": "WorkflowSubmit",
+        "type": "object"
+      },
+      "WorkflowTaskSpec": {
+        "description": "A single task node in a workflow DAG submission.\n\n``local_id`` is a caller-defined name used to express dependencies\nwithin this submission.  It is translated to a global orchestrator\ntask ID by ``POST /workflows`` before the tasks are enqueued.\n\nDesign reference:\n- Apache Airflow: DAG nodes identified by ``task_id`` strings\n- AWS Step Functions: states referenced by name within a state machine\n- Tomasulo's algorithm: register renaming == local_id \u2192 global_task_id\n- DESIGN.md \u00a710.20 (v0.25.0)",
+        "properties": {
+          "depends_on": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Depends On",
+            "type": "array"
+          },
+          "local_id": {
+            "title": "Local Id",
+            "type": "string"
+          },
+          "priority": {
+            "default": 0,
+            "title": "Priority",
+            "type": "integer"
+          },
+          "prompt": {
+            "title": "Prompt",
+            "type": "string"
+          },
+          "required_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Tags",
+            "type": "array"
+          },
+          "target_agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Agent"
+          }
+        },
+        "required": [
+          "local_id",
+          "prompt"
+        ],
+        "title": "WorkflowTaskSpec",
+        "type": "object"
       }
     }
   },
@@ -1510,6 +1583,108 @@
           }
         },
         "summary": "Cancel a pending task"
+      }
+    },
+    "/workflows": {
+      "get": {
+        "description": "Return a list of all submitted workflow runs and their current status.\n\nEach entry contains:\n- ``id``: workflow run UUID\n- ``name``: name given at submission\n- ``task_ids``: ordered list of global orchestrator task IDs\n- ``status``: ``\"pending\"`` | ``\"running\"`` | ``\"complete\"`` | ``\"failed\"``\n- ``created_at``: Unix timestamp of submission\n- ``completed_at``: Unix timestamp when all tasks finished, or ``null``\n- ``tasks_total``: total number of tasks in the workflow\n- ``tasks_done``: tasks that have finished (succeeded + failed)\n- ``tasks_failed``: tasks that failed\n\nDesign reference: DESIGN.md \u00a710.20 (v0.25.0).",
+        "operationId": "list_workflows_workflows_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {},
+                  "title": "Response List Workflows Workflows Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List all workflow runs"
+      },
+      "post": {
+        "description": "Submit a named workflow as a directed acyclic graph of tasks.\n\nEach task in ``tasks`` may reference other tasks in the same submission\nvia ``depends_on`` (a list of ``local_id`` strings).  The handler:\n\n1. Validates the DAG for unknown ``local_id`` references and cycles.\n2. Assigns a global orchestrator task ID to each local node.\n3. Submits tasks to the orchestrator in topological order, translating\n   ``depends_on`` local IDs to global task IDs.\n4. Registers all task IDs with the ``WorkflowManager`` for status\n   tracking.\n5. Returns the workflow ID and a ``local_id \u2192 global_task_id`` mapping.\n\nReturns 400 on invalid DAG (unknown dependency or cycle).\n\nDesign references:\n- Apache Airflow DAG model \u2014 directed acyclic graph of tasks\n- AWS Step Functions \u2014 state machine workflow definition\n- Tomasulo's algorithm \u2014 register renaming == local_id \u2192 task_id mapping\n- Prefect \"Modern Data Stack\" \u2014 submit pipeline as a unit\n- DESIGN.md \u00a710.20 (v0.25.0)",
+        "operationId": "submit_workflow_workflows_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Workflow Workflows Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a multi-step workflow DAG"
+      }
+    },
+    "/workflows/{workflow_id}": {
+      "get": {
+        "description": "Return the status and task list for *workflow_id*.\n\nReturns 404 if the workflow ID is unknown.\n\nDesign reference: DESIGN.md \u00a710.20 (v0.25.0).",
+        "operationId": "get_workflow_workflows__workflow_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Workflow Workflows  Workflow Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get a specific workflow run status"
       }
     }
   }

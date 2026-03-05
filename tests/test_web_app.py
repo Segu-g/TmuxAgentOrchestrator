@@ -57,6 +57,10 @@ class _MockOrchestrator:
     def reconfigure_rate_limiter(self, *, rate: float, burst: int) -> dict:
         return {"enabled": rate > 0, "rate": rate, "burst": burst, "available_tokens": float(burst)}
 
+    def get_workflow_manager(self):
+        from tmux_orchestrator.workflow_manager import WorkflowManager
+        return WorkflowManager()
+
 
 @pytest.fixture(autouse=True)
 def reset_state():

@@ -129,6 +129,35 @@ class AutoScalerUpdate(BaseModel):
     cooldown: float | None = None
 
 
+class WorkflowTaskSpec(BaseModel):
+    """A single task node in a workflow DAG submission.
+
+    ``local_id`` is a caller-defined name used to express dependencies
+    within this submission.  It is translated to a global orchestrator
+    task ID by ``POST /workflows`` before the tasks are enqueued.
+
+    Design reference:
+    - Apache Airflow: DAG nodes identified by ``task_id`` strings
+    - AWS Step Functions: states referenced by name within a state machine
+    - Tomasulo's algorithm: register renaming == local_id → global_task_id
+    - DESIGN.md §10.20 (v0.25.0)
+    """
+
+    local_id: str
+    prompt: str
+    depends_on: list[str] = []
+    target_agent: str | None = None
+    required_tags: list[str] = []
+    priority: int = 0
+
+
+class WorkflowSubmit(BaseModel):
+    """Request body for POST /workflows."""
+
+    name: str = "workflow"
+    tasks: list[WorkflowTaskSpec]
+
+
 # ---------------------------------------------------------------------------
 # Module-level auth state
 # ---------------------------------------------------------------------------
@@ -634,6 +663,116 @@ def create_app(
         if result_store is None:
             return []
         return result_store.all_dates()
+
+    # ------------------------------------------------------------------
+    # Workflow DAG API
+    # ------------------------------------------------------------------
+
+    @app.post(
+        "/workflows",
+        summary="Submit a multi-step workflow DAG",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_workflow(body: WorkflowSubmit) -> dict:
+        """Submit a named workflow as a directed acyclic graph of tasks.
+
+        Each task in ``tasks`` may reference other tasks in the same submission
+        via ``depends_on`` (a list of ``local_id`` strings).  The handler:
+
+        1. Validates the DAG for unknown ``local_id`` references and cycles.
+        2. Assigns a global orchestrator task ID to each local node.
+        3. Submits tasks to the orchestrator in topological order, translating
+           ``depends_on`` local IDs to global task IDs.
+        4. Registers all task IDs with the ``WorkflowManager`` for status
+           tracking.
+        5. Returns the workflow ID and a ``local_id → global_task_id`` mapping.
+
+        Returns 400 on invalid DAG (unknown dependency or cycle).
+
+        Design references:
+        - Apache Airflow DAG model — directed acyclic graph of tasks
+        - AWS Step Functions — state machine workflow definition
+        - Tomasulo's algorithm — register renaming == local_id → task_id mapping
+        - Prefect "Modern Data Stack" — submit pipeline as a unit
+        - DESIGN.md §10.20 (v0.25.0)
+        """
+        from tmux_orchestrator.workflow_manager import validate_dag  # noqa: PLC0415
+
+        # Validate and topologically sort
+        task_specs = [t.model_dump() for t in body.tasks]
+        try:
+            ordered = validate_dag(task_specs, local_id_key="local_id", deps_key="depends_on")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        # Assign global IDs and submit in dependency order
+        local_to_global: dict[str, str] = {}
+        global_task_ids: list[str] = []
+
+        for spec in ordered:
+            global_deps = [local_to_global[lid] for lid in spec.get("depends_on", [])]
+            task = await orchestrator.submit_task(
+                spec["prompt"],
+                priority=spec.get("priority", 0),
+                depends_on=global_deps or None,
+                target_agent=spec.get("target_agent"),
+                required_tags=spec.get("required_tags") or None,
+            )
+            local_to_global[spec["local_id"]] = task.id
+            global_task_ids.append(task.id)
+
+        # Register with WorkflowManager for status tracking
+        wm = orchestrator.get_workflow_manager()
+        run = wm.submit(name=body.name, task_ids=global_task_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": local_to_global,
+        }
+
+    @app.get(
+        "/workflows",
+        summary="List all workflow runs",
+        dependencies=[Depends(auth)],
+    )
+    async def list_workflows() -> list:
+        """Return a list of all submitted workflow runs and their current status.
+
+        Each entry contains:
+        - ``id``: workflow run UUID
+        - ``name``: name given at submission
+        - ``task_ids``: ordered list of global orchestrator task IDs
+        - ``status``: ``"pending"`` | ``"running"`` | ``"complete"`` | ``"failed"``
+        - ``created_at``: Unix timestamp of submission
+        - ``completed_at``: Unix timestamp when all tasks finished, or ``null``
+        - ``tasks_total``: total number of tasks in the workflow
+        - ``tasks_done``: tasks that have finished (succeeded + failed)
+        - ``tasks_failed``: tasks that failed
+
+        Design reference: DESIGN.md §10.20 (v0.25.0).
+        """
+        return orchestrator.get_workflow_manager().list_all()
+
+    @app.get(
+        "/workflows/{workflow_id}",
+        summary="Get a specific workflow run status",
+        dependencies=[Depends(auth)],
+    )
+    async def get_workflow(workflow_id: str) -> dict:
+        """Return the status and task list for *workflow_id*.
+
+        Returns 404 if the workflow ID is unknown.
+
+        Design reference: DESIGN.md §10.20 (v0.25.0).
+        """
+        result = orchestrator.get_workflow_manager().status(workflow_id)
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Workflow {workflow_id!r} not found",
+            )
+        return result
 
     @app.post(
         "/tasks/{task_id}/cancel",
