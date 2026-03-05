@@ -41,7 +41,7 @@ TmuxAgentOrchestrator/
 ## Installation
 
 ```bash
-pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
 ## Running
@@ -176,12 +176,14 @@ Open an issue (not a user question) when:
 - An architectural change is large enough that user sign-off is prudent.
 
 **Never block the autonomous loop waiting for a response.** After opening the issue,
-continue with whatever iteration candidates remain in `DESIGN.md §10.5`.
+continue with whatever iteration candidates remain in `DESIGN.md §11`.
 
 ### Permanent Rules
 - `DESIGN.md` is the source of truth for design decisions, references, and iteration history.
-- `DESIGN.md §10.5` always lists the next candidates in priority order.
+- `DESIGN.md §11` always lists the next candidates in priority order.
 - Every demo's `build-log.md` must be written before moving to the next iteration.
+- After adding or changing any REST endpoint, regenerate the OpenAPI snapshot:
+  `UPDATE_SNAPSHOTS=1 uv run pytest tests/test_openapi_schema.py`
 - Do not use `--no-verify` or skip tests to meet a deadline.
 
 ## Key Decisions
