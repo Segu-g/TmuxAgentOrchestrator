@@ -6,6 +6,51 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.19.0] — 2026-03-05
+
+### Added
+
+**Queue Pause/Resume + Task Priority Live Update**
+
+Enables maintenance-mode queue control and live task priority adjustment,
+combining Google Cloud Tasks queue-pause semantics with Python `heapq`
+in-place priority mutation.
+
+- `POST /orchestrator/pause` — halt the dispatch loop without killing in-flight
+  tasks. Idempotent. Returns `{"paused": true}`.
+- `POST /orchestrator/resume` — re-enable dispatch; queue drains immediately in
+  priority order. Idempotent. Returns `{"paused": false}`.
+- `GET /orchestrator/status` — operational snapshot: `paused`, `queue_depth`,
+  `agent_count`, `dlq_depth`.
+- `PATCH /tasks/{task_id}` body `{"priority": N}` — live priority update.
+  Mutates the task in the heap, calls `heapq.heapify()` for O(n) rebuild.
+  Returns `{"updated": bool, "task_id": ..., "priority": N}`.
+- `Orchestrator.update_task_priority(task_id, new_priority)` — core method.
+  Publishes `task_priority_updated` STATUS event on success.
+- `TaskPriorityUpdate` Pydantic schema for PATCH body validation.
+- 18 new unit and REST tests (302 total, all passing).
+- OpenAPI schema snapshot updated.
+
+**Design references:**
+- Google Cloud Tasks `queues.pause` REST API (2024).
+- Oracle WebLogic "Pause queue message operations at runtime" (2024).
+- Python `heapq` docs "Priority Queue Implementation Notes".
+- Liu, C.L.; Layland, J.W. (1973). "Scheduling Algorithms for
+  Multiprogramming in a Hard Real-Time Environment". JACM 20(1).
+- Sedgewick & Wayne "Algorithms" 4th ed. §2.4 — Priority Queues.
+
+**E2E Demo (v0.19.0 — Weighted Interval Scheduling, pause/resume):**
+- 3 ClaudeCodeAgents (`solver-greedy`, `solver-dp`, `solver-random`)
+- WIS problem (N=12 intervals, optimal=80)
+- Round 1: 3 tasks dispatched via `target_agent` routing
+- Paused: 3 round-2 tasks enqueued with priorities 5, 3, 7
+- PATCH: solver-random task promoted from priority 7→0 (heap rebuilt)
+- Resumed: tasks dispatched in updated priority order (C→B→A)
+- All 6 solutions valid, score=68 (85% of optimal)
+- Demo folder: `~/Demonstration/v0.19.0-pause-resume-priority/`
+
+---
+
 ## [0.18.0] — 2026-03-05
 
 ### Added

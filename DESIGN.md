@@ -692,6 +692,50 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.15 調査記録 (v0.19.0, 2026-03-05)
+
+#### 実装: キューポーズ/レジューム REST API + タスク優先度ライブ更新
+
+**調査観点:**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| キューポーズ/レジューム | Queue Pause/Resume for maintenance drain | Google Cloud Tasks [`queues.pause`](https://docs.cloud.google.com/tasks/docs/reference/rest/v2/projects.locations.queues/pause) API (2024) |
+| キューポーズ/レジューム | JMS Destination pause for troubleshooting | Oracle WebLogic "Pause queue message operations at runtime" (2024) |
+| ライブ優先度更新 | decrease_key / increase_key ヒープ操作 | Python [`heapq` docs](https://docs.python.org/3/library/heapq.html) "Priority Queue Implementation Notes" |
+| ライブ優先度更新 | スケジューリング優先度調整 | Liu, C.L.; Layland, J.W. (1973). "Scheduling Algorithms for Multiprogramming in a Hard Real-Time Environment". JACM 20(1). |
+| ライブ優先度更新 | Priority Queue decrease_key / increase_key | Sedgewick & Wayne "Algorithms" 4th ed. §2.4 — Priority Queues |
+
+**主要知見:**
+
+1. **Google Cloud Tasks Pause API (2024)**: キューをポーズすると、レジュームするまで新しいタスクのディスパッチが停止する。インフライトのタスクは正常に完了する。ポーズ中もタスクをエンキューできる。本実装の `POST /orchestrator/pause` は同じセマンティクスを持つ。
+
+2. **Oracle WebLogic JMS Pause (2024)**: JMS デスティネーションのメッセージ操作（本番/挿入/消費）をランタイムに個別にポーズできる。トラブルシューティング、ローリングデプロイ、メンテナンスウィンドウ確保に有用。ポーズ後は既存メッセージをドレインして問題解決後に再開できる。
+
+3. **Python heapq decrease_key (2024)**: Python の `heapq` は `decrease_key` / `increase_key` 操作を直接提供しない。標準的なアプローチは: (a) 無効化マーク + 新エントリ追加、または (b) エントリをインプレース変更後 `heapq.heapify()` でO(n) 再構築。本実装は (b) を採用。エージェント数が少ない（< 1000 タスク）ため線形再構築で十分。
+
+4. **Liu & Layland 優先度スケジューリング (1973)**: RTOS の Rate-Monotonic Scheduling (RMS) では固定優先度の割り当てが最適性を保証する。動的な優先度変更（Priority Ceiling Protocol, Priority Inheritance）は優先度逆転を防ぐために使用される。本実装の `PATCH /tasks/{id}` は運用者が緊急タスクを昇格させることで事実上の優先度逆転を防ぐ手段。
+
+**設計決定:**
+
+- **`update_task_priority(task_id, new_priority)` のシグネチャ**: タスクIDと新しい優先度を受け取り `bool` を返す。キューに見つからなければ `False`（既にディスパッチ済み or 未提出）。見つかれば変更して `task_priority_updated` STATUS イベントを発行し `True` を返す。
+- **ヒープ再構築**: `asyncio.PriorityQueue._queue` ヒープをリスト化 → 対象タプルの優先度を変更 → `heapq.heapify()` で再構築。O(n) で小規模キューには十分。`cancel_task` と同じ内部 API アクセスパターンを使用。
+- **`POST /orchestrator/pause` の冪等性**: 既にポーズ済みのオーケストレーターに再度 pause を送っても安全。`resume` も同様。
+- **`GET /orchestrator/status` のフィールド**: `paused`（フラグ）、`queue_depth`（ペンディングタスク数）、`agent_count`（登録エージェント数）、`dlq_depth`（デッドレターキュー深さ）。運用可視性のための最小限のフィールド。
+
+**デモシナリオ (v0.19.0):**
+- 問題: Weighted Interval Scheduling (WIS, N=12, optimal=80) — Kleinberg & Tardos "Algorithm Design" §6.1
+- 3 エージェント: `solver-greedy`、`solver-dp`、`solver-random` が並列稼働
+- Phase 1: `target_agent` ルーティングで3タスクを投入（greedy/DP/Monte Carlo）
+- Phase 2: `POST /orchestrator/pause` でポーズ（インフライトタスクは継続）
+- Phase 3: ポーズ中に3タスクを投入（優先度 5, 3, 7）→ キューに待機
+- Phase 4: `PATCH /tasks/{TC}` で solver-random タスクの優先度を 7→0 に昇格
+- Phase 5: `POST /orchestrator/resume` でレジューム → 優先度順にディスパッチ（C→B→A）
+- 全6ソリューションが有効 (score=68/80, 85%)
+- デモフォルダ: `~/Demonstration/v0.19.0-pause-resume-priority/`
+
+---
+
 ## 11. 今後の課題
 
 ### 機能
@@ -704,6 +748,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~中~~ ~~タスク結果を親エージェントのメールボックスに直接配送 (`reply_to`)~~ | **完了 (v0.14.0)** — `Task.reply_to` フィールド + `Orchestrator._route_result_reply()` + REST `POST /tasks` の `reply_to` パラメータ |
 | ~~中~~ ~~`POST /tasks/batch` — 複数タスクを一括提出~~ | **完了 (v0.15.0)** — `TaskBatchSubmit` + `POST /tasks/batch`; AHC デモで 3 タスクを並列提出 |
 | ~~中~~ ~~エージェント能力タグ + スマートディスパッチ~~ | **完了 (v0.18.0)** — `AgentConfig.tags` + `Task.required_tags` + `find_idle_worker(required_tags)` + REST `required_tags` パラメータ; 23 テスト |
+| ~~中~~ ~~キューポーズ/レジューム + タスク優先度ライブ更新~~ | **完了 (v0.19.0)** — `POST /orchestrator/pause|resume`, `GET /orchestrator/status`, `PATCH /tasks/{id}`; 18 テスト (302 合計) |
 | 中 | `/plan` と `/tdd` の出力を RESULT メッセージとして親に自動送信 |
 | 低 | エージェントのコンテキスト使用量モニタリング |
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |
@@ -717,6 +762,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~中~~ ~~Director → Workers でマイクロサービス API を分割実装~~ | **完了 (v0.17.0)** — 4 ClaudeCodeAgent 並列、3 ワーカーが FastAPI エンドポイントを並列実装、Director が `integration_report.md` 生成 |
 | ~~中~~ ~~agent-a が実装 → agent-b がレビュー → agent-a が修正~~ | **完了 (v0.16.0)** — Peer review pipeline デモ |
 | ~~中~~ ~~能力タグによる専門エージェント自動選択~~ | **完了 (v0.18.0)** — python-expert / docs-writer; タスクが正しいエージェントにのみ配送されることを実証 |
+| ~~中~~ ~~ポーズ/レジューム + 優先度ライブ更新デモ~~ | **完了 (v0.19.0)** — 3 agents, WIS best-of-N, ポーズ中に3タスク投入, PATCH で優先度変更, レジューム後に優先度順ディスパッチ実証 |
 
 **AHC best-of-N デモ完了 (v0.15.0)**:
 - 問題: Weighted Knapsack (N=15, C=50) — 最適解 score=154 (DP で検証済み)
