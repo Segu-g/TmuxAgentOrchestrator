@@ -50,10 +50,15 @@ class Orchestrator:
             circuit_breaker_threshold=config.circuit_breaker_threshold,
             circuit_breaker_recovery=config.circuit_breaker_recovery,
         )
-        # Priority queue: (priority, task) — lower priority value = dispatched first
-        self._task_queue: asyncio.PriorityQueue[tuple[int, Task]] = asyncio.PriorityQueue(
+        # Priority queue: (priority, seq, task) — lower priority first; seq is
+        # a monotonically increasing counter that breaks ties between tasks with
+        # equal priority so the heap never tries to compare Task objects directly.
+        # Without seq, heapq with Task.__lt__(always False for equal-priority items)
+        # causes the same task to cycle at the heap root indefinitely.
+        self._task_queue: asyncio.PriorityQueue[tuple[int, int, Task]] = asyncio.PriorityQueue(
             maxsize=config.task_queue_maxsize
         )
+        self._task_seq: int = 0  # monotonically increasing enqueue counter
         self._paused = False
         self._dispatch_task: asyncio.Task | None = None
         self._router_task: asyncio.Task | None = None
@@ -176,7 +181,8 @@ class Orchestrator:
             self._idempotency_keys[idempotency_key] = task.id
             self._ikey_timestamps[idempotency_key] = time.monotonic()
             self._cleanup_expired_ikeys()
-        await self._task_queue.put((priority, task))
+        self._task_seq += 1
+        await self._task_queue.put((priority, self._task_seq, task))
         await self.bus.publish(Message(
             type=MessageType.STATUS,
             from_id="__orchestrator__",
@@ -198,7 +204,7 @@ class Orchestrator:
         items = list(self._task_queue._queue)  # type: ignore[attr-defined]
         return [
             {"priority": p, "task_id": t.id, "prompt": t.prompt}
-            for p, t in sorted(items, key=lambda x: x[0])
+            for p, _seq, t in sorted(items, key=lambda x: (x[0], x[1]))
         ]
 
     # ------------------------------------------------------------------
@@ -211,7 +217,7 @@ class Orchestrator:
                 await asyncio.sleep(0.5)
                 continue
             try:
-                _, task = await asyncio.wait_for(
+                _, _seq, task = await asyncio.wait_for(
                     self._task_queue.get(), timeout=0.5
                 )
             except asyncio.TimeoutError:
@@ -229,8 +235,12 @@ class Orchestrator:
                         task, f"unmet dependencies {unmet} after {retry_count} retries"
                     )
                 else:
-                    await self._task_queue.put((task.priority, task))
-                    await asyncio.sleep(0.2)
+                    self._task_seq += 1
+                    await self._task_queue.put((task.priority, self._task_seq, task))
+                    # Short yield so the route loop can process RESULTs and update
+                    # _completed_tasks between re-queue attempts.  0.05s (was 0.2s)
+                    # prevents busy-spinning without causing O(n²) pipeline delay.
+                    await asyncio.sleep(0.05)
                 continue
 
             agent = self.registry.find_idle_worker()
@@ -240,7 +250,8 @@ class Orchestrator:
                 if retry_count >= self.config.dlq_max_retries:
                     await self._dead_letter(task, f"no idle agent after {retry_count} retries")
                 else:
-                    await self._task_queue.put((task.priority, task))
+                    self._task_seq += 1
+                    await self._task_queue.put((task.priority, self._task_seq, task))
                     await asyncio.sleep(0.2)
                 continue
 
@@ -248,6 +259,11 @@ class Orchestrator:
             self.registry.record_busy(agent.id)
             await agent.send_task(task)
             self._task_queue.task_done()
+            # Yield so the agent's _run_loop can dequeue and set status=BUSY
+            # before the next find_idle_worker() call.  Without this yield, all
+            # tasks pile up in the first agent's queue (agent.status stays IDLE
+            # until the run loop gets to run).
+            await asyncio.sleep(0)
 
     async def _dead_letter(self, task: Task, reason: str) -> None:
         """Move *task* to the dead letter queue and publish a STATUS event."""
@@ -458,6 +474,7 @@ class Orchestrator:
             parent_pane=parent_pane,
             system_prompt=template_cfg.system_prompt,
             context_files=template_cfg.context_files,
+            context_files_root=_Path.cwd() if template_cfg.context_files else None,
         )
 
         self.registry.register(agent, parent_id=parent_id)

@@ -137,6 +137,33 @@ def _make_combined_auth(api_key: str):
 # ---------------------------------------------------------------------------
 
 
+def _build_agent_tree(agents: list[dict]) -> list[dict]:
+    """Convert a flat list of agent dicts into a nested tree.
+
+    Each dict must have an ``id`` and optional ``parent_id`` key.  Returns a
+    list of root nodes (``parent_id is None``), each with a ``children`` key
+    that recursively holds child nodes.
+
+    The resulting structure is compatible with d3-hierarchy's ``d3.hierarchy()``
+    function (the library expects a tree rooted at a single node, but we expose
+    multiple roots as a list for the REST caller to use freely).
+    """
+    by_id: dict[str, dict] = {}
+    for a in agents:
+        node = {**a, "children": []}
+        by_id[a["id"]] = node
+
+    roots: list[dict] = []
+    for node in by_id.values():
+        parent_id = node.get("parent_id")
+        if parent_id and parent_id in by_id:
+            by_id[parent_id]["children"].append(node)
+        else:
+            roots.append(node)
+
+    return roots
+
+
 def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> FastAPI:
     """Create and wire up the FastAPI application.
 
@@ -296,6 +323,20 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
     @app.get("/agents", summary="List agents and their status", dependencies=[Depends(auth)])
     async def list_agents() -> list[dict]:
         return orchestrator.list_agents()
+
+    @app.get("/agents/tree", summary="Agent hierarchy as nested tree", dependencies=[Depends(auth)])
+    async def agents_tree() -> list[dict]:
+        """Return the agent list as a nested JSON tree (d3-hierarchy compatible).
+
+        Each node has: ``id``, ``status``, ``role``, ``parent_id``,
+        ``current_task``, ``bus_drops``, ``circuit_breaker``, ``children``.
+
+        The top level of the returned list contains root-level agents
+        (``parent_id == None``); each node's ``children`` list recursively
+        contains its sub-agents.
+        """
+        agents = orchestrator.list_agents()
+        return _build_agent_tree(agents)
 
     @app.delete("/agents/{agent_id}", summary="Stop an agent", dependencies=[Depends(auth)])
     async def stop_agent(agent_id: str) -> AgentKillResponse:
@@ -551,6 +592,77 @@ _HTML_UI = r"""<!DOCTYPE html>
   .status-stopped { color: #6e7681; }
   .role-director  { color: #58a6ff; font-size: 0.7rem; margin-left: 4px; }
 
+  /* ── View toggle (table / tree) ── */
+  .view-toggle {
+    display: flex;
+    gap: 4px;
+  }
+  .view-btn {
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    padding: 2px 10px;
+    font-size: 0.72rem;
+    color: #8b949e;
+    cursor: pointer;
+  }
+  .view-btn.active {
+    background: #1f6feb;
+    border-color: #388bfd;
+    color: #fff;
+  }
+
+  /* ── Agent tree view ── */
+  #agents-tree {
+    overflow-y: auto;
+    flex: 1;
+    padding: 8px 14px;
+    min-height: 0;
+    display: none; /* hidden by default; shown when tree view is active */
+  }
+  .tree-node {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .tree-node li {
+    position: relative;
+    padding-left: 18px;
+    margin: 2px 0;
+  }
+  .tree-node li::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    border-left: 1px solid #30363d;
+  }
+  .tree-node li:last-child::before {
+    height: 0.8em;
+  }
+  .tree-node li::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0.8em;
+    width: 14px;
+    border-top: 1px solid #30363d;
+  }
+  .tree-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 6px;
+    border-radius: 4px;
+    font-size: 0.82rem;
+    cursor: default;
+  }
+  .tree-item:hover { background: #161b22; }
+  .tree-item-id { font-weight: 600; font-family: monospace; }
+  .tree-item-role { font-size: 0.7rem; color: #8b949e; padding: 1px 5px; border-radius: 3px; background: #21262d; }
+  .tree-item-role.director { color: #58a6ff; background: #1f3447; }
+
   /* ── Director Chat ── */
   #chat-section { display: none; }
   #chat-history {
@@ -767,13 +879,18 @@ _HTML_UI = r"""<!DOCTYPE html>
   <section>
     <div class="section-header">
       Agents <span id="agent-count" class="badge">0</span>
+      <div class="view-toggle">
+        <button class="view-btn active" id="btn-table-view" onclick="setAgentView('table')">List</button>
+        <button class="view-btn" id="btn-tree-view" onclick="setAgentView('tree')">Tree</button>
+      </div>
     </div>
-    <div class="tbl-wrap">
+    <div class="tbl-wrap" id="agents-table-wrap">
       <table>
         <thead><tr><th>ID</th><th>Role</th><th>Status</th><th>Task</th></tr></thead>
         <tbody id="agents-body"><tr><td colspan="4" class="empty-hint">Loading…</td></tr></tbody>
       </table>
     </div>
+    <div id="agents-tree"></div>
   </section>
 
   <!-- Task queue panel -->
@@ -860,8 +977,9 @@ async function checkAuth() {
     }
     refreshAgents();
     refreshTasks();
+    refreshAgentTree();
     if (!_pollInterval) {
-      _pollInterval = setInterval(() => { refreshAgents(); refreshTasks(); }, 3000);
+      _pollInterval = setInterval(() => { refreshAgents(); refreshTasks(); refreshAgentTree(); }, 3000);
     }
   } else {
     overlay.style.display = 'flex';
@@ -981,6 +1099,7 @@ function connectWS() {
     if (['RESULT','STATUS','CONTROL'].includes(msg.type)) {
       refreshAgents();
       refreshTasks();
+      refreshAgentTree();
     }
     // Director response
     if (msg.type === 'RESULT' && pendingChats.has(msg.payload?.task_id)) {
@@ -998,6 +1117,72 @@ function connectWS() {
       addConversationEntry(msg);
     }
   };
+}
+
+// ── Agent view toggle (list / tree) ──
+let _agentView = 'table'; // 'table' or 'tree'
+
+function setAgentView(mode) {
+  _agentView = mode;
+  const tableWrap = document.getElementById('agents-table-wrap');
+  const treeWrap = document.getElementById('agents-tree');
+  const btnTable = document.getElementById('btn-table-view');
+  const btnTree = document.getElementById('btn-tree-view');
+  if (mode === 'tree') {
+    tableWrap.style.display = 'none';
+    treeWrap.style.display = 'block';
+    btnTable.classList.remove('active');
+    btnTree.classList.add('active');
+    refreshAgentTree();
+  } else {
+    tableWrap.style.display = '';
+    treeWrap.style.display = 'none';
+    btnTable.classList.add('active');
+    btnTree.classList.remove('active');
+  }
+}
+
+function statusClass(s) { return 'status-' + (s || 'stopped').toLowerCase(); }
+
+function renderTreeNodes(nodes, depth) {
+  if (!nodes || nodes.length === 0) return '';
+  const items = nodes.map(node => {
+    const sc = statusClass(node.status);
+    const roleClass = node.role === 'director' ? 'director' : '';
+    const taskHint = node.current_task
+      ? `<span style="color:#6e7681;font-size:0.72rem">task:${esc(node.current_task.slice(0,8))}</span>` : '';
+    const childHtml = node.children && node.children.length > 0
+      ? `<ul class="tree-node">${renderTreeNodes(node.children, depth + 1)}</ul>`
+      : '';
+    return `<li>
+      <div class="tree-item">
+        <span class="tree-item-id">${esc(node.id)}</span>
+        <span class="tree-item-role ${roleClass}">${esc(node.role || 'worker')}</span>
+        <span class="${sc}">${esc(node.status)}</span>
+        ${taskHint}
+      </div>
+      ${childHtml}
+    </li>`;
+  });
+  return items.join('');
+}
+
+function refreshAgentTree() {
+  if (_agentView !== 'tree') return;
+  fetch(`${API_BASE}/agents/tree`)
+    .then(r => {
+      if (r.status === 401) { checkAuth(); return null; }
+      return r.json();
+    })
+    .then(roots => {
+      if (!roots) return;
+      const wrap = document.getElementById('agents-tree');
+      if (roots.length === 0) {
+        wrap.innerHTML = '<div class="empty-hint">No agents</div>';
+        return;
+      }
+      wrap.innerHTML = `<ul class="tree-node" style="padding-left:8px;margin-top:6px">${renderTreeNodes(roots, 0)}</ul>`;
+    }).catch(console.error);
 }
 
 // ── Polling ──

@@ -60,8 +60,9 @@ def build_system(
     )
     mailbox = Mailbox(root_dir=config.mailbox_dir, session_name=config.session_name)
 
+    cwd = Path.cwd()
     try:
-        wm: WorktreeManager | None = WorktreeManager(Path.cwd())
+        wm: WorktreeManager | None = WorktreeManager(cwd)
     except RuntimeError:
         logger.warning("Not inside a git repository; worktree isolation disabled")
         wm = None
@@ -90,6 +91,7 @@ def build_system(
                 or "env -u CLAUDECODE claude --dangerously-skip-permissions",
                 system_prompt=agent_cfg.system_prompt,
                 context_files=agent_cfg.context_files,
+                context_files_root=cwd if agent_cfg.context_files else None,
             )
         else:
             raise ValueError(f"Unknown agent type: {agent_cfg.type!r}")

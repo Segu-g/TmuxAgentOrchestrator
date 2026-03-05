@@ -209,6 +209,30 @@
         "summary": "Spawn a sub-agent under a parent agent"
       }
     },
+    "/agents/tree": {
+      "get": {
+        "description": "Return the agent list as a nested JSON tree (d3-hierarchy compatible).\n\nEach node has: ``id``, ``status``, ``role``, ``parent_id``,\n``current_task``, ``bus_drops``, ``circuit_breaker``, ``children``.\n\nThe top level of the returned list contains root-level agents\n(``parent_id == None``); each node's ``children`` list recursively\ncontains its sub-agents.",
+        "operationId": "agents_tree_agents_tree_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Agents Tree Agents Tree Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Agent hierarchy as nested tree"
+      }
+    },
     "/agents/{agent_id}": {
       "delete": {
         "operationId": "stop_agent_agents__agent_id__delete",

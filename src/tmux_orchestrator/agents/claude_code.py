@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 import shlex
+import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -58,6 +59,7 @@ class ClaudeCodeAgent(Agent):
         # --- Context engineering ---
         system_prompt: str | None = None,
         context_files: list[str] | None = None,
+        context_files_root: Path | None = None,
     ) -> None:
         super().__init__(agent_id, bus, task_timeout=task_timeout)
         self.mailbox = mailbox
@@ -77,6 +79,9 @@ class ClaudeCodeAgent(Agent):
         # Context engineering: per-agent context localization
         self._system_prompt: str | None = system_prompt
         self._context_files: list[str] = context_files or []
+        # Root directory from which context_files paths are resolved.
+        # Defaults to None (not set); callers must provide this if context_files is non-empty.
+        self._context_files_root: Path | None = context_files_root
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -98,6 +103,7 @@ class ClaudeCodeAgent(Agent):
             await loop.run_in_executor(None, self._write_context_file, cwd)
             await loop.run_in_executor(None, self._write_agent_claude_md, cwd)
             await loop.run_in_executor(None, self._write_notes_template, cwd)
+            await loop.run_in_executor(None, self._copy_context_files, cwd)
         launch = (
             f"cd {shlex.quote(str(cwd))} && {self._command}" if cwd else self._command
         )
@@ -260,6 +266,43 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
         claude_md_path = cwd / "CLAUDE.md"
         claude_md_path.write_text(content)
         logger.debug("Agent %s wrote CLAUDE.md to %s", self.id, cwd)
+
+    def _copy_context_files(self, cwd: Path) -> None:
+        """Copy ``context_files`` (relative paths) into the agent's working directory.
+
+        Each file is copied preserving its relative directory structure so that
+        the agent sees the same layout it would in the original repository.
+
+        If ``context_files_root`` is not set and ``context_files`` is non-empty, a
+        warning is emitted and the copy is skipped.  Missing individual files also
+        emit a per-file warning rather than raising — callers should not crash on a
+        misconfigured context path.
+
+        Reference: DESIGN.md §5 (Context Engineering) — context localisation:
+        each agent receives only the subset of files relevant to its role.
+        """
+        if not self._context_files:
+            return
+        if self._context_files_root is None:
+            logger.warning(
+                "Agent %s: context_files is set but context_files_root is None — "
+                "cannot copy context files; set context_files_root to resolve paths.",
+                self.id,
+            )
+            return
+        root = self._context_files_root
+        for rel in self._context_files:
+            src = root / rel
+            if not src.exists():
+                logger.warning(
+                    "Agent %s: context file %r not found at %s — skipping",
+                    self.id, rel, src,
+                )
+                continue
+            dest = cwd / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+            logger.debug("Agent %s: copied context file %s → %s", self.id, src, dest)
 
     def _write_notes_template(self, cwd: Path) -> None:
         """Write an initial NOTES.md template for structured note-taking."""
