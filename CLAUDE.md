@@ -99,13 +99,14 @@ Each step is **required**. Never skip to the next step until the current one is 
 - All existing tests must remain green. `uv run pytest tests/ -x -q`
 - Commit in logical units. Push to origin.
 
-#### Step 3 — E2E demonstration with REAL agents (mandatory, no mocks)
+#### Step 3 — E2E demonstration with REAL agents
 - After each feature set, create a demonstration under `~/Demonstration/<topic>/demo.py`.
 - **Demonstrations MUST use real `ClaudeCodeAgent` instances** running actual `claude`
   processes in real tmux panes. They must produce real artefacts (files, test results).
-- `HeadlessAgent` variants (`FastAgent`, `SlowAgent`, etc.) are only allowed in unit tests
-  and in `complex_pipeline` benchmarks — **never** in demonstrations that claim to validate
-  production behaviour.
+- Mocks and `HeadlessAgent` variants (`FastAgent`, `SlowAgent`, etc.) are useful and
+  appropriate in unit tests and infrastructure benchmarks (e.g. `complex_pipeline`).
+  They must NOT be used in demonstrations — the point of a demo is to validate that the
+  real system works end-to-end, which mocks cannot do.
 - Document demo results in `~/Demonstration/<topic>/build-log.md`:
   - What passed / what failed
   - Root cause of every failure
