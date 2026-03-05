@@ -71,6 +71,24 @@ class SpawnAgent(BaseModel):
     template_id: str
 
 
+class DynamicAgentCreate(BaseModel):
+    """Request body for POST /agents/new — template-free dynamic agent creation.
+
+    Allows a Director (or operator) to add a new agent at runtime without
+    any pre-configured YAML entry.  All fields are optional; sensible defaults
+    are applied by the orchestrator.
+    """
+
+    agent_id: str | None = None
+    tags: list[str] = []
+    system_prompt: str | None = None
+    isolate: bool = True
+    command: str | None = None
+    role: str = "worker"
+    task_timeout: int | None = None
+    parent_id: str | None = None
+
+
 class DirectorChat(BaseModel):
     message: str
 
@@ -740,6 +758,32 @@ def create_app(
         )
         await orchestrator.bus.publish(msg)
         return {"message_id": msg.id, "to_id": agent_id}
+
+    @app.post("/agents/new", summary="Create a new agent dynamically (no template required)", dependencies=[Depends(auth)])
+    async def create_dynamic_agent(body: DynamicAgentCreate) -> dict:
+        """Create and start a new ClaudeCodeAgent with the given parameters.
+
+        Unlike ``POST /agents`` (which requires a pre-configured template_id),
+        this endpoint accepts the full agent specification inline so a Director
+        agent can spawn specialist workers at runtime.
+
+        Returns the assigned agent ID and a ``"created"`` status.  Returns 409
+        if an agent with the requested *agent_id* already exists.
+        """
+        try:
+            agent = await orchestrator.create_agent(
+                agent_id=body.agent_id,
+                tags=body.tags or [],
+                system_prompt=body.system_prompt,
+                isolate=body.isolate,
+                command=body.command,
+                role=body.role,
+                task_timeout=body.task_timeout,
+                parent_id=body.parent_id,
+            )
+            return {"status": "created", "agent_id": agent.id}
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
 
     @app.post("/agents", summary="Spawn a sub-agent under a parent agent", dependencies=[Depends(auth)])
     async def spawn_agent(body: SpawnAgent) -> dict:

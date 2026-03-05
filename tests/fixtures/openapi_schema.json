@@ -32,6 +32,86 @@
         "title": "DirectorChat",
         "type": "object"
       },
+      "DynamicAgentCreate": {
+        "description": "Request body for POST /agents/new \u2014 template-free dynamic agent creation.\n\nAllows a Director (or operator) to add a new agent at runtime without\nany pre-configured YAML entry.  All fields are optional; sensible defaults\nare applied by the orchestrator.",
+        "properties": {
+          "agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Id"
+          },
+          "command": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command"
+          },
+          "isolate": {
+            "default": true,
+            "title": "Isolate",
+            "type": "boolean"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          },
+          "role": {
+            "default": "worker",
+            "title": "Role",
+            "type": "string"
+          },
+          "system_prompt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Prompt"
+          },
+          "tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "task_timeout": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Timeout"
+          }
+        },
+        "title": "DynamicAgentCreate",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -300,6 +380,47 @@
           }
         },
         "summary": "Spawn a sub-agent under a parent agent"
+      }
+    },
+    "/agents/new": {
+      "post": {
+        "description": "Create and start a new ClaudeCodeAgent with the given parameters.\n\nUnlike ``POST /agents`` (which requires a pre-configured template_id),\nthis endpoint accepts the full agent specification inline so a Director\nagent can spawn specialist workers at runtime.\n\nReturns the assigned agent ID and a ``\"created\"`` status.  Returns 409\nif an agent with the requested *agent_id* already exists.",
+        "operationId": "create_dynamic_agent_agents_new_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DynamicAgentCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Dynamic Agent Agents New Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create a new agent dynamically (no template required)"
       }
     },
     "/agents/tree": {

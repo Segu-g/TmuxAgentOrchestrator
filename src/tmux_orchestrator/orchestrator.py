@@ -1004,6 +1004,24 @@ class Orchestrator:
                 )
                 return
             await self._spawn_subagent(parent_id, template_cfg, share_parent=share_parent)
+        elif action == "create_agent":
+            # Dynamic agent creation — no pre-configured template needed.
+            # Sent by a Director agent that wants to spawn a specialist worker at
+            # runtime.  The CONTROL payload mirrors create_agent() keyword args.
+            parent_id = msg.from_id
+            try:
+                await self.create_agent(
+                    agent_id=msg.payload.get("agent_id"),
+                    tags=msg.payload.get("tags"),
+                    system_prompt=msg.payload.get("system_prompt"),
+                    isolate=msg.payload.get("isolate", True),
+                    command=msg.payload.get("command"),
+                    role=msg.payload.get("role", "worker"),
+                    task_timeout=msg.payload.get("task_timeout"),
+                    parent_id=parent_id,
+                )
+            except ValueError as exc:
+                logger.error("create_agent CONTROL failed: %s", exc)
         else:
             logger.warning("Orchestrator received unknown CONTROL action: %s", action)
 
@@ -1067,6 +1085,114 @@ class Orchestrator:
             },
         ))
         logger.info("Sub-agent %s spawned (parent=%s)", sub_id, parent_id)
+        return agent
+
+    async def create_agent(
+        self,
+        *,
+        agent_id: str | None = None,
+        tags: list[str] | None = None,
+        system_prompt: str | None = None,
+        isolate: bool = True,
+        command: str | None = None,
+        role: str = "worker",
+        task_timeout: int | None = None,
+        parent_id: str | None = None,
+    ) -> "Agent":
+        """Create, register, and start a new agent without a pre-configured template.
+
+        Unlike ``_spawn_subagent()``, this method accepts raw parameters so a
+        Director agent (or the REST API) can instantiate specialist workers at
+        runtime without any pre-declared YAML configuration.
+
+        Parameters
+        ----------
+        agent_id:
+            Desired agent ID.  Auto-generated as ``dyn-{hex6}`` (or
+            ``{parent_id}-dyn-{hex6}`` when *parent_id* is given) if omitted.
+        tags:
+            Capability tags for smart dispatch (FIPA-DF pattern).
+        system_prompt:
+            System-level prompt written into the agent's CLAUDE.md.
+        isolate:
+            When ``True`` (default), the agent gets an isolated git worktree.
+        command:
+            Custom shell command to launch the agent (defaults to the
+            ``claude --dangerously-skip-permissions`` CLI).
+        role:
+            ``"worker"`` or ``"director"``; defaults to ``"worker"``.
+        task_timeout:
+            Per-agent task timeout in seconds; falls back to config default.
+        parent_id:
+            ID of the parent agent.  When set, hierarchy P2P is auto-granted.
+
+        Raises
+        ------
+        ValueError
+            If *agent_id* is already registered.
+        """
+        from pathlib import Path as _Path  # noqa: PLC0415
+
+        from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent
+        from tmux_orchestrator.config import AgentRole
+
+        if agent_id is None:
+            prefix = f"{parent_id}-dyn" if parent_id else "dyn"
+            agent_id = f"{prefix}-{uuid.uuid4().hex[:6]}"
+
+        if self.registry.get(agent_id) is not None:
+            raise ValueError(f"Agent {agent_id!r} is already registered")
+
+        mailbox = Mailbox(self.config.mailbox_dir, self.config.session_name)
+
+        parent_pane = None
+        if parent_id:
+            parent_agent = self.registry.get(parent_id)
+            if parent_agent is not None:
+                parent_pane = parent_agent.pane
+
+        try:
+            effective_role = AgentRole(role)
+        except ValueError:
+            effective_role = AgentRole.WORKER
+
+        effective_timeout = task_timeout if task_timeout is not None else self.config.task_timeout
+        effective_command = command or "env -u CLAUDECODE claude --dangerously-skip-permissions"
+        effective_wm = self._worktree_manager if isolate else None
+
+        agent: Agent = ClaudeCodeAgent(
+            agent_id=agent_id,
+            bus=self.bus,
+            tmux=self.tmux,
+            mailbox=mailbox,
+            worktree_manager=effective_wm,
+            isolate=isolate,
+            session_name=self.config.session_name,
+            web_base_url=self.config.web_base_url,
+            task_timeout=effective_timeout,
+            role=effective_role,
+            command=effective_command,
+            parent_pane=parent_pane,
+            system_prompt=system_prompt,
+            tags=tags or [],
+        )
+
+        self.registry.register(agent, parent_id=parent_id)
+        if parent_id:
+            self.registry.grant_p2p(parent_id, agent_id)
+        await agent.start()
+
+        await self.bus.publish(Message(
+            type=MessageType.STATUS,
+            from_id="__orchestrator__",
+            to_id=parent_id or "__broadcast__",
+            payload={
+                "event": "agent_created",
+                "agent_id": agent_id,
+                "parent_id": parent_id,
+            },
+        ))
+        logger.info("Dynamic agent %s created (parent=%s, tags=%s)", agent_id, parent_id, tags)
         return agent
 
     # ------------------------------------------------------------------
