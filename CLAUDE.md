@@ -109,7 +109,25 @@ Each step is **required**. Never skip to the next step until the current one is 
   appropriate in unit tests and infrastructure benchmarks (e.g. `complex_pipeline`).
   They must NOT be used in demonstrations — the point of a demo is to validate that the
   real system works end-to-end, which mocks cannot do.
-- Document demo results in `~/Demonstration/<topic>/build-log.md`:
+
+**Demos must justify multi-agent orchestration.**
+A demo with 1 agent doing 1 task is not sufficient — it fails to demonstrate the value
+of this framework. Every demo MUST involve genuine multi-agent collaboration, chosen
+from patterns like:
+
+| Pattern | Example |
+|---|---|
+| Parallel specialisation | agent-a writes implementation, agent-b writes tests simultaneously; orchestrator merges results |
+| Pipeline / dependency chain | agent-a produces an artefact that agent-b consumes (real file dependency) |
+| Director → workers | Director agent breaks a task into subtasks via P2P, delegates to 2+ workers, aggregates results |
+| Peer review | agent-a writes code, agent-b reviews and requests fixes, agent-a revises |
+| Competitive / best-of-N | multiple agents solve the same problem; orchestrator picks the best result |
+
+Minimum bar: **2 agents with meaningful interaction** (one agent's output is an input to
+another, OR agents communicate via P2P messages, OR a Director coordinates workers).
+A demo where 2 agents write independent files without any coordination does not count.
+
+- Document demo results in `~/Demonstration/v<version>-<topic>/build-log.md`:
   - What passed / what failed
   - Root cause of every failure
   - Fix applied (or GitHub Issue opened if it needs user input)
