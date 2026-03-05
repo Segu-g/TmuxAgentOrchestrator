@@ -105,13 +105,17 @@ Each step is **required**. Never skip to the next step until the current one is 
 - Commit in logical units. Push to origin.
 
 #### Step 3 — E2E demonstration with REAL agents
-- After each feature set, create a demonstration under `~/Demonstration/v<version>-<topic>/demo.py`.
-  The folder name MUST include the version number, e.g. `v0.13.0-reset-and-metrics`.
-  Format: `v{major}.{minor}.{patch}-{kebab-case-topic}`
+- After each feature set, create `~/Demonstration/v<version>-<topic>/demo.py`.
+  Folder name format: `v{major}.{minor}.{patch}-{kebab-case-topic}`
+  Example: `v0.13.0-reset-and-metrics`
+- **Write `demo.py`, then immediately run it with `uv run python demo.py`.**
+  Running the demo is not optional — writing the script without executing it does not count.
+- If the demo fails, debug and fix the root cause before proceeding to Step 4.
+  Do not move on while the demo is broken.
 - **Demonstrations MUST use real `ClaudeCodeAgent` instances** running actual `claude`
   processes in real tmux panes. They must produce real artefacts (files, test results).
 - Mocks and `HeadlessAgent` variants (`FastAgent`, `SlowAgent`, etc.) are useful and
-  appropriate in unit tests and infrastructure benchmarks (e.g. `complex_pipeline`).
+  appropriate in unit tests and infrastructure benchmarks.
   They must NOT be used in demonstrations — the point of a demo is to validate that the
   real system works end-to-end, which mocks cannot do.
 
@@ -150,18 +154,20 @@ Workflow:
 Use past AHC problems (e.g. AHC001–AHC030) which are publicly available and have
 well-defined offline scoring tools.
 
-- Document demo results in `~/Demonstration/v<version>-<topic>/build-log.md`:
+- After the demo runs successfully, record actual results in `~/Demonstration/v<version>-<topic>/build-log.md`:
+  - Actual output observed (stdout, files created, REST responses)
   - What passed / what failed
-  - Root cause of every failure
-  - Fix applied (or GitHub Issue opened if it needs user input)
+  - Root cause of every failure and the fix applied
+  - Open a GitHub Issue only if a fix requires user input
 
 #### Step 4 — Feedback loop
 - Every bug or quality gap found in the demo **must** become either:
-  a. A fix in the current iteration (if the root cause is clear), or
+  a. A fix committed in the current iteration (if the root cause is clear), or
   b. A GitHub Issue if user input is required, or
-  c. A candidate in `DESIGN.md §10.5` for the next iteration.
+  c. A prioritised candidate in `DESIGN.md §11` for the next iteration.
 - After fixing demo bugs, re-run the demo to confirm all checks pass.
-- Then begin the next Research step for the next iteration.
+- Summarise findings (what worked, what broke, what was improved) at the top of `build-log.md`.
+- Then begin Step 1 (WebSearch) for the next iteration.
 
 ### When to Open a GitHub Issue
 Open an issue (not a user question) when:
