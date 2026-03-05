@@ -6,6 +6,58 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.20.0] — 2026-03-05
+
+### Added
+
+**Token-Bucket Rate Limiter — Task Submission Backpressure**
+
+Prevents runaway Director agents from flooding the task queue by applying
+a token-bucket algorithm (Tanenbaum §5.3) to `Orchestrator.submit_task()`.
+The limiter is async-safe, live-reconfigurable via REST, and observable
+through the existing bus STATUS events.
+
+- `TokenBucketRateLimiter(rate, burst)` — new `rate_limiter.py` module.
+  - `try_acquire()` — non-blocking; returns `False` when bucket is empty.
+  - `acquire(timeout=N)` — async wait; raises `RateLimitExceeded` on timeout.
+  - `reconfigure(rate, burst)` — live update without resetting the bucket.
+  - `status()` — returns `{"enabled", "rate", "burst", "available_tokens"}`.
+- `RateLimitExceeded` exception with `rate`, `burst`, `available` attributes.
+- `Orchestrator.submit_task(..., wait_for_token=True)` — new `wait_for_token`
+  parameter. When `False`, raises `RateLimitExceeded` immediately; publishes
+  `rate_limit_exceeded` STATUS event to the bus for observability.
+- `Orchestrator.set_rate_limiter(rl)` — attach or detach a limiter at runtime.
+- `Orchestrator.get_rate_limiter_status()` — returns status dict (safe when no limiter).
+- `Orchestrator.reconfigure_rate_limiter(rate, burst)` — create or update limiter.
+- `OrchestratorConfig.rate_limit_rps` / `rate_limit_burst` — YAML config fields.
+  Auto-creates limiter at startup when `rate_limit_rps > 0`. Burst defaults to
+  `max(1, int(rps * 2))` when not specified.
+- `GET /rate-limit` — current rate limiter status snapshot.
+- `PUT /rate-limit` body `{"rate": N, "burst": M}` — live reconfiguration.
+  Setting `rate=0` disables rate limiting (unlimited throughput).
+- `RateLimitUpdate` Pydantic schema for PUT body validation.
+- 24 new unit and REST tests (326 total, all passing).
+- OpenAPI schema snapshot updated.
+
+**Design references:**
+- Tanenbaum, A.S. "Computer Networks" 5th ed. §5.3 — Token Bucket (2011).
+- RFC 4115 "A Differentiated Service Two-Rate, Three-Color Marker", IETF (2005).
+- aiolimiter v1.2.1: async-native leaky bucket for Python (2024).
+  https://aiolimiter.readthedocs.io/
+- NGINX `limit_req_zone` / `limit_req` HTTP rate limiting (2025).
+  https://nginx.org/en/docs/http/ngx_http_limit_req_module.html
+- DESIGN.md §10.16.
+
+**Demo: Graph Coloring + Rate Limiting**
+- Problem: Graph Coloring (15 nodes, 22 edges, K=4 colors), chromatic number=3.
+- 3 ClaudeCodeAgent instances: greedy (degree-descending), backtracking (AC-3),
+  local search (simulated annealing).
+- `rate_limit_rps=3.0 burst=3` in config; `PUT /rate-limit` demonstrates live
+  reconfiguration during the demo run.
+- Demo folder: `~/Demonstration/v0.20.0-rate-limit-graph-coloring/`
+
+---
+
 ## [0.19.0] — 2026-03-05
 
 ### Added

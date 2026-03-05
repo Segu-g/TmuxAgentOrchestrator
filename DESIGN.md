@@ -736,6 +736,51 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.16 調査記録 (v0.20.0, 2026-03-05)
+
+#### 実装: Token-Bucket Rate Limiter — タスク投入のバックプレッシャー
+
+**調査観点:**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| Rate limiting | Token Bucket Algorithm | Tanenbaum, A.S. "Computer Networks" 5th ed. §5.3 (2011) |
+| Rate limiting | Two-Rate Three-Color Marker | RFC 4115 "A Differentiated Service Two-Rate, Three-Color Marker" IETF (2005) |
+| asyncio 実装 | Leaky Bucket for async Python | aiolimiter v1.2.1 documentation (2024) https://aiolimiter.readthedocs.io/ |
+| Web rate limiting | limit_req_zone / limit_req | NGINX HTTP rate limiting directives (2025) https://nginx.org/en/docs/http/ngx_http_limit_req_module.html |
+| LLM backpressure | Async backpressure patterns | "Manage async I/O backpressure using bounded queues and timeouts" tech-champion.com (2025) |
+
+**主要知見:**
+
+1. **Token Bucket (Tanenbaum §5.3)**: トークンバケットは一定レート（tokens/秒）でバケットに追加され、バースト許容量（burst）を上限とする。リクエストはトークンを消費する。トークンがなければブロック（wait）またはリジェクト（try_acquire）する。Leaky Bucket（定率出力）と異なり、バースト処理に柔軟性がある。
+
+2. **RFC 4115 Two-Rate Three-Color Marker**: CIR（committed information rate）と PIR（peak information rate）の2レートでパケットを Green/Yellow/Red に分類する。本実装は簡略化してシングルレート + バーストのみ対応。プロダクション環境では Prometheus カウンター (`rate_limit_exceeded_total`) との組み合わせが推奨。
+
+3. **aiolimiter (2024)**: Python asyncio 向け Leaky Bucket 実装。`AsyncLimiter(max_rate, time_period)` API。本実装は Token Bucket を採用（バースト制御が必要なため）し、`asyncio.Lock` でコルーチン安全性を保証する点は同様。
+
+4. **NGINX rate limiting (2025)**: `limit_req_zone` で共有メモリゾーン定義、`limit_req rate=N r/s burst=M` でバースト処理。`nodelay` でバースト中のキューイング遅延を排除。本実装の `wait_for_token=False` は NGINX の `nodelay` 相当（即時リジェクト）。
+
+5. **Backpressure patterns (2025)**: asyncio における バックプレッシャー管理の要諦: (a) 有界キュー、(b) タイムアウト、(c) ロードシェディング。本実装は (c) を `RateLimitExceeded` として実装し、`rate_limit_exceeded` STATUS イベントで可観測性を提供。
+
+**設計決定:**
+
+- **`TokenBucketRateLimiter` の独立モジュール化**: `rate_limiter.py` として分離。オーケストレーター・Web API どちらからでも再利用可能。`asyncio.Lock` でコルーチン安全性を保証。
+- **`wait_for_token=True` がデフォルト**: Director のような長期稼働エージェントは待機を許容するが、REST API クライアントは `wait_for_token=False` で即時 429 を受け取るべき。
+- **`rate_limit_exceeded` STATUS イベント**: レート制限違反を bus に発行することで、TUI・WebSocket ハブ・Prometheus メトリクスが自動追跡可能。可観測性パターン (DESIGN.md §2) を遵守。
+- **設定ファイル統合**: `OrchestratorConfig.rate_limit_rps` / `rate_limit_burst` で YAML からレートを設定可能。`rate_limit_burst=0` の場合は `max(1, int(rps * 2))` を自動適用（最小バースト保証）。
+- **`GET /rate-limit` / `PUT /rate-limit` REST エンドポイント**: 稼働中のオーケストレーターのレートをリアルタイム変更可能（動的スロットリング）。`PUT /rate-limit` は `reconfigure()` を呼ぶことでバケット内トークンを継続しながらレートのみ変更。
+
+**デモシナリオ (v0.20.0):**
+- 問題: Graph Coloring (N=15, E=22, K=4) — NP-hard、chromatic number=3
+- 3 エージェント: `solver-greedy`（次数降順greedy）、`solver-backtrack`（バックトラック+AC-3）、`solver-local`（局所探索/シミュレーテッドアニーリング）
+- `rate_limit_rps=3.0 burst=3` で起動 → 最初の3タスクはバーストで即時投入
+- `PUT /rate-limit` で動的に `rate=10.0 burst=10` に変更してデモタスク投入
+- 各エージェントが `solver_{strategy}.py` を書いて実行 → `solution_{strategy}.txt` に出力
+- `problem.py` で各ソリューションをスコアリング → 最高スコアの戦略を選択
+- デモフォルダ: `~/Demonstration/v0.20.0-rate-limit-graph-coloring/`
+
+---
+
 ## 11. 今後の課題
 
 ### 機能
@@ -749,6 +794,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~中~~ ~~`POST /tasks/batch` — 複数タスクを一括提出~~ | **完了 (v0.15.0)** — `TaskBatchSubmit` + `POST /tasks/batch`; AHC デモで 3 タスクを並列提出 |
 | ~~中~~ ~~エージェント能力タグ + スマートディスパッチ~~ | **完了 (v0.18.0)** — `AgentConfig.tags` + `Task.required_tags` + `find_idle_worker(required_tags)` + REST `required_tags` パラメータ; 23 テスト |
 | ~~中~~ ~~キューポーズ/レジューム + タスク優先度ライブ更新~~ | **完了 (v0.19.0)** — `POST /orchestrator/pause|resume`, `GET /orchestrator/status`, `PATCH /tasks/{id}`; 18 テスト (302 合計) |
+| ~~中~~ ~~Rate limiting / バックプレッシャー (Token Bucket)~~ | **完了 (v0.20.0)** — `TokenBucketRateLimiter` + `GET /rate-limit`, `PUT /rate-limit`; `OrchestratorConfig.rate_limit_rps/burst`; `wait_for_token` param; 24 テスト (326 合計) |
 | 中 | `/plan` と `/tdd` の出力を RESULT メッセージとして親に自動送信 |
 | 低 | エージェントのコンテキスト使用量モニタリング |
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |
@@ -763,6 +809,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~中~~ ~~agent-a が実装 → agent-b がレビュー → agent-a が修正~~ | **完了 (v0.16.0)** — Peer review pipeline デモ |
 | ~~中~~ ~~能力タグによる専門エージェント自動選択~~ | **完了 (v0.18.0)** — python-expert / docs-writer; タスクが正しいエージェントにのみ配送されることを実証 |
 | ~~中~~ ~~ポーズ/レジューム + 優先度ライブ更新デモ~~ | **完了 (v0.19.0)** — 3 agents, WIS best-of-N, ポーズ中に3タスク投入, PATCH で優先度変更, レジューム後に優先度順ディスパッチ実証 |
+| ~~中~~ ~~Rate limit + Graph Coloring best-of-N~~ | **完了 (v0.20.0)** — 3 agents (greedy/backtrack/local), rate_limit_rps=3.0 burst=3, GET/PUT /rate-limit 実証, Graph Coloring 15-node 22-edge K=4 |
 
 **AHC best-of-N デモ完了 (v0.15.0)**:
 - 問題: Weighted Knapsack (N=15, C=50) — 最適解 score=154 (DP で検証済み)
