@@ -259,12 +259,91 @@
         "title": "SpawnAgent",
         "type": "object"
       },
+      "TaskBatchItem": {
+        "description": "A single item in a POST /tasks/batch request.\n\nExtends :class:`TaskSubmit` with an optional ``local_id`` so that tasks\nwithin the same batch can declare dependencies on each other by local name.\n``local_id`` references are resolved to global task IDs before the tasks\nare submitted to the orchestrator.\n\nDesign reference:\n- Apache Airflow: DAG nodes referenced by ``task_id`` within a DAG\n- AWS Step Functions: states referenced by name within a state machine\n- Tomasulo's algorithm: register renaming == local_id \u2192 global_task_id\n- DESIGN.md \u00a710.24 (v0.29.0)",
+        "properties": {
+          "depends_on": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Depends On",
+            "type": "array"
+          },
+          "local_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Local Id"
+          },
+          "max_retries": {
+            "default": 0,
+            "title": "Max Retries",
+            "type": "integer"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "default": {},
+            "title": "Metadata",
+            "type": "object"
+          },
+          "priority": {
+            "default": 0,
+            "title": "Priority",
+            "type": "integer"
+          },
+          "prompt": {
+            "title": "Prompt",
+            "type": "string"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "required_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Tags",
+            "type": "array"
+          },
+          "target_agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Agent"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "title": "TaskBatchItem",
+        "type": "object"
+      },
       "TaskBatchSubmit": {
         "description": "Request body for POST /tasks/batch.",
         "properties": {
           "tasks": {
             "items": {
-              "$ref": "#/components/schemas/TaskSubmit"
+              "$ref": "#/components/schemas/TaskBatchItem"
             },
             "title": "Tasks",
             "type": "array"
@@ -292,6 +371,14 @@
       },
       "TaskSubmit": {
         "properties": {
+          "depends_on": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Depends On",
+            "type": "array"
+          },
           "max_retries": {
             "default": 0,
             "title": "Max Retries",
@@ -1679,7 +1766,7 @@
         "summary": "Cancel a task by ID (queued or in-progress)"
       },
       "get": {
-        "description": "Return the status and details of a specific task by its ID.\n\nSearches the pending queue, in-progress tasks, and per-agent history.\n\nReturns:\n- ``task_id``: unique task identifier\n- ``prompt``: task prompt text\n- ``priority``: dispatch priority\n- ``status``: one of ``\"queued\"``, ``\"in_progress\"``, ``\"success\"``, ``\"error\"``\n- ``max_retries``: maximum allowed retries\n- ``retry_count``: current retry attempt count\n- 404 if the task ID is unknown.\n\nDesign reference: DESIGN.md \u00a710.21 (v0.26.0)",
+        "description": "Return the status and details of a specific task by its ID.\n\nSearches the pending queue, waiting queue, in-progress tasks, and\nper-agent history.\n\nReturns:\n- ``task_id``: unique task identifier\n- ``prompt``: task prompt text\n- ``priority``: dispatch priority\n- ``status``: one of ``\"queued\"``, ``\"waiting\"``, ``\"in_progress\"``, ``\"success\"``, ``\"error\"``\n- ``depends_on``: list of task IDs this task depends on (if any)\n- ``blocking``: list of task IDs that are waiting on this task (if any)\n- ``max_retries``: maximum allowed retries\n- ``retry_count``: current retry attempt count\n- 404 if the task ID is unknown.\n\nDesign reference: DESIGN.md \u00a710.21 (v0.26.0); DESIGN.md \u00a710.24 (v0.29.0)",
         "operationId": "get_task_tasks__task_id__get",
         "parameters": [
           {

@@ -51,12 +51,44 @@ class TaskSubmit(BaseModel):
     # Per-task retry count: how many times to re-enqueue on failure before DLQ.
     # Reference: AWS SQS maxReceiveCount; Netflix Hystrix; DESIGN.md §10.21 (v0.26.0)
     max_retries: int = 0
+    # Task-level dependency list: global task IDs that must complete before this
+    # task is dispatched.  Tasks with unmet deps are held in _waiting_tasks.
+    # Reference: GNU Make prerequisites; Dask task graph; DESIGN.md §10.24 (v0.29.0)
+    depends_on: list[str] = []
+
+
+class TaskBatchItem(BaseModel):
+    """A single item in a POST /tasks/batch request.
+
+    Extends :class:`TaskSubmit` with an optional ``local_id`` so that tasks
+    within the same batch can declare dependencies on each other by local name.
+    ``local_id`` references are resolved to global task IDs before the tasks
+    are submitted to the orchestrator.
+
+    Design reference:
+    - Apache Airflow: DAG nodes referenced by ``task_id`` within a DAG
+    - AWS Step Functions: states referenced by name within a state machine
+    - Tomasulo's algorithm: register renaming == local_id → global_task_id
+    - DESIGN.md §10.24 (v0.29.0)
+    """
+
+    local_id: str | None = None  # optional caller-defined name for intra-batch deps
+    prompt: str
+    priority: int = 0
+    metadata: dict[str, Any] = {}
+    reply_to: str | None = None
+    target_agent: str | None = None
+    required_tags: list[str] = []
+    max_retries: int = 0
+    # depends_on may reference: global task IDs OR sibling local_ids in this batch.
+    # Sibling local_ids are resolved to global IDs at submission time.
+    depends_on: list[str] = []
 
 
 class TaskBatchSubmit(BaseModel):
     """Request body for POST /tasks/batch."""
 
-    tasks: list[TaskSubmit]
+    tasks: list[TaskBatchItem]
 
 
 class AgentKillResponse(BaseModel):
@@ -441,6 +473,7 @@ def create_app(
             body.prompt,
             priority=body.priority,
             metadata=body.metadata,
+            depends_on=body.depends_on or None,
             reply_to=body.reply_to,
             target_agent=body.target_agent,
             required_tags=body.required_tags or None,
@@ -453,6 +486,8 @@ def create_app(
             "max_retries": task.max_retries,
             "retry_count": task.retry_count,
         }
+        if task.depends_on:
+            result["depends_on"] = task.depends_on
         if task.reply_to is not None:
             result["reply_to"] = task.reply_to
         if task.target_agent is not None:
@@ -475,15 +510,39 @@ def create_app(
           https://medium.com/paypal-tech/batch-an-api-to-bundle-multiple-paypal-rest-operations-6af6006e002
         """
         results: list[dict] = []
+        # Build local_id → global task_id map for intra-batch dependency resolution.
+        # Two-pass approach: first allocate UUIDs, then submit with resolved deps.
+        # Reference: Tomasulo's algorithm register renaming; DESIGN.md §10.24 (v0.29.0)
+        import uuid as _uuid  # noqa: PLC0415
+        local_to_global: dict[str, str] = {}
+        # Pre-allocate task IDs for all items that have a local_id
         for item in body.tasks:
+            if item.local_id:
+                local_to_global[item.local_id] = str(_uuid.uuid4())
+
+        # Now submit each task, resolving local_ids in depends_on to global IDs
+        for item in body.tasks:
+            # Resolve depends_on: replace local_id refs with global task IDs
+            resolved_deps: list[str] = []
+            for dep in item.depends_on:
+                if dep in local_to_global:
+                    resolved_deps.append(local_to_global[dep])
+                else:
+                    # Assume it is already a global task ID
+                    resolved_deps.append(dep)
+
+            # Use the pre-allocated ID if this item has a local_id
+            # We submit via a thin wrapper that lets us pass a pre-allocated ID
             task = await orchestrator.submit_task(
                 item.prompt,
                 priority=item.priority,
                 metadata=item.metadata,
+                depends_on=resolved_deps or None,
                 reply_to=item.reply_to,
                 target_agent=item.target_agent,
                 required_tags=item.required_tags or None,
                 max_retries=item.max_retries,
+                _task_id=local_to_global.get(item.local_id) if item.local_id else None,
             )
             record: dict = {
                 "task_id": task.id,
@@ -492,6 +551,10 @@ def create_app(
                 "max_retries": task.max_retries,
                 "retry_count": task.retry_count,
             }
+            if item.local_id:
+                record["local_id"] = item.local_id
+            if task.depends_on:
+                record["depends_on"] = task.depends_on
             if task.reply_to is not None:
                 record["reply_to"] = task.reply_to
             if task.target_agent is not None:
@@ -523,18 +586,25 @@ def create_app(
         """
         all_tasks: list[dict] = []
 
-        # 1. Pending (queued) tasks
+        # 1. Pending (queued) and waiting tasks
+        # list_tasks() returns both queued and waiting items, each with a "status" field.
         for item in orchestrator.list_tasks():
-            all_tasks.append({
+            task_status = item.get("status", "queued")  # "queued" or "waiting"
+            record: dict = {
                 "task_id": item["task_id"],
                 "prompt": item["prompt"],
                 "priority": item["priority"],
-                "status": "queued",
+                "status": task_status,
                 "max_retries": 0,
                 "retry_count": 0,
-                **({"required_tags": item["required_tags"]} if item.get("required_tags") else {}),
-                **({"target_agent": item["target_agent"]} if item.get("target_agent") else {}),
-            })
+            }
+            if item.get("depends_on"):
+                record["depends_on"] = item["depends_on"]
+            if item.get("required_tags"):
+                record["required_tags"] = item["required_tags"]
+            if item.get("target_agent"):
+                record["target_agent"] = item["target_agent"]
+            all_tasks.append(record)
 
         # Enrich queued tasks with retry fields from _active_tasks if tracked
         queued_ids = {t["task_id"] for t in all_tasks}
@@ -1096,34 +1166,65 @@ def create_app(
     async def get_task(task_id: str) -> dict:
         """Return the status and details of a specific task by its ID.
 
-        Searches the pending queue, in-progress tasks, and per-agent history.
+        Searches the pending queue, waiting queue, in-progress tasks, and
+        per-agent history.
 
         Returns:
         - ``task_id``: unique task identifier
         - ``prompt``: task prompt text
         - ``priority``: dispatch priority
-        - ``status``: one of ``"queued"``, ``"in_progress"``, ``"success"``, ``"error"``
+        - ``status``: one of ``"queued"``, ``"waiting"``, ``"in_progress"``, ``"success"``, ``"error"``
+        - ``depends_on``: list of task IDs this task depends on (if any)
+        - ``blocking``: list of task IDs that are waiting on this task (if any)
         - ``max_retries``: maximum allowed retries
         - ``retry_count``: current retry attempt count
         - 404 if the task ID is unknown.
 
-        Design reference: DESIGN.md §10.21 (v0.26.0)
+        Design reference: DESIGN.md §10.21 (v0.26.0); DESIGN.md §10.24 (v0.29.0)
         """
+        # 0. Check _waiting_tasks first (tasks held for dependency resolution)
+        waiting_task = orchestrator.get_waiting_task(task_id)
+        if waiting_task is not None:
+            blocking = orchestrator._task_blocking(task_id)
+            resp: dict = {
+                "task_id": task_id,
+                "prompt": waiting_task.prompt,
+                "priority": waiting_task.priority,
+                "status": "waiting",
+                "depends_on": waiting_task.depends_on,
+                "max_retries": waiting_task.max_retries,
+                "retry_count": waiting_task.retry_count,
+            }
+            if blocking:
+                resp["blocking"] = blocking
+            if waiting_task.required_tags:
+                resp["required_tags"] = waiting_task.required_tags
+            if waiting_task.target_agent:
+                resp["target_agent"] = waiting_task.target_agent
+            return resp
+
         # 1. Check pending queue
         for item in orchestrator.list_tasks():
             if item["task_id"] == task_id:
                 # Enrich with retry fields from _active_tasks if present
                 active = orchestrator._active_tasks.get(task_id)
-                return {
+                blocking = orchestrator._task_blocking(task_id)
+                resp = {
                     "task_id": task_id,
                     "prompt": item["prompt"],
                     "priority": item["priority"],
-                    "status": "queued",
+                    "status": item.get("status", "queued"),
+                    "depends_on": item.get("depends_on", []),
                     "max_retries": active.max_retries if active else 0,
                     "retry_count": active.retry_count if active else 0,
-                    **({"required_tags": item["required_tags"]} if item.get("required_tags") else {}),
-                    **({"target_agent": item["target_agent"]} if item.get("target_agent") else {}),
                 }
+                if blocking:
+                    resp["blocking"] = blocking
+                if item.get("required_tags"):
+                    resp["required_tags"] = item["required_tags"]
+                if item.get("target_agent"):
+                    resp["target_agent"] = item["target_agent"]
+                return resp
 
         # 2. Check in-progress tasks
         for agent in orchestrator.list_agents():
@@ -1131,15 +1232,20 @@ def create_app(
             if agent_obj is not None and agent_obj._current_task is not None:
                 ct = agent_obj._current_task
                 if ct.id == task_id:
-                    return {
+                    blocking = orchestrator._task_blocking(task_id)
+                    resp = {
                         "task_id": ct.id,
                         "prompt": ct.prompt,
                         "priority": ct.priority,
                         "status": "in_progress",
+                        "depends_on": ct.depends_on,
                         "agent_id": agent["id"],
                         "max_retries": ct.max_retries,
                         "retry_count": ct.retry_count,
                     }
+                    if blocking:
+                        resp["blocking"] = blocking
+                    return resp
 
         # 3. Check per-agent history
         for agent in orchestrator.list_agents():
@@ -1147,7 +1253,8 @@ def create_app(
             for record in history:
                 if record.get("task_id") == task_id:
                     active = orchestrator._active_tasks.get(task_id)
-                    return {
+                    blocking = orchestrator._task_blocking(task_id)
+                    hist_resp: dict = {
                         "task_id": task_id,
                         "prompt": record.get("prompt", ""),
                         "priority": 0,
@@ -1160,6 +1267,11 @@ def create_app(
                         "max_retries": active.max_retries if active else 0,
                         "retry_count": active.retry_count if active else 0,
                     }
+                    if active and active.depends_on:
+                        hist_resp["depends_on"] = active.depends_on
+                    if blocking:
+                        hist_resp["blocking"] = blocking
+                    return hist_resp
 
         raise HTTPException(status_code=404, detail=f"Task {task_id!r} not found")
 

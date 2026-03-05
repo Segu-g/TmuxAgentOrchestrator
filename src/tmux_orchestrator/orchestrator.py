@@ -79,6 +79,22 @@ class Orchestrator:
         self._dlq: list[dict] = []
         # Set of task IDs that have completed successfully (used for depends_on checks)
         self._completed_tasks: set[str] = set()
+        # Set of task IDs that have failed (retries exhausted, no error recovery).
+        # Used to cascade dependency_failed to waiting tasks.
+        # Reference: GNU Make prerequisite failure; Apache Airflow upstream_failed state.
+        # DESIGN.md §10.24 (v0.29.0)
+        self._failed_tasks: set[str] = set()
+        # Tasks waiting for their depends_on prerequisites to be satisfied.
+        # key = task_id, value = Task.  Tasks are moved to the queue when ALL
+        # of their depends_on IDs appear in _completed_tasks.
+        # Reference: Tomasulo's algorithm register-renaming; Dask task graph;
+        # GNU Make dependency resolution; DESIGN.md §10.24 (v0.29.0)
+        self._waiting_tasks: dict[str, Task] = {}
+        # Reverse lookup: dep_task_id → [waiting_task_ids].
+        # Used for O(1) wake-up after a dependency completes or fails.
+        # Reference: Apache Spark DAG scheduler; POSIX make prerequisites.
+        # DESIGN.md §10.24 (v0.29.0)
+        self._task_dependents: dict[str, list[str]] = {}
         # Idempotency deduplication: key → task_id, with expiry timestamps
         _IKEY_TTL = 3600.0
         self._idempotency_keys: dict[str, str] = {}
@@ -356,6 +372,7 @@ class Orchestrator:
         required_tags: list[str] | None = None,
         wait_for_token: bool = True,
         max_retries: int = 0,
+        _task_id: str | None = None,
     ) -> Task:
         """Submit a new task to the priority queue.
 
@@ -404,7 +421,7 @@ class Orchestrator:
                 f"Task queue is full (maxsize={self.config.task_queue_maxsize})"
             )
         task = Task(
-            id=str(uuid.uuid4()),
+            id=_task_id if _task_id is not None else str(uuid.uuid4()),
             prompt=prompt,
             priority=priority,
             metadata=metadata or {},
@@ -420,22 +437,70 @@ class Orchestrator:
             self._cleanup_expired_ikeys()
         if reply_to is not None:
             self._task_reply_to[task.id] = reply_to
-        self._task_seq += 1
-        await self._task_queue.put((priority, self._task_seq, task))
-        await self.bus.publish(Message(
-            type=MessageType.STATUS,
-            from_id="__orchestrator__",
-            payload={
-                "event": "task_queued",
-                "task_id": task.id,
-                "prompt": prompt,
-                **({"reply_to": reply_to} if reply_to is not None else {}),
-                **({"target_agent": target_agent} if target_agent is not None else {}),
-                **({"required_tags": required_tags} if required_tags else {}),
-            },
-        ))
-        logger.info("Task %s queued (priority=%d, reply_to=%s, required_tags=%s)",
-                    task.id, priority, reply_to, required_tags)
+        # Dependency check: if all deps are already complete, enqueue immediately.
+        # If any dep has already FAILED, fail this task immediately too.
+        # Otherwise hold in _waiting_tasks until deps are satisfied.
+        # Reference: GNU Make prerequisite resolution; Dask task graph scheduler;
+        # Apache Spark DAG scheduler; POSIX make prerequisites.
+        # DESIGN.md §10.24 (v0.29.0)
+        unmet_deps = [dep for dep in task.depends_on if dep not in self._completed_tasks]
+        failed_deps = [dep for dep in task.depends_on if dep in self._failed_tasks]
+        if failed_deps:
+            # Immediate cascade failure — do not enqueue at all
+            self._failed_tasks.add(task.id)
+            failed_dep = failed_deps[0]
+            await self.bus.publish(Message(
+                type=MessageType.STATUS,
+                from_id="__orchestrator__",
+                payload={
+                    "event": "task_dependency_failed",
+                    "task_id": task.id,
+                    "failed_dep": failed_dep,
+                    "error": f"dependency_failed:{failed_dep}",
+                },
+            ))
+            logger.warning(
+                "Task %s failed immediately: dependency %s already failed",
+                task.id, failed_dep,
+            )
+        elif not unmet_deps:
+            # All deps already done — enqueue immediately
+            self._task_seq += 1
+            await self._task_queue.put((priority, self._task_seq, task))
+            await self.bus.publish(Message(
+                type=MessageType.STATUS,
+                from_id="__orchestrator__",
+                payload={
+                    "event": "task_queued",
+                    "task_id": task.id,
+                    "prompt": prompt,
+                    **({"reply_to": reply_to} if reply_to is not None else {}),
+                    **({"target_agent": target_agent} if target_agent is not None else {}),
+                    **({"required_tags": required_tags} if required_tags else {}),
+                },
+            ))
+            logger.info("Task %s queued (priority=%d, reply_to=%s, required_tags=%s)",
+                        task.id, priority, reply_to, required_tags)
+        else:
+            # Hold task until deps are satisfied
+            self._waiting_tasks[task.id] = task
+            for dep in unmet_deps:
+                self._task_dependents.setdefault(dep, []).append(task.id)
+            await self.bus.publish(Message(
+                type=MessageType.STATUS,
+                from_id="__orchestrator__",
+                payload={
+                    "event": "task_waiting",
+                    "task_id": task.id,
+                    "prompt": prompt,
+                    "depends_on": task.depends_on,
+                    "unmet_deps": unmet_deps,
+                },
+            ))
+            logger.info(
+                "Task %s waiting for deps %s (priority=%d)",
+                task.id, unmet_deps, priority,
+            )
         return task
 
     def _cleanup_expired_ikeys(self) -> None:
@@ -447,18 +512,42 @@ class Orchestrator:
             self._ikey_timestamps.pop(k, None)
 
     def list_tasks(self) -> list[dict]:
-        """Return a snapshot of the pending task queue (non-destructive)."""
+        """Return a snapshot of the pending task queue (non-destructive).
+
+        Includes tasks currently in the priority queue (``status="queued"``) plus
+        tasks held in ``_waiting_tasks`` waiting for dependency resolution
+        (``status="waiting"``).  The waiting tasks are appended after the
+        queued tasks.
+        """
         items = list(self._task_queue._queue)  # type: ignore[attr-defined]
-        return [
+        result = [
             {
                 "priority": p,
                 "task_id": t.id,
                 "prompt": t.prompt,
+                "status": "queued",
+                "depends_on": t.depends_on,
                 **({"required_tags": t.required_tags} if t.required_tags else {}),
                 **({"target_agent": t.target_agent} if t.target_agent else {}),
             }
             for p, _seq, t in sorted(items, key=lambda x: (x[0], x[1]))
         ]
+        # Append waiting tasks (held pending dependency resolution)
+        for t in self._waiting_tasks.values():
+            result.append({
+                "priority": t.priority,
+                "task_id": t.id,
+                "prompt": t.prompt,
+                "status": "waiting",
+                "depends_on": t.depends_on,
+                **({"required_tags": t.required_tags} if t.required_tags else {}),
+                **({"target_agent": t.target_agent} if t.target_agent else {}),
+            })
+        return result
+
+    def get_waiting_task(self, task_id: str) -> Task | None:
+        """Return a waiting task by ID, or None if not in _waiting_tasks."""
+        return self._waiting_tasks.get(task_id)
 
     async def update_task_priority(self, task_id: str, new_priority: int) -> bool:
         """Update the priority of a pending task in-place.
@@ -574,7 +663,30 @@ class Orchestrator:
             logger.info("Task %s cancelled (in-progress, interrupt sent)", task_id)
             return True
 
-        # Case 2: task is still queued — remove from heap directly.
+        # Case 2: task is in _waiting_tasks (held pending dependency resolution).
+        if task_id in self._waiting_tasks:
+            waiting_task = self._waiting_tasks.pop(task_id)
+            # Remove from all reverse-lookup lists
+            for dep in waiting_task.depends_on:
+                if dep in self._task_dependents:
+                    try:
+                        self._task_dependents[dep].remove(task_id)
+                    except ValueError:
+                        pass
+            await self.bus.publish(Message(
+                type=MessageType.STATUS,
+                from_id="__orchestrator__",
+                payload={
+                    "event": "task_cancelled",
+                    "task_id": task_id,
+                    "was_running": False,
+                    "was_waiting": True,
+                },
+            ))
+            logger.info("Task %s cancelled from waiting (dependency hold)", task_id)
+            return True
+
+        # Case 3: task is still queued — remove from heap directly.
         items = list(self._task_queue._queue)  # type: ignore[attr-defined]
         new_items = [(p, seq, t) for p, seq, t in items if t.id != task_id]
         if len(new_items) == len(items):
@@ -798,24 +910,6 @@ class Orchestrator:
                     },
                 ))
                 logger.info("Task %s skipped (tombstone-cancelled)", task.id)
-                continue
-
-            # Check task dependency graph: re-queue if any dependency is not yet done.
-            unmet = [dep for dep in task.depends_on if dep not in self._completed_tasks]
-            if unmet:
-                retry_count = task.metadata.get("_retry_count", 0) + 1
-                task.metadata["_retry_count"] = retry_count
-                if retry_count >= self.config.dlq_max_retries:
-                    await self._dead_letter(
-                        task, f"unmet dependencies {unmet} after {retry_count} retries"
-                    )
-                else:
-                    self._task_seq += 1
-                    await self._task_queue.put((task.priority, self._task_seq, task))
-                    # Short yield so the route loop can process RESULTs and update
-                    # _completed_tasks between re-queue attempts.  0.05s (was 0.2s)
-                    # prevents busy-spinning without causing O(n²) pipeline delay.
-                    await asyncio.sleep(0.05)
                 continue
 
             # --- Agent selection: respect target_agent routing ---
@@ -1103,6 +1197,10 @@ class Orchestrator:
                     self._workflow_manager.on_task_complete(task_id)
                     # Clean up active task tracking on success.
                     self._active_tasks.pop(task_id, None)
+                    # Wake up any tasks waiting on this dependency.
+                    # Reference: GNU Make prerequisite resolution; Dask task graph;
+                    # Apache Spark DAG scheduler. DESIGN.md §10.24 (v0.29.0)
+                    await self._on_dep_satisfied(task_id)
                 elif error and task_id:
                     # Check if task has retries remaining before dead-lettering.
                     task = self._active_tasks.get(task_id)
@@ -1132,6 +1230,12 @@ class Orchestrator:
                     else:
                         self._workflow_manager.on_task_failed(task_id)
                         self._active_tasks.pop(task_id, None)
+                        # Mark as finally failed and cascade to waiting dependents.
+                        # Reference: Apache Airflow upstream_failed state;
+                        # GNU Make prerequisite failure propagation.
+                        # DESIGN.md §10.24 (v0.29.0)
+                        self._failed_tasks.add(task_id)
+                        await self._on_dep_failed(task_id)
                 # Record task in per-agent history.
                 self._record_agent_history(msg)
                 # reply_to routing: deliver RESULT to the requesting agent's mailbox.
@@ -1162,6 +1266,110 @@ class Orchestrator:
                     ))
                     logger.info("Agent %s drained and stopped after task completion", drain_agent_id)
             self._bus_queue.task_done()
+
+    # ------------------------------------------------------------------
+    # Dependency tracking helpers (v0.29.0)
+    # ------------------------------------------------------------------
+
+    async def _on_dep_satisfied(self, completed_task_id: str) -> None:
+        """Called when *completed_task_id* succeeds.
+
+        For each waiting task that listed *completed_task_id* as a dependency,
+        check whether ALL of its dependencies are now in ``_completed_tasks``.
+        If so, move the task from ``_waiting_tasks`` to the priority queue.
+
+        Reference: GNU Make prerequisite resolution; Tomasulo's algorithm;
+        Dask task graph scheduler; Apache Spark DAG scheduler.
+        DESIGN.md §10.24 (v0.29.0)
+        """
+        waiting_ids = list(self._task_dependents.pop(completed_task_id, []))
+        for waiting_id in waiting_ids:
+            waiting_task = self._waiting_tasks.get(waiting_id)
+            if waiting_task is None:
+                # Already released or cancelled
+                continue
+            still_unmet = [
+                dep for dep in waiting_task.depends_on
+                if dep not in self._completed_tasks
+            ]
+            if not still_unmet:
+                # All deps now satisfied — move to queue
+                del self._waiting_tasks[waiting_id]
+                self._task_seq += 1
+                await self._task_queue.put(
+                    (waiting_task.priority, self._task_seq, waiting_task)
+                )
+                await self.bus.publish(Message(
+                    type=MessageType.STATUS,
+                    from_id="__orchestrator__",
+                    payload={
+                        "event": "task_queued",
+                        "task_id": waiting_id,
+                        "prompt": waiting_task.prompt,
+                        "released_by": completed_task_id,
+                    },
+                ))
+                logger.info(
+                    "Task %s released from waiting (dep %s completed)",
+                    waiting_id, completed_task_id,
+                )
+                # Remove this waiting_id from any remaining dep reverse-lookups.
+                for dep in waiting_task.depends_on:
+                    if dep != completed_task_id and dep in self._task_dependents:
+                        try:
+                            self._task_dependents[dep].remove(waiting_id)
+                        except ValueError:
+                            pass
+
+    async def _on_dep_failed(self, failed_task_id: str) -> None:
+        """Called when *failed_task_id* finally fails (retries exhausted).
+
+        Cascades failure to all tasks waiting on *failed_task_id*:
+        - Removes them from ``_waiting_tasks``
+        - Adds them to ``_failed_tasks``
+        - Publishes STATUS ``task_dependency_failed`` for each
+        - Recursively cascades to their own dependents (A→B→C cascade)
+
+        Reference: Apache Airflow upstream_failed state; GNU Make propagated
+        prerequisite failure; POSIX make prerequisites; DESIGN.md §10.24 (v0.29.0)
+        """
+        waiting_ids = list(self._task_dependents.pop(failed_task_id, []))
+        for waiting_id in waiting_ids:
+            if waiting_id not in self._waiting_tasks:
+                # Already handled (e.g., cancelled)
+                continue
+            waiting_task = self._waiting_tasks.pop(waiting_id)
+            self._failed_tasks.add(waiting_id)
+            # Clean up any other reverse-lookup entries for this task
+            for dep in waiting_task.depends_on:
+                if dep != failed_task_id and dep in self._task_dependents:
+                    try:
+                        self._task_dependents[dep].remove(waiting_id)
+                    except ValueError:
+                        pass
+            await self.bus.publish(Message(
+                type=MessageType.STATUS,
+                from_id="__orchestrator__",
+                payload={
+                    "event": "task_dependency_failed",
+                    "task_id": waiting_id,
+                    "failed_dep": failed_task_id,
+                    "error": f"dependency_failed:{failed_task_id}",
+                },
+            ))
+            logger.warning(
+                "Task %s failed: dependency %s failed (cascade)",
+                waiting_id, failed_task_id,
+            )
+            # Recurse: cascade failures to tasks waiting on waiting_id
+            await self._on_dep_failed(waiting_id)
+
+    def _task_blocking(self, task_id: str) -> list[str]:
+        """Return the list of task IDs that are waiting on *task_id*.
+
+        Used by REST ``GET /tasks/{task_id}`` to expose the ``blocking`` field.
+        """
+        return list(self._task_dependents.get(task_id, []))
 
     def _buffer_director_result(self, result_msg: Message) -> None:
         """Buffer a worker RESULT for injection into the next Director chat turn."""
