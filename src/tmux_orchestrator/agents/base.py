@@ -82,6 +82,7 @@ class Agent(ABC):
         # Worktree isolation (set by concrete subclasses after super().__init__)
         self._worktree_manager: "WorktreeManager | None" = None
         self._isolate: bool = True
+        self._merge_on_stop: bool = False
         self._cwd_override: Path | None = None
         self.worktree_path: Path | None = None
 
@@ -230,11 +231,21 @@ class Agent(ABC):
         return path
 
     async def _teardown_worktree(self) -> None:
-        """Remove the agent's worktree (no-op when not isolated or not set up)."""
+        """Remove the agent's worktree (no-op when not isolated or not set up).
+
+        When ``_merge_on_stop`` is True, the agent's worktree branch is
+        squash-merged into the main repo HEAD before removal (see
+        ``WorktreeManager.teardown(merge_to_base=True)``).
+        """
         if self._worktree_manager is None or self.worktree_path is None:
             return
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._worktree_manager.teardown, self.id)
+        await loop.run_in_executor(
+            None,
+            lambda: self._worktree_manager.teardown(  # type: ignore[union-attr]
+                self.id, merge_to_base=self._merge_on_stop
+            ),
+        )
         self.worktree_path = None
 
     def _write_context_file(self, cwd: Path) -> None:

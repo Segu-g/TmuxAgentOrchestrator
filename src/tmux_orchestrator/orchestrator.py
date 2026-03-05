@@ -1015,6 +1015,7 @@ class Orchestrator:
                     tags=msg.payload.get("tags"),
                     system_prompt=msg.payload.get("system_prompt"),
                     isolate=msg.payload.get("isolate", True),
+                    merge_on_stop=msg.payload.get("merge_on_stop", False),
                     command=msg.payload.get("command"),
                     role=msg.payload.get("role", "worker"),
                     task_timeout=msg.payload.get("task_timeout"),
@@ -1067,6 +1068,7 @@ class Orchestrator:
             context_files=template_cfg.context_files,
             context_files_root=_Path.cwd() if template_cfg.context_files else None,
             tags=template_cfg.tags,
+            merge_on_stop=template_cfg.merge_on_stop,
         )
 
         self.registry.register(agent, parent_id=parent_id)
@@ -1094,6 +1096,7 @@ class Orchestrator:
         tags: list[str] | None = None,
         system_prompt: str | None = None,
         isolate: bool = True,
+        merge_on_stop: bool = False,
         command: str | None = None,
         role: str = "worker",
         task_timeout: int | None = None,
@@ -1167,6 +1170,7 @@ class Orchestrator:
             mailbox=mailbox,
             worktree_manager=effective_wm,
             isolate=isolate,
+            merge_on_stop=merge_on_stop,
             session_name=self.config.session_name,
             web_base_url=self.config.web_base_url,
             task_timeout=effective_timeout,

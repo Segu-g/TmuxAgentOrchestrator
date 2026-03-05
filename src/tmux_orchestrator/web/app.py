@@ -83,6 +83,7 @@ class DynamicAgentCreate(BaseModel):
     tags: list[str] = []
     system_prompt: str | None = None
     isolate: bool = True
+    merge_on_stop: bool = False
     command: str | None = None
     role: str = "worker"
     task_timeout: int | None = None
@@ -776,6 +777,7 @@ def create_app(
                 tags=body.tags or [],
                 system_prompt=body.system_prompt,
                 isolate=body.isolate,
+                merge_on_stop=body.merge_on_stop,
                 command=body.command,
                 role=body.role,
                 task_timeout=body.task_timeout,

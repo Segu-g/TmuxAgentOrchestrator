@@ -32,6 +32,12 @@ class AgentConfig:
     # ALL required tags.  Reference: FIPA Directory Facilitator (2002),
     # Kubernetes Node Affinity (nodeSelector pattern).
     tags: list[str] = field(default_factory=list)
+    # --- Worktree lifecycle ---
+    # When True and isolate=True, the orchestrator squash-merges the agent's
+    # worktree branch into the main repo HEAD before teardown.  Commits made
+    # by the agent inside its worktree therefore land on the original branch
+    # automatically.  Set to False (default) to delete commits on stop.
+    merge_on_stop: bool = False
 
 
 @dataclass
@@ -86,6 +92,7 @@ def load_config(path: str | Path) -> OrchestratorConfig:
             system_prompt=a.get("system_prompt"),
             context_files=a.get("context_files", []),
             tags=a.get("tags", []),
+            merge_on_stop=a.get("merge_on_stop", False),
         )
         for a in data.get("agents", [])
     ]

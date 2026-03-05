@@ -83,10 +83,25 @@ class WorktreeManager:
             self._owned[agent_id] = path
             return path
 
-    def teardown(self, agent_id: str) -> None:
+    def teardown(self, agent_id: str, *, merge_to_base: bool = False) -> None:
         """Remove the worktree and branch for *agent_id*.
 
         No-op (beyond deregistration) for shared-worktree agents.
+
+        Parameters
+        ----------
+        agent_id:
+            The agent whose worktree should be torn down.
+        merge_to_base:
+            When ``True``, attempt a ``git merge --squash`` of the agent's
+            branch into the current HEAD of the main repo before removing the
+            worktree.  If the merge fails (conflicts, no new commits, etc.)
+            the error is logged and teardown continues — the branch is still
+            deleted, so callers should consider using ``keep_branch()`` first
+            if a conflict-resolution retry is needed.
+
+            Useful when the agent was asked to produce code that should land
+            on the main branch automatically after the task completes.
         """
         with self._lock:
             if agent_id in self._shared:
@@ -98,6 +113,10 @@ class WorktreeManager:
                 return
 
             branch = f"worktree/{agent_id}"
+
+            if merge_to_base:
+                self._merge_branch(branch)
+
             subprocess.run(
                 ["git", "worktree", "remove", "--force", str(path)],
                 cwd=self._repo_root,
@@ -109,6 +128,35 @@ class WorktreeManager:
                 capture_output=True,
             )
 
+    def keep_branch(self, agent_id: str) -> None:
+        """Remove the worktree for *agent_id* but keep the git branch.
+
+        This allows the caller to inspect or merge the branch manually after
+        the agent stops without the commits being lost at teardown.
+
+        The branch ``worktree/{agent_id}`` remains in the local repository;
+        the caller is responsible for deleting it when no longer needed::
+
+            git branch -D worktree/{agent_id}
+
+        No-op for shared-worktree agents.
+        """
+        with self._lock:
+            if agent_id in self._shared:
+                self._shared.discard(agent_id)
+                return
+
+            path = self._owned.pop(agent_id, None)
+            if path is None:
+                return
+
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(path)],
+                cwd=self._repo_root,
+                capture_output=True,
+            )
+            # Branch is intentionally NOT deleted here.
+
     def worktree_path(self, agent_id: str) -> Path | None:
         """Return the current worktree path for *agent_id*, or ``None`` if not set up."""
         with self._lock:
@@ -117,6 +165,59 @@ class WorktreeManager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _merge_branch(self, branch: str) -> None:
+        """Squash-merge *branch* into the current HEAD of the main repo.
+
+        Uses ``--squash`` so the merge produces a single commit rather than
+        replaying each agent commit, keeping the main branch history clean.
+        On failure the error is logged but execution continues.
+        """
+        import logging as _logging  # noqa: PLC0415
+        _log = _logging.getLogger(__name__)
+
+        # Check if branch has any commits not in HEAD
+        diff = subprocess.run(
+            ["git", "log", f"HEAD..{branch}", "--oneline"],
+            cwd=self._repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if not diff.stdout.strip():
+            _log.info("merge_to_base: branch %s has no new commits — skipping", branch)
+            return
+
+        result = subprocess.run(
+            ["git", "merge", "--squash", branch],
+            cwd=self._repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            _log.warning(
+                "merge_to_base: squash merge of %s failed (conflicts?):\n%s",
+                branch,
+                result.stderr,
+            )
+            # Abort any partial merge
+            subprocess.run(
+                ["git", "merge", "--abort"],
+                cwd=self._repo_root,
+                capture_output=True,
+            )
+            return
+
+        # Commit the squash result
+        commit = subprocess.run(
+            ["git", "commit", "-m", f"merge: squash worktree branch {branch}"],
+            cwd=self._repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if commit.returncode == 0:
+            _log.info("merge_to_base: squash-merged %s into HEAD", branch)
+        else:
+            _log.warning("merge_to_base: commit failed: %s", commit.stderr)
 
     def _ensure_gitignore(self) -> None:
         """Ensure ``.worktrees/`` is listed in the repo's ``.gitignore``."""
