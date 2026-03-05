@@ -6,6 +6,62 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.21.0] — 2026-03-05
+
+### Added
+
+**Context Window Usage Monitoring + NOTES.md Update Notification**
+
+Closes two open §11 items: (a) agent context usage monitoring and
+(b) NOTES.md update notification when `/summarize` is run.
+
+Motivated by Liu et al. "Lost in the Middle" (TACL 2024): LLM accuracy
+degrades significantly when the context window is more than 75% full.
+Proactive compression via `/summarize` extends effective working time.
+
+- `ContextMonitor` — new `context_monitor.py` module:
+  - Polls every agent's tmux pane (configurable interval, default 5 s).
+  - Tracks `pane_chars` and estimates token count (`chars / 4`).
+  - Publishes `context_warning` STATUS event when estimated tokens
+    exceed `warn_threshold` fraction of `context_window_tokens`.
+  - Detects `NOTES.md` `mtime` changes; publishes `notes_updated`
+    STATUS event so parent/orchestrator agents can react.
+  - Optionally injects `/summarize` into the agent pane when threshold
+    is exceeded (`auto_summarize=True`). Injection is debounced: fires
+    at most once per threshold crossing; resets after NOTES.md update.
+  - Publishes `summarize_triggered` STATUS event when injection occurs.
+  - `get_stats(agent_id)` / `all_stats()` for REST consumption.
+- `AgentContextStats` dataclass: per-agent snapshot with `pane_chars`,
+  `estimated_tokens`, `context_pct`, `notes_mtime`, and counters
+  (`notes_updates`, `context_warnings`, `summarize_triggers`).
+- `Orchestrator._context_monitor` — created at `__init__` time;
+  `start()` calls `context_monitor.start()`, `stop()` calls `context_monitor.stop()`.
+- `Orchestrator.get_agent_context_stats(agent_id)` and
+  `all_agent_context_stats()` — delegate to `ContextMonitor`.
+- `GET /agents/{id}/stats` — per-agent context usage snapshot (404 when
+  agent not yet tracked).
+- `GET /context-stats` — context usage for all tracked agents.
+- `OrchestratorConfig` — four new fields:
+  - `context_window_tokens` (default 200 000 — Claude Sonnet/Opus)
+  - `context_warn_threshold` (default 0.75 — 75%)
+  - `context_auto_summarize` (default False)
+  - `context_monitor_poll` (default 5.0 seconds)
+- YAML config keys `context_window_tokens`, `context_warn_threshold`,
+  `context_auto_summarize`, `context_monitor_poll` loaded by `load_config`.
+- 21 new unit tests (347 total, all passing).
+- OpenAPI schema snapshot updated.
+
+### References
+
+- Liu et al. "Lost in the Middle: How Language Models Use Long Contexts"
+  TACL 2024 — https://arxiv.org/abs/2307.03172
+- Anthropic token counting docs (2025) —
+  https://platform.claude.com/docs/en/build-with-claude/token-counting
+- Anthropic context windows docs (2025) —
+  https://platform.claude.com/docs/en/build-with-claude/context-windows
+
+---
+
 ## [0.20.0] — 2026-03-05
 
 ### Added

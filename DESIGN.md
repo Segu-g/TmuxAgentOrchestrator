@@ -781,6 +781,59 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.17 調査記録 (v0.21.0, 2026-03-05)
+
+**実装テーマ: エージェントのコンテキスト使用量モニタリング + NOTES.md 更新通知**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| Context saturation | Lost in the Middle | Liu et al. "Lost in the Middle: How Language Models Use Long Contexts" TACL 2024 https://arxiv.org/abs/2307.03172 |
+| Token estimation | 4-char heuristic | Anthropic token counting docs (2025) https://platform.claude.com/docs/en/build-with-claude/token-counting |
+| Context window limits | 200k tokens (Sonnet/Opus) | Anthropic context windows docs (2025) https://platform.claude.com/docs/en/build-with-claude/context-windows |
+| File change detection | mtime polling | Python `Path.stat().st_mtime`; simpler than inotify for cross-platform compatibility |
+| Observer pattern | Pub/Sub STATUS event | DESIGN.md §2 — bus-based observability |
+
+**主要知見:**
+
+1. **Liu et al. "Lost in the Middle" (TACL 2024)**: LLM はコンテキストウィンドウの中央部にある情報を忘れやすい（「コンテキスト腐食」）。コンテキストが 75% を超えると精度が著しく低下するため、早期に `/summarize` で圧縮することが重要。
+
+2. **Token estimation (Anthropic 2025)**: 正確なトークン計数には `messages.countTokens` API が必要だが、ポーリングループでの呼び出しはコスト・遅延の観点から非現実的。4文字/トークンの保守的ヒューリスティックで実用上十分な精度が得られる。
+
+3. **mtime polling vs inotify**: inotify は Linux 固有でコード複雑度が高い。mtime ポーリング（5秒ごと）はクロスプラットフォームで実装が単純。エージェントの `/summarize` 実行後の NOTES.md 更新は数秒の遅延が許容されるため、mtime ポーリングで十分。
+
+4. **Feedback loop**: コンテキスト超過 → `/summarize` 自動注入 → NOTES.md 更新 → `notes_updated` イベント → 親エージェント/オーケストレーターへの通知 — というクローズドループが形成される。
+
+5. **REST endpoints**: `GET /agents/{id}/stats` および `GET /context-stats` でオブザーバビリティを提供。Prometheus メトリクス (`/metrics`) と組み合わせることで、コンテキスト状態の時系列観察が可能。
+
+**設計決定:**
+
+- **`ContextMonitor` の独立モジュール化**: `context_monitor.py` として分離。Orchestrator は `lambda: list(registry.all_agents().values())` を渡して agents を遅延取得（動的エージェント追加に対応）。
+- **`AgentContextStats` dataclass**: 各エージェントのコンテキスト状態をカプセル化。`warned`/`summarize_injected` フラグで重複イベント抑制。
+- **`notes_updated` イベント**: `from_id="__context_monitor__"` で区別可能。TUI・WebSocket ハブ・Director エージェントが自動購読可能。
+- **`auto_summarize=False` がデフォルト**: 本番環境ではエージェント動作への自動介入は保守的に。`config.yaml` で `context_auto_summarize: true` を明示的に設定した場合のみ有効化。
+- **`config.context_monitor_poll=5.0` (秒)**: tmux pane capture のオーバーヘッドを考慮。テストでは高い値 (99.0) を設定して自動ポーリングを無効化し、`_poll_all()` を直接呼ぶ。
+- **`summarize_injected` リセット**: NOTES.md 更新を検出したタイミングで `summarize_injected=False` にリセット。コンテキストが再び閾値を超えたときに再注入可能。
+
+**テスト (21テスト, 合計347テスト):**
+- pane_chars/estimated_tokens の計算精度
+- context_warning イベントの発行・重複抑制
+- notes_updated イベント (mtime 変化検出)
+- /summarize 自動注入の 1回限り保証・リセット
+- REST エンドポイントの 200/404 応答
+- YAML 設定の読み込み
+- Orchestrator との統合 (start/stop)
+
+**デモシナリオ (v0.21.0):**
+- 問題: Travelling Salesman Problem (TSP) with N=10 cities on a 2D grid
+- 3 エージェント: `solver-nn`（最近傍法）、`solver-2opt`（2-opt局所探索）、`solver-random`（ランダム再起動+2-opt）
+- 各エージェントが `solver_{strategy}.py` を書いて実行 → tour length を出力
+- `GET /context-stats` で各エージェントのコンテキスト使用量をリアルタイム確認
+- `context_warning` イベントを SSE ストリームで観察
+- オーケストレーターが最小ツアー長（勝者）を選択
+- デモフォルダ: `~/Demonstration/v0.21.0-context-monitor-tsp/`
+
+---
+
 ## 11. 今後の課題
 
 ### 機能
@@ -796,7 +849,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~中~~ ~~キューポーズ/レジューム + タスク優先度ライブ更新~~ | **完了 (v0.19.0)** — `POST /orchestrator/pause|resume`, `GET /orchestrator/status`, `PATCH /tasks/{id}`; 18 テスト (302 合計) |
 | ~~中~~ ~~Rate limiting / バックプレッシャー (Token Bucket)~~ | **完了 (v0.20.0)** — `TokenBucketRateLimiter` + `GET /rate-limit`, `PUT /rate-limit`; `OrchestratorConfig.rate_limit_rps/burst`; `wait_for_token` param; 24 テスト (326 合計) |
 | 中 | `/plan` と `/tdd` の出力を RESULT メッセージとして親に自動送信 |
-| 低 | エージェントのコンテキスト使用量モニタリング |
+| ~~低~~ ~~エージェントのコンテキスト使用量モニタリング~~ | **完了 (v0.21.0)** — `ContextMonitor` + `GET /agents/{id}/stats`, `GET /context-stats`; `context_warning`/`notes_updated`/`summarize_triggered` STATUS イベント; `context_auto_summarize`; 21 テスト (347 合計) |
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |
 | ~~低~~ ~~Prometheus メトリクス (`/metrics`)~~ | **完了 (v0.13.0)** — `GET /metrics` (prometheus_client 直接使用; 認証不要) |
 
@@ -810,6 +863,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~中~~ ~~能力タグによる専門エージェント自動選択~~ | **完了 (v0.18.0)** — python-expert / docs-writer; タスクが正しいエージェントにのみ配送されることを実証 |
 | ~~中~~ ~~ポーズ/レジューム + 優先度ライブ更新デモ~~ | **完了 (v0.19.0)** — 3 agents, WIS best-of-N, ポーズ中に3タスク投入, PATCH で優先度変更, レジューム後に優先度順ディスパッチ実証 |
 | ~~中~~ ~~Rate limit + Graph Coloring best-of-N~~ | **完了 (v0.20.0)** — 3 agents (greedy/backtrack/local), rate_limit_rps=3.0 burst=3, GET/PUT /rate-limit 実証, Graph Coloring 15-node 22-edge K=4 |
+| ~~低~~ ~~Context monitor + TSP best-of-N~~ | **完了 (v0.21.0)** — 3 agents (nearest-neighbor/2-opt/random-restart), GET /context-stats 実証, TSP N=10 cities |
 
 **AHC best-of-N デモ完了 (v0.15.0)**:
 - 問題: Weighted Knapsack (N=15, C=50) — 最適解 score=154 (DP で検証済み)
@@ -835,5 +889,5 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 |--------|------|
 | ~~高~~ ~~CLAUDE.md の動的更新（タスク変更時に役割説明を更新）~~ | **クローズ**: タスク生存期間 = エージェント生存期間の原則により不要。Workers は ephemeral であるべき (Issue #4, 2026-03-05) |
 | ~~中~~ ~~コンテキストファイルの自動コピー (`context_files` の実装)~~ | **完了 (v0.11.0)** — `ClaudeCodeAgent._copy_context_files()` |
-| 中 | `/summarize` による NOTES.md 更新をオーケストレーターに通知 |
+| ~~中~~ ~~`/summarize` による NOTES.md 更新をオーケストレーターに通知~~ | **完了 (v0.21.0)** — `ContextMonitor._check_notes_updated()` が mtime 変化を検出し `notes_updated` STATUS イベントを発行 |
 | ~~低~~ ~~エージェント間の共有スクラッチパッド~~ | **完了 (v0.16.0)** — `GET/PUT/DELETE /scratchpad/{key}` REST API; Blackboard パターン; 17 テスト |
