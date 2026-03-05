@@ -179,6 +179,42 @@
         "title": "DynamicAgentCreate",
         "type": "object"
       },
+      "GroupAddAgent": {
+        "description": "Request body for POST /groups/{name}/agents.",
+        "properties": {
+          "agent_id": {
+            "title": "Agent Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "title": "GroupAddAgent",
+        "type": "object"
+      },
+      "GroupCreate": {
+        "description": "Request body for POST /groups.\n\nCreates a named agent group (logical pool).  Tasks may declare\n``target_group`` to restrict dispatch to group members.\n\nDesign reference: Kubernetes Node Pools; AWS Auto Scaling Groups;\nApache Mesos Roles; DESIGN.md \u00a710.26 (v0.31.0).",
+        "properties": {
+          "agent_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Agent Ids",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "GroupCreate",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -330,6 +366,17 @@
               }
             ],
             "title": "Target Agent"
+          },
+          "target_group": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Group"
           }
         },
         "required": [
@@ -428,6 +475,17 @@
               }
             ],
             "title": "Target Agent"
+          },
+          "target_group": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Group"
           }
         },
         "required": [
@@ -578,6 +636,17 @@
               }
             ],
             "title": "Target Agent"
+          },
+          "target_group": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Group"
           }
         },
         "required": [
@@ -1151,6 +1220,251 @@
           }
         },
         "summary": "Real-time bus event stream (Server-Sent Events)"
+      }
+    },
+    "/groups": {
+      "get": {
+        "description": "Return all named agent groups with member agent IDs and their statuses.\n\nEach entry contains:\n- ``name``: group name\n- ``agent_ids``: sorted list of member agent IDs\n- ``agents``: list of ``{id, status}`` dicts for each member\n\nDesign reference: DESIGN.md \u00a710.26 (v0.31.0).",
+        "operationId": "list_groups_groups_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {},
+                  "title": "Response List Groups Groups Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List all agent groups"
+      },
+      "post": {
+        "description": "Create a new named agent group (logical pool).\n\nTasks may target this group via ``target_group`` in POST /tasks,\nPOST /tasks/batch, or POST /workflows.\n\nReturns 409 Conflict if a group with the same name already exists.\n\nDesign references:\n- Kubernetes Node Pools / Node Groups \u2014 logical grouping of cluster nodes.\n- AWS Auto Scaling Groups \u2014 named pools of homogeneous EC2 instances.\n- Apache Mesos Roles \u2014 cluster resource partitioning by name.\n- HashiCorp Nomad Task Groups \u2014 co-located task scheduling units.\n- DESIGN.md \u00a710.26 (v0.31.0)",
+        "operationId": "create_group_groups_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Group Groups Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create a named agent group"
+      }
+    },
+    "/groups/{group_name}": {
+      "delete": {
+        "description": "Remove a named agent group.\n\nReturns 404 if the group is unknown.  Does not affect the agents\nthemselves \u2014 only the group registration is removed.\n\nDesign reference: DESIGN.md \u00a710.26 (v0.31.0).",
+        "operationId": "delete_group_groups__group_name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "group_name",
+            "required": true,
+            "schema": {
+              "title": "Group Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Delete Group Groups  Group Name  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete an agent group"
+      },
+      "get": {
+        "description": "Return details for *group_name*: member agent IDs and their statuses.\n\nReturns 404 if the group is unknown.\n\nDesign reference: DESIGN.md \u00a710.26 (v0.31.0).",
+        "operationId": "get_group_groups__group_name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "group_name",
+            "required": true,
+            "schema": {
+              "title": "Group Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Group Groups  Group Name  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get a specific agent group"
+      }
+    },
+    "/groups/{group_name}/agents": {
+      "post": {
+        "description": "Add *agent_id* to the named group.\n\nReturns 404 if the group does not exist.  Adding an agent that is\nalready a member is idempotent (no error).\n\nDesign reference: DESIGN.md \u00a710.26 (v0.31.0).",
+        "operationId": "add_agent_to_group_groups__group_name__agents_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "group_name",
+            "required": true,
+            "schema": {
+              "title": "Group Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupAddAgent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Add Agent To Group Groups  Group Name  Agents Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add an agent to a group"
+      }
+    },
+    "/groups/{group_name}/agents/{agent_id}": {
+      "delete": {
+        "description": "Remove *agent_id* from the named group.\n\nReturns 404 if the group does not exist or the agent is not a member.\n\nDesign reference: DESIGN.md \u00a710.26 (v0.31.0).",
+        "operationId": "remove_agent_from_group_groups__group_name__agents__agent_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "group_name",
+            "required": true,
+            "schema": {
+              "title": "Group Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Remove Agent From Group Groups  Group Name  Agents  Agent Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove an agent from a group"
       }
     },
     "/orchestrator/autoscaler": {

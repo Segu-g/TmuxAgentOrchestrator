@@ -80,6 +80,10 @@ class _MockOrchestrator:
         from tmux_orchestrator.webhook_manager import WebhookManager
         return WebhookManager()
 
+    def get_group_manager(self):
+        from tmux_orchestrator.group_manager import GroupManager
+        return GroupManager()
+
 
 @pytest.fixture
 def fastapi_app():

@@ -51,6 +51,10 @@ class TaskSubmit(BaseModel):
     # Capability tags: ALL tags must be present in the target agent's tags list.
     # Reference: FIPA Directory Facilitator (2002); Kubernetes nodeSelector.
     required_tags: list[str] = []
+    # Named agent group: when set, task is only dispatched to agents in that group.
+    # Acts as AND-filter with required_tags.
+    # Reference: Kubernetes Node Pools; AWS Auto Scaling Groups; DESIGN.md §10.26 (v0.31.0)
+    target_group: str | None = None
     # Per-task retry count: how many times to re-enqueue on failure before DLQ.
     # Reference: AWS SQS maxReceiveCount; Netflix Hystrix; DESIGN.md §10.21 (v0.26.0)
     max_retries: int = 0
@@ -82,6 +86,7 @@ class TaskBatchItem(BaseModel):
     reply_to: str | None = None
     target_agent: str | None = None
     required_tags: list[str] = []
+    target_group: str | None = None
     max_retries: int = 0
     # depends_on may reference: global task IDs OR sibling local_ids in this batch.
     # Sibling local_ids are resolved to global IDs at submission time.
@@ -178,6 +183,26 @@ class AutoScalerUpdate(BaseModel):
     cooldown: float | None = None
 
 
+class GroupCreate(BaseModel):
+    """Request body for POST /groups.
+
+    Creates a named agent group (logical pool).  Tasks may declare
+    ``target_group`` to restrict dispatch to group members.
+
+    Design reference: Kubernetes Node Pools; AWS Auto Scaling Groups;
+    Apache Mesos Roles; DESIGN.md §10.26 (v0.31.0).
+    """
+
+    name: str
+    agent_ids: list[str] = []
+
+
+class GroupAddAgent(BaseModel):
+    """Request body for POST /groups/{name}/agents."""
+
+    agent_id: str
+
+
 class WorkflowTaskSpec(BaseModel):
     """A single task node in a workflow DAG submission.
 
@@ -197,6 +222,7 @@ class WorkflowTaskSpec(BaseModel):
     depends_on: list[str] = []
     target_agent: str | None = None
     required_tags: list[str] = []
+    target_group: str | None = None
     priority: int = 0
     # Per-task retry count: how many times to re-enqueue on failure before DLQ.
     # Reference: AWS SQS maxReceiveCount; Netflix Hystrix; DESIGN.md §10.21 (v0.26.0)
@@ -491,6 +517,7 @@ def create_app(
             reply_to=body.reply_to,
             target_agent=body.target_agent,
             required_tags=body.required_tags or None,
+            target_group=body.target_group,
             max_retries=body.max_retries,
         )
         result: dict = {
@@ -508,6 +535,8 @@ def create_app(
             result["target_agent"] = task.target_agent
         if task.required_tags:
             result["required_tags"] = task.required_tags
+        if task.target_group is not None:
+            result["target_group"] = task.target_group
         return result
 
     @app.post("/tasks/batch", summary="Submit multiple tasks in one request", dependencies=[Depends(auth)])
@@ -555,6 +584,7 @@ def create_app(
                 reply_to=item.reply_to,
                 target_agent=item.target_agent,
                 required_tags=item.required_tags or None,
+                target_group=item.target_group,
                 max_retries=item.max_retries,
                 _task_id=local_to_global.get(item.local_id) if item.local_id else None,
             )
@@ -575,6 +605,8 @@ def create_app(
                 record["target_agent"] = task.target_agent
             if task.required_tags:
                 record["required_tags"] = task.required_tags
+            if task.target_group is not None:
+                record["target_group"] = task.target_group
             results.append(record)
         return {"tasks": results}
 
@@ -986,6 +1018,7 @@ def create_app(
                 depends_on=global_deps or None,
                 target_agent=spec.get("target_agent"),
                 required_tags=spec.get("required_tags") or None,
+                target_group=spec.get("target_group"),
                 max_retries=spec.get("max_retries", 0),
             )
             local_to_global[spec["local_id"]] = task.id
@@ -1845,6 +1878,174 @@ def create_app(
             )
         deliveries = wm.last_deliveries(webhook_id, n=20)
         return [asdict(d) for d in deliveries]
+
+    # ------------------------------------------------------------------
+    # Agent group endpoints — named pools for targeted task dispatch (v0.31.0)
+    # ------------------------------------------------------------------
+
+    @app.post(
+        "/groups",
+        summary="Create a named agent group",
+        dependencies=[Depends(auth)],
+    )
+    async def create_group(body: GroupCreate) -> dict:
+        """Create a new named agent group (logical pool).
+
+        Tasks may target this group via ``target_group`` in POST /tasks,
+        POST /tasks/batch, or POST /workflows.
+
+        Returns 409 Conflict if a group with the same name already exists.
+
+        Design references:
+        - Kubernetes Node Pools / Node Groups — logical grouping of cluster nodes.
+        - AWS Auto Scaling Groups — named pools of homogeneous EC2 instances.
+        - Apache Mesos Roles — cluster resource partitioning by name.
+        - HashiCorp Nomad Task Groups — co-located task scheduling units.
+        - DESIGN.md §10.26 (v0.31.0)
+        """
+        gm = orchestrator.get_group_manager()
+        created = gm.create(body.name, body.agent_ids)
+        if not created:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Group {body.name!r} already exists",
+            )
+        return {"name": body.name, "agent_ids": body.agent_ids}
+
+    @app.get(
+        "/groups",
+        summary="List all agent groups",
+        dependencies=[Depends(auth)],
+    )
+    async def list_groups() -> list:
+        """Return all named agent groups with member agent IDs and their statuses.
+
+        Each entry contains:
+        - ``name``: group name
+        - ``agent_ids``: sorted list of member agent IDs
+        - ``agents``: list of ``{id, status}`` dicts for each member
+
+        Design reference: DESIGN.md §10.26 (v0.31.0).
+        """
+        gm = orchestrator.get_group_manager()
+        all_agents = {a["id"]: a for a in orchestrator.list_agents()}
+        result = []
+        for entry in gm.list_all():
+            agents_detail = [
+                {"id": aid, "status": all_agents[aid]["status"]}
+                if aid in all_agents
+                else {"id": aid, "status": "unknown"}
+                for aid in entry["agent_ids"]
+            ]
+            result.append({
+                "name": entry["name"],
+                "agent_ids": entry["agent_ids"],
+                "agents": agents_detail,
+            })
+        return result
+
+    @app.get(
+        "/groups/{group_name}",
+        summary="Get a specific agent group",
+        dependencies=[Depends(auth)],
+    )
+    async def get_group(group_name: str) -> dict:
+        """Return details for *group_name*: member agent IDs and their statuses.
+
+        Returns 404 if the group is unknown.
+
+        Design reference: DESIGN.md §10.26 (v0.31.0).
+        """
+        gm = orchestrator.get_group_manager()
+        members = gm.get(group_name)
+        if members is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Group {group_name!r} not found",
+            )
+        all_agents = {a["id"]: a for a in orchestrator.list_agents()}
+        agents_detail = [
+            {"id": aid, "status": all_agents[aid]["status"]}
+            if aid in all_agents
+            else {"id": aid, "status": "unknown"}
+            for aid in sorted(members)
+        ]
+        return {
+            "name": group_name,
+            "agent_ids": sorted(members),
+            "agents": agents_detail,
+        }
+
+    @app.delete(
+        "/groups/{group_name}",
+        summary="Delete an agent group",
+        dependencies=[Depends(auth)],
+    )
+    async def delete_group(group_name: str) -> dict:
+        """Remove a named agent group.
+
+        Returns 404 if the group is unknown.  Does not affect the agents
+        themselves — only the group registration is removed.
+
+        Design reference: DESIGN.md §10.26 (v0.31.0).
+        """
+        gm = orchestrator.get_group_manager()
+        deleted = gm.delete(group_name)
+        if not deleted:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Group {group_name!r} not found",
+            )
+        return {"deleted": True, "name": group_name}
+
+    @app.post(
+        "/groups/{group_name}/agents",
+        summary="Add an agent to a group",
+        dependencies=[Depends(auth)],
+    )
+    async def add_agent_to_group(group_name: str, body: GroupAddAgent) -> dict:
+        """Add *agent_id* to the named group.
+
+        Returns 404 if the group does not exist.  Adding an agent that is
+        already a member is idempotent (no error).
+
+        Design reference: DESIGN.md §10.26 (v0.31.0).
+        """
+        gm = orchestrator.get_group_manager()
+        added = gm.add_agent(group_name, body.agent_id)
+        if not added:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Group {group_name!r} not found",
+            )
+        return {"name": group_name, "agent_id": body.agent_id, "added": True}
+
+    @app.delete(
+        "/groups/{group_name}/agents/{agent_id}",
+        summary="Remove an agent from a group",
+        dependencies=[Depends(auth)],
+    )
+    async def remove_agent_from_group(group_name: str, agent_id: str) -> dict:
+        """Remove *agent_id* from the named group.
+
+        Returns 404 if the group does not exist or the agent is not a member.
+
+        Design reference: DESIGN.md §10.26 (v0.31.0).
+        """
+        gm = orchestrator.get_group_manager()
+        removed = gm.remove_agent(group_name, agent_id)
+        if not removed:
+            # Distinguish between group-not-found and agent-not-member
+            if gm.get(group_name) is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Group {group_name!r} not found",
+                )
+            raise HTTPException(
+                status_code=404,
+                detail=f"Agent {agent_id!r} is not a member of group {group_name!r}",
+            )
+        return {"name": group_name, "agent_id": agent_id, "removed": True}
 
     # ------------------------------------------------------------------
     # WebSocket — session cookie OR API key query param
