@@ -6,6 +6,53 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.35.0] — 2026-03-05
+
+### Security Fix
+
+**API Key Separated from Context File (DESIGN.md §3 "API キー配送のセキュリティ方針")**
+
+The API key introduced in v0.34.0 was stored in `__orchestrator_context__.json`
+in plaintext alongside non-sensitive context data.  v0.35.0 fixes this by
+delivering the key through two secure channels:
+
+**Phase 1 — Dedicated 0o600 file**:
+- `ClaudeCodeAgent._write_api_key_file(cwd)` (new): writes the API key to
+  `__orchestrator_api_key__` using `os.open(..., 0o600)` with `O_CREAT|O_TRUNC`,
+  preventing the system umask from widening the permissions.
+- `__orchestrator_context__.json` no longer contains an `api_key` field.
+- `.gitignore` updated to exclude `__orchestrator_api_key__`.
+
+**Phase 2 — tmux session environment variable**:
+- `ClaudeCodeAgent._set_session_env_api_key()` (new): calls
+  `libtmux Session.set_environment("TMUX_ORCHESTRATOR_API_KEY", api_key)` at
+  agent start.  Panes created after this call inherit the variable automatically,
+  without any file on disk.
+
+**Slash command resolution chain**:
+- `slash_notify._read_api_key(cwd)` (new public helper): reads
+  `TMUX_ORCHESTRATOR_API_KEY` env var first, falls back to `__orchestrator_api_key__`
+  file, returns `""` if neither is available.
+- `notify_parent()` uses `_read_api_key()` instead of `ctx.get("api_key")`.
+- All slash commands (`/send-message`, `/spawn-subagent`, `/progress`,
+  `/list-agents`, `/delegate`) updated to read API key via the same resolution
+  chain and include the `X-API-Key` header in all HTTP requests.
+
+**Documentation**:
+- `CLAUDE.md` "Your Identity" section: new "API Key for Authenticated Requests"
+  sub-section explaining the env var / file resolution chain.
+- Scratchpad examples updated to use `$TMUX_ORCHESTRATOR_API_KEY`.
+
+**Tests**: 16 new tests in `tests/test_api_key_security.py` (687 total).
+
+References:
+- DESIGN.md §3 "API キー配送のセキュリティ方針"
+- DESIGN.md §10.30 選択理由・調査記録
+- OpenStack Security Guidelines "Apply Restrictive File Permissions"
+- OWASP Secrets Management Cheat Sheet (2025)
+
+---
+
 ## [0.34.0] — 2026-03-05
 
 ### Added
