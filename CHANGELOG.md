@@ -6,6 +6,44 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.11.0] — 2026-03-05
+
+### Added
+
+**context_files auto-copy to agent worktree (Issue #1)**
+- New `ClaudeCodeAgent._copy_context_files(cwd: Path)` method: copies all
+  `context_files` paths (relative to `context_files_root`) into the agent's
+  worktree before the agent starts, preserving directory structure (`shutil.copy2`)
+- New `context_files_root: Path | None` constructor parameter on `ClaudeCodeAgent`;
+  `factory.py` passes `Path.cwd()` when `context_files` is non-empty; same in
+  `Orchestrator._spawn_subagent()`
+- Missing files emit a `logger.warning` rather than raising — partial context is
+  better than a crashed agent
+- `ClaudeCodeAgent.start()` calls `_copy_context_files` after `_setup_worktree`,
+  `_write_context_file`, `_write_agent_claude_md`, and `_write_notes_template`
+- 6 new unit tests in `tests/test_context_files.py` covering: copy, missing file
+  warning, empty list no-op, nested directory preservation, no-root warning,
+  and integration (start() calls copy)
+
+**Agent hierarchy tree view in Web UI (Issue #2)**
+- New `GET /agents/tree` REST endpoint returns agents as a nested JSON tree
+  (d3-hierarchy compatible: `{id, status, role, parent_id, children: [...]}`)
+- New `_build_agent_tree(agents: list[dict]) → list[dict]` helper converts the flat
+  `list_agents()` output to a recursive parent→children structure
+- Web UI Agents panel now has **List / Tree** toggle buttons
+- Tree view rendered with pure CSS indentation + Vanilla JS (no external CDN/D3):
+  `refreshAgentTree()` fetches `/agents/tree` and renders `<ul class="tree-node">`
+  with per-node ID, role badge, and status colour
+- 9 new tests in `tests/test_hierarchy_tree.py`
+- OpenAPI schema snapshot updated (`tests/fixtures/openapi_schema.json`)
+
+### Fixed
+
+- GitHub Issue #1 (context_files auto-copy) — **closed**
+- GitHub Issue #2 (Web UI hierarchy tree) — **closed**
+
+---
+
 ## [0.10.0] — 2026-03-05
 
 ### Added

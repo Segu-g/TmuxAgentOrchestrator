@@ -316,6 +316,19 @@ AI エージェントにとって TDD は「ガードレール」として機能
 - `register_agent(parent_id=)` パラメータ追加
 - テスト 6 本追加（59 テスト合格）
 
+### 2026-03-05 v0.11.0: context_files auto-copy + Web UI hierarchy tree
+
+- `ClaudeCodeAgent._copy_context_files(cwd)` — context_files を worktree に実コピー (`shutil.copy2`)
+  - 欠損ファイルは警告のみ（例外なし）
+  - `context_files_root` パラメータで解決ベースパスを注入
+- `factory.py` / `orchestrator._spawn_subagent()` に `context_files_root=Path.cwd()` を渡す
+- `GET /agents/tree` — `parent_id` ベースの nested JSON tree エンドポイント
+- `_build_agent_tree()` ヘルパー — flat list → nested tree 変換（サーバーサイド）
+- Web UI Agents パネルに List/Tree トグル追加
+- 純 CSS ツリーレンダラー（D3 依存なし）— `refreshAgentTree()` で取得・表示
+- テスト 15 本追加（171 テスト合格）
+- GitHub Issue #1, #2 クローズ
+
 ### 2026-03-04 v3: コンテキストエンジニアリング + TDD 統合
 
 - `AgentConfig` に `system_prompt`, `context_files` 追加
@@ -428,6 +441,31 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 - **Prometheus は別バージョン** — 新依存関係 (`prometheus-fastapi-instrumentator`, `prometheus-client`) は独立 PR が適切。`/metrics` はデフォルト無認証 → ポートバインディング要件が増える
 
 
+### 10.7 調査記録 (v0.11.0, 2026-03-05)
+
+#### 実装: context_files auto-copy (Issue #1) と hierarchy tree view (Issue #2)
+
+**調査観点:**
+
+| テーマ | 参考文献 |
+|--------|---------|
+| git worktree + context isolation | [Git worktrees for parallel AI agents (Upsun, 2025)](https://devcenter.upsun.com/posts/git-worktrees-for-parallel-ai-coding-agents/) |
+| Agent hierarchy tree visualization | [d3-hierarchy (Observable, 2025)](https://d3js.org/d3-hierarchy/tree) |
+| Rate limiting/backpressure in LLM systems | [Rate Limiting and Backpressure for LLM APIs (dasroot.net, 2026)](https://dasroot.net/posts/2026/02/rate-limiting-backpressure-llm-apis/) |
+| WebSocket/SSE real-time push | [Real-Time Features in FastAPI (Python in Plain English, 2025)](https://python.plainenglish.io/real-time-features-in-fastapi-websockets-event-streaming-and-push-notifications-fec79a0a6812) |
+
+**主要知見:**
+
+1. **context_files**: git worktree 内の各エージェントは独立したファイルシステムを持つ。context_files の実コピー（`shutil.copy2`）により、エージェント起動時に関連ドキュメントが worktree に配置される。欠損ファイルは警告のみ（例外を投げない）— robustness が優先。
+
+2. **Hierarchy tree**: エージェント一覧を flat list → nested JSON tree に変換する `_build_agent_tree()` を実装。`/agents/tree` REST エンドポイントとして公開。Web UI は List/Tree トグルでこれを切り替え表示。純 CSS + HTML でツリーをレンダリング（D3 等の外部依存なし）。
+
+**設計決定:**
+
+- `context_files_root` を独立パラメータとして渡す — `ClaudeCodeAgent` 自体はパス解決ロジックを知る必要なし; factory/orchestrator が `Path.cwd()` を渡す。
+- ツリーはサーバーサイドで `parent_id` から構築 → クライアントは単純なレンダリングのみ
+- D3 は embedding に大きすぎるため純 CSS ツリー + Vanilla JS で実装
+
 ---
 
 ## 11. 今後の課題
@@ -438,7 +476,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 |--------|------|
 | 高 | エージェントの ERROR 状態からの自動リカバリ |
 | 高 | Director → ユーザーへの非同期プッシュ通知（現在はポーリング）|
-| 中 | Web UI のエージェント階層ビジュアライゼーション（ツリー表示）|
+| ~~中~~ ~~Web UI のエージェント階層ビジュアライゼーション（ツリー表示）~~ | **完了 (v0.11.0)** — `/agents/tree` エンドポイント + List/Tree トグル |
 | 中 | `/plan` と `/tdd` の出力を RESULT メッセージとして親に自動送信 |
 | 低 | エージェントのコンテキスト使用量モニタリング |
 
@@ -447,6 +485,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | 優先度 | 課題 |
 |--------|------|
 | ~~高~~ ~~CLAUDE.md の動的更新（タスク変更時に役割説明を更新）~~ | **クローズ**: タスク生存期間 = エージェント生存期間の原則により不要。Workers は ephemeral であるべき (Issue #4, 2026-03-05) |
-| 中 | コンテキストファイルの自動コピー (`context_files` の実装) |
+| ~~中~~ ~~コンテキストファイルの自動コピー (`context_files` の実装)~~ | **完了 (v0.11.0)** — `ClaudeCodeAgent._copy_context_files()` |
 | 中 | `/summarize` による NOTES.md 更新をオーケストレーターに通知 |
 | 低 | エージェント間の共有スクラッチパッド（読み取り専用の共有ファイル）|
+| 低 | Prometheus メトリクス (`/metrics`) — 外部依存あり、別バージョン推奨 |
