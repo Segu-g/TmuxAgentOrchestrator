@@ -6,6 +6,36 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.13.0] — 2026-03-05
+
+### Added
+
+**Manual agent reset — `POST /agents/{id}/reset`**
+- New `Orchestrator.reset_agent(agent_id)` method: stops the agent, clears
+  `_permanently_failed` flag and `_recovery_attempts` counter, restarts the
+  agent, and publishes an `agent_reset` STATUS event on the bus
+- Raises `KeyError` for unknown agent IDs
+- New REST endpoint `POST /agents/{id}/reset` — 200 on success, 404 on
+  unknown agent, 401 without authentication
+- Response: `{"agent_id": "<id>", "reset": true}`
+- Design: action sub-resource pattern (`POST` verb endpoint, not `PUT` state
+  replacement) — Nordic APIs "Designing a True REST State Machine"
+- 9 new tests in `tests/test_agent_reset.py`
+
+**Prometheus metrics — `GET /metrics`**
+- New `GET /metrics` endpoint: exposes Prometheus text-format metrics
+- No authentication required (Prometheus scraper compatibility; document recommends
+  network-level protection)
+- Metrics exposed per request (per-request `CollectorRegistry` for snapshot accuracy):
+  - `tmux_agent_status_total{status}` — Gauge: agent count per status value (IDLE/BUSY/ERROR/STOPPED)
+  - `tmux_task_queue_size` — Gauge: current pending task queue depth
+  - `tmux_bus_drop_total{agent_id}` — Gauge: bus drop count per agent
+- New dependency: `prometheus-client>=0.19` (added to main project deps)
+- 9 new tests in `tests/test_metrics.py`
+- OpenAPI schema snapshot updated
+
+---
+
 ## [0.12.0] — 2026-03-05
 
 ### Added
