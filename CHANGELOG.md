@@ -6,6 +6,22 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.36.0] — 2026-03-06
+
+### Added
+
+**`POST /workflows/tdd` — 3-agent TDD workflow**
+
+Red→Green→Refactor cycle as a first-class workflow: `test-writer` writes failing tests,
+`implementer` makes them pass, `refactorer` cleans up. Artifact handoff via shared
+scratchpad (Blackboard pattern). Agent selection by `required_tags`.
+23 new tests (687 → 710 total).
+
+**Known issue**: demo `tdd-test-writer` timed out at 300s — task description was too
+complex for the default timeout. Next demo will use `task_timeout: 600` and simpler tasks.
+
+---
+
 ## [0.35.0] — 2026-03-05
 
 ### Security Fix
