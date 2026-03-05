@@ -1001,6 +1001,67 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.21 調査記録 (v0.26.0, 2026-03-05)
+
+**実装テーマ: Task-level Retry on Failure — per-task retry semantics**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| タスク再試行 | Dead Letter Queue / Redrive Policy | AWS SQS `maxReceiveCount` https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html |
+| 一時障害耐性 | Retry Pattern | Netflix Hystrix retry https://github.com/Netflix/Hystrix |
+| リトライポリシー | Resilience Policy | Polly .NET resilience library https://github.com/App-vNext/Polly |
+| スーパーバイザー再起動 | Supervisor restart strategies | Erlang OTP `restart_one_for_one` https://www.erlang.org/docs/24/design_principles/sup_princ |
+
+**主要知見:**
+
+1. **AWS SQS `maxReceiveCount` / Redrive Policy**: SQS のメッセージが指定回数受信されても処理されない場合、Dead Letter Queue (DLQ) に転送される。本実装の `Task.max_retries` は `maxReceiveCount - 1` に相当し、`retry_count >= max_retries` 時に DLQ に転送される (`_dead_letter()` 呼び出し)。SQS の Visibility Timeout と同様に、タスクが再試行中はキューから一時的に消えた状態になる。
+
+2. **Netflix Hystrix リトライ**: Hystrix では一時障害に対して `fallback` と `retry` を組み合わせる。本実装では `fallback` (代替エージェントへのルーティング) は未実装だが、`retry` はタスクレベルで実現。同じエージェントに再試行するため、エージェントがステートフルな場合は注意が必要 (将来的に `target_agent` 指定で別エージェントに再試行する拡張を検討)。
+
+3. **Polly .NET Retry Policy**: Polly では `WaitAndRetry` ポリシーで指数バックオフ付きリトライを設定できる。本実装は現在バックオフなしで即座に再キューイングするが、将来的に `retry_delay` フィールドを追加することで Polly スタイルのウェイト付きリトライが可能。
+
+4. **Erlang OTP `restart_one_for_one`**: OTP のスーパーバイザーは子プロセスの再起動を `max_restarts` (intensity) と `max_seconds` (period) で制御する。本実装の `max_retries` は OTP の `intensity` に相当し、超過時に DLQ に転送されるのが OTP の `permanent failure` に対応。
+
+**設計決定:**
+
+- **`Task.max_retries` と `Task.retry_count` フィールドの追加**: `agents/base.py` の `Task` dataclass に追加。idempotency_key や target_agent と同様に、タスクの属性として管理することでオーケストレーターの外部状態が不要になる。
+- **`_active_tasks: dict[str, Task]`**: ディスパッチ時にタスクオブジェクトを保存し、RESULT 受信時に再試行可否を判断できるようにする。成功時・最終失敗時には削除。
+- **`WorkflowManager.on_task_retrying()`**: ワークフローが再試行中のタスクで `"failed"` に遷移しないよう、`_failed` セットからタスクを除去し `_update_status()` を再計算する。これにより、ワークフローが "failed" → "running" → "complete" の正常遷移を辿ることができる。
+- **`GET /tasks` の拡張**: キュー内 + 実行中 + 完了済みタスクを統合してリストアップ。`skip`/`limit` でページネーション。REST クライアントが全タスクの状態を一覧できる。
+- **`GET /tasks/{task_id}` の追加**: 特定タスクの状態 + リトライフィールドを取得できる新エンドポイント。
+
+**テスト (30テスト, 合計468テスト):**
+- `Task` デフォルト値: `max_retries=0`, `retry_count=0`
+- `Task.to_dict()` にリトライフィールドが含まれる
+- `WorkflowManager.on_task_retrying()` — unknown task_id は no-op
+- `WorkflowManager.on_task_retrying()` — `_failed` セットから除去
+- `WorkflowManager` — retrying → complete の遷移
+- `max_retries=0` のタスクは初回エラーで即時失敗 (1回のみディスパッチ)
+- `max_retries=2` のタスクは合計3回ディスパッチ (1 + 2 retry)
+- `retry_count` が再試行ごとに 0, 1, 2 と増加する
+- `task_retrying` STATUS イベントが各リトライで発行される
+- `task_retrying` イベントには `error`, `retry_count`, `max_retries` が含まれる
+- 同一 priority で再キューイングされる
+- 再試行後に成功するタスクは `_completed_tasks` に追加される
+- `max_retries` 消耗後は DLQ に転送 (再ディスパッチなし)
+- ワークフロー: 再試行中は `"failed"` にならない
+- ワークフロー: `max_retries` 消耗後に `"failed"` に遷移
+- ワークフロー: 再試行成功後に `"complete"` に遷移
+- REST `POST /tasks` — `max_retries=3` がレスポンスに含まれる
+- REST `POST /tasks/batch` — 各タスクに `max_retries`/`retry_count` が含まれる
+- REST `POST /workflows` — タスクスペックに `max_retries` が受け付けられる
+- REST `GET /tasks` — 空/キュー済み/ページネーション(skip/limit)/認証
+- REST `GET /tasks/{id}` — `retry_count`/`max_retries` フィールドを返す / 404
+
+**デモシナリオ (v0.26.0):**
+- シナリオ: "Flaky Task Retry"
+- デモフォルダ: `~/Demonstration/v0.26.0-task-retry/`
+- 2 ClaudeCodeAgent インスタンス + `max_retries=2` のワークフロータスク
+- 初回 50% 確率で失敗するスクリプトを使い、再試行で成功することを実証
+- `task_retrying` STATUS イベントと最終 `GET /workflows/{id}` で `"complete"` を確認
+
+---
+
 ## 11. 今後の課題
 
 ### 機能
@@ -1019,6 +1080,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~高~~ ~~キュー深度オートスケーリング~~ | **完了 (v0.23.0)** — `AutoScaler` MAPE-Kループ; `GET/PUT /orchestrator/autoscaler`; `OrchestratorConfig.autoscale_*`; 23テスト (386合計) |
 | ~~中~~ ~~タスク結果の永続化（Event Sourcing）~~ | **完了 (v0.24.0)** — `ResultStore` 追記専用 JSONL; `GET /results`, `GET /results/dates`; `OrchestratorConfig.result_store_enabled/dir`; 23テスト (409合計) |
 | ~~高~~ ~~Workflow DAG API — パイプライン一括提出~~ | **完了 (v0.25.0)** — `WorkflowManager` + `validate_dag()` + `POST/GET /workflows`; Kahn's algorithm; local_id→task_id変換; 29テスト (438合計) |
+| ~~高~~ ~~Task retry on failure — per-task retry semantics~~ | **完了 (v0.26.0)** — `Task.max_retries`/`retry_count`; `_active_tasks` lookup; `task_retrying` STATUS イベント; `WorkflowManager.on_task_retrying()`; `GET /tasks` 全タスク一覧 (pagination); `GET /tasks/{id}`; REST `max_retries` パラメータ; 30テスト (468合計) |
 | ~~低~~ ~~エージェントのコンテキスト使用量モニタリング~~ | **完了 (v0.21.0)** — `ContextMonitor` + `GET /agents/{id}/stats`, `GET /context-stats`; `context_warning`/`notes_updated`/`summarize_triggered` STATUS イベント; `context_auto_summarize`; 21 テスト (347 合計) |
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |
 | ~~低~~ ~~Prometheus メトリクス (`/metrics`)~~ | **完了 (v0.13.0)** — `GET /metrics` (prometheus_client 直接使用; 認証不要) |

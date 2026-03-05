@@ -6,6 +6,63 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.26.0] — 2026-03-05
+
+### Added
+
+**Per-task retry semantics — `Task.max_retries`, `task_retrying` STATUS events**
+
+Tasks can now be submitted with a `max_retries` parameter. When the
+orchestrator receives a RESULT with `error != None`, it checks whether the
+task has retries remaining. If `retry_count < max_retries`, the task is
+re-enqueued with the same priority and a `task_retrying` STATUS event is
+published. Only after all retries are exhausted does the task become
+permanently failed (dead-lettered) and the workflow (if any) transitions to
+`"failed"`.
+
+Design references:
+- AWS SQS `maxReceiveCount` / Redrive policy — re-enqueue before DLQ
+- Netflix Hystrix retry — transient-failure tolerance
+- Polly .NET resilience library — retry policies
+- Erlang OTP supervisor restart strategies — `restart_one_for_one`
+- DESIGN.md §10.21 (v0.26.0)
+
+Changes:
+- `Task` dataclass (`agents/base.py`): new `max_retries: int = 0` and
+  `retry_count: int = 0` fields. New `to_dict()` method for consistent
+  serialisation including retry fields.
+- `Orchestrator._route_loop()` (`orchestrator.py`): on RESULT with error,
+  checks `task.retry_count < task.max_retries`. If true: increments
+  `retry_count`, re-enqueues task at same priority, calls
+  `WorkflowManager.on_task_retrying()`, publishes `task_retrying` STATUS event.
+  Only after retries exhausted: calls `on_task_failed()` as before.
+- `Orchestrator._active_tasks: dict[str, Task]`: new mapping populated at
+  dispatch time; used by `_route_loop` to retrieve the Task object for retry.
+  Cleaned up on success or final failure.
+- `Orchestrator.submit_task()`: new `max_retries: int = 0` keyword argument.
+- `WorkflowManager.on_task_retrying()` (`workflow_manager.py`): new method.
+  Removes `task_id` from `_failed` set and re-runs `_update_status()` so the
+  workflow is not prematurely marked `"failed"` during retries.
+
+New/updated REST endpoints:
+- `POST /tasks` — accepts `max_retries: int = 0`; response includes
+  `max_retries` and `retry_count`.
+- `POST /tasks/batch` — each task item accepts `max_retries`; response per
+  task includes `max_retries` and `retry_count`.
+- `POST /workflows` — `WorkflowTaskSpec` accepts `max_retries: int = 0` per
+  task node; passed through to `submit_task()`.
+- `GET /tasks` — redesigned: returns all tasks (queued + in-progress +
+  completed/failed history) with `skip: int = 0` and `limit: int = 100`
+  pagination query params. Each entry includes `status`, `max_retries`, and
+  `retry_count`.
+- `GET /tasks/{task_id}` — **new endpoint**: returns the status and details
+  of a specific task including `retry_count` and `max_retries`. Returns 404
+  if the task ID is unknown.
+
+Tests: 30 new tests in `tests/test_task_retry.py` (468 total).
+
+---
+
 ## [0.25.0] — 2026-03-05
 
 ### Added
