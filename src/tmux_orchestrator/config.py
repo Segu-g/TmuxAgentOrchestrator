@@ -95,6 +95,17 @@ class OrchestratorConfig:
     autoscale_poll: float = 5.0
     autoscale_agent_tags: list[str] = field(default_factory=list)
     autoscale_system_prompt: str | None = None
+    # --- Task result persistence (Event Sourcing / CQRS pattern) ---
+    # result_store_enabled: when True, every RESULT message is appended to a
+    #   JSONL file on disk.  Disabled by default to avoid unexpected I/O.
+    # result_store_dir: directory where JSONL files are written.
+    #   Layout: {result_store_dir}/{session_name}/{YYYY-MM-DD}.jsonl
+    # References:
+    #   Martin Fowler "Event Sourcing" (2005)
+    #   Greg Young "CQRS Documents" (2010)
+    #   Rich Hickey "The Value of Values" (Datomic, 2012)
+    result_store_enabled: bool = False
+    result_store_dir: str = "~/.tmux_orchestrator/results"
 
 
 def load_config(path: str | Path) -> OrchestratorConfig:
@@ -146,4 +157,6 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         autoscale_poll=data.get("autoscale_poll", 5.0),
         autoscale_agent_tags=data.get("autoscale_agent_tags", []),
         autoscale_system_prompt=data.get("autoscale_system_prompt"),
+        result_store_enabled=data.get("result_store_enabled", False),
+        result_store_dir=data.get("result_store_dir", "~/.tmux_orchestrator/results"),
     )

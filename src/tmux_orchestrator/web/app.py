@@ -574,6 +574,67 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
         return history
 
+    # ------------------------------------------------------------------
+    # Task result persistence (Event Sourcing / CQRS read side)
+    # ------------------------------------------------------------------
+
+    @app.get(
+        "/results",
+        summary="Query persisted task results",
+        dependencies=[Depends(auth)],
+    )
+    async def query_results(
+        agent_id: str | None = None,
+        task_id: str | None = None,
+        date: str | None = None,
+        limit: int = 50,
+    ) -> list:
+        """Return persisted task results from the append-only JSONL store.
+
+        Query parameters are AND-combined:
+        - ``agent_id``: filter by the agent that completed the task.
+        - ``task_id``: filter to a specific task.
+        - ``date``: ``YYYY-MM-DD`` — scan only that day's file.
+        - ``limit``: maximum records returned (default 50).
+
+        Returns an empty list when ``result_store_enabled=False`` or no
+        results have been persisted yet.
+
+        Design reference:
+        - Martin Fowler "Event Sourcing" (2005): append-only log of facts.
+        - Greg Young "CQRS Documents" (2010): separate write/read paths.
+        - Rich Hickey "The Value of Values" (Datomic, 2012): immutable facts.
+        - DESIGN.md §10.19 (v0.24.0).
+        """
+        result_store = getattr(orchestrator, "_result_store", None)
+        if result_store is None:
+            return []
+        return result_store.query(
+            agent_id=agent_id,
+            task_id=task_id,
+            date=date,
+            limit=limit,
+        )
+
+    @app.get(
+        "/results/dates",
+        summary="List dates with persisted result data",
+        dependencies=[Depends(auth)],
+    )
+    async def results_dates() -> list:
+        """Return a sorted list of ``YYYY-MM-DD`` date strings for which
+        result data exists in the JSONL store.
+
+        Returns an empty list when ``result_store_enabled=False`` or no
+        results have been persisted yet.
+
+        Design reference: DESIGN.md §10.19 (v0.24.0).
+        """
+        result_store = getattr(orchestrator, "_result_store", None)
+        if result_store is None:
+            return []
+        return result_store.all_dates()
+
     @app.post(
         "/tasks/{task_id}/cancel",
         summary="Cancel a pending task",

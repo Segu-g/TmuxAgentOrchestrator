@@ -137,6 +137,19 @@ class Orchestrator:
             self._autoscaler: "AutoScaler | None" = AutoScaler(self, config)
         else:
             self._autoscaler = None
+        # Append-only JSONL result store — Event Sourcing pattern.
+        # Enabled only when config.result_store_enabled=True to avoid
+        # unexpected I/O in deployments that don't need persistence.
+        # Reference: Fowler "Event Sourcing" (2005); Young CQRS (2010);
+        # Hickey "The Value of Values" (Datomic, 2012). DESIGN.md §10.19 (v0.24.0)
+        if config.result_store_enabled:
+            from tmux_orchestrator.result_store import ResultStore
+            self._result_store: "ResultStore | None" = ResultStore(
+                store_dir=config.result_store_dir,
+                session_name=config.session_name,
+            )
+        else:
+            self._result_store = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -937,6 +950,23 @@ class Orchestrator:
         # Cap at 200 entries: keep the newest 200.
         if len(history) > 200:
             self._agent_history[agent_id] = history[-200:]
+
+        # Persist to the append-only result store when enabled.
+        # Event Sourcing: every task completion is an immutable fact on disk.
+        # Reference: Fowler "Event Sourcing" (2005); DESIGN.md §10.19 (v0.24.0)
+        if self._result_store is not None:
+            result_text = (payload.get("output") or "")[:4000]
+            try:
+                self._result_store.append(
+                    task_id=task_id,
+                    agent_id=agent_id,
+                    prompt=(prompt or "")[:500],
+                    result_text=result_text,
+                    error=error,
+                    duration_s=duration_s if duration_s is not None else 0.0,
+                )
+            except Exception:
+                logger.exception("ResultStore.append() failed for task=%s agent=%s", task_id, agent_id)
 
     async def _route_result_reply(self, task_id: str, result_msg: Message) -> None:
         """Deliver *result_msg* to the reply_to agent's mailbox + notify_stdin.
