@@ -6,6 +6,50 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.18.0] — 2026-03-05
+
+### Added
+
+**Agent Capability Tags + Smart Dispatch**
+
+Enables capability-based task routing: tasks with `required_tags` are only
+dispatched to agents whose `tags` list is a superset of the required tags.
+Inspired by the FIPA Directory Facilitator capability advertisement model
+(2002) and Kubernetes Node Affinity label matching.
+
+- `AgentConfig.tags: list[str]` — capability advertisement per agent in YAML config.
+- `Task.required_tags: list[str]` — ALL listed tags must be present in the
+  target agent's `tags` for the task to be dispatched there.
+- `AgentRegistry.find_idle_worker(required_tags)` — updated with set subset
+  matching: `set(required_tags) <= set(agent.tags)`. Backwards-compatible:
+  empty `required_tags` (default) matches any idle worker.
+- `Orchestrator.submit_task(required_tags=...)` — passes through to Task creation.
+- `ClaudeCodeAgent` and factory accept `tags` from `AgentConfig`.
+- `_spawn_subagent` propagates `template_cfg.tags` to sub-agents.
+- `AgentRegistry.list_all()` includes `tags` field in agent snapshots.
+- `Orchestrator.list_tasks()` includes `required_tags` in task snapshots.
+- Dead-letter message clarified: `"no idle agent with required_tags=... after N retries"`.
+- REST API: `POST /tasks` and `POST /tasks/batch` accept `required_tags: list[str]`.
+  Response includes `required_tags` when non-empty.
+- YAML config: agents accept `tags` list.
+- 23 new tests in `tests/test_capability_tags.py`.
+
+**Research references:**
+- FIPA Agent Communication Language — Directory Facilitator (2002)
+- Kubernetes nodeSelector / Node Affinity (2024)
+- COLA: Collaborative Multi-Agent Framework (EMNLP 2025)
+- Agent-Oriented Planning arXiv:2410.02189 (2024)
+
+**E2E Demo (v0.18.0-capability-tags):**
+- 2 real ClaudeCodeAgent instances: `python-expert` (tags: python, testing)
+  and `docs-writer` (tags: markdown, documentation).
+- Task A (`required_tags: [python, testing]`) dispatched exclusively to `python-expert`.
+- Task B (`required_tags: [markdown, documentation]`) dispatched exclusively to `docs-writer`.
+- All 4 correctness checks passed; DLQ empty; both tasks succeeded.
+- Demo folder: `~/Demonstration/v0.18.0-capability-tags/`
+
+---
+
 ## [0.17.0] — 2026-03-05
 
 ### Added
