@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from tmux_orchestrator.agents.base import Agent, AgentStatus, Task
 from tmux_orchestrator.bus import Bus, Message, MessageType
 from tmux_orchestrator.context_monitor import ContextMonitor
+from tmux_orchestrator.group_manager import GroupManager
 from tmux_orchestrator.messaging import Mailbox
 from tmux_orchestrator.rate_limiter import RateLimitExceeded, TokenBucketRateLimiter
 from tmux_orchestrator.registry import AgentRegistry
@@ -196,6 +197,19 @@ class Orchestrator:
         # Reference: GitHub Webhooks; Stripe Webhooks; RFC 2104 HMAC;
         # Zalando RESTful API Guidelines §webhook. DESIGN.md §10.25 (v0.30.0)
         self._webhook_manager = WebhookManager(timeout=config.webhook_timeout)
+        # Named agent group manager — logical pools for targeted task dispatch.
+        # Groups allow tasks to target a named pool instead of individual agent IDs or tags.
+        # References:
+        #   Kubernetes Node Pools / Node Groups; AWS Auto Scaling Groups;
+        #   Apache Mesos Roles; HashiCorp Nomad Task Groups.
+        # DESIGN.md §10.26 (v0.31.0)
+        self._group_manager = GroupManager()
+        # Load groups from config
+        for grp in config.groups:
+            name = grp.get("name", "")
+            agent_ids = grp.get("agent_ids", [])
+            if name:
+                self._group_manager.create(name, agent_ids)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -376,6 +390,7 @@ class Orchestrator:
         reply_to: str | None = None,
         target_agent: str | None = None,
         required_tags: list[str] | None = None,
+        target_group: str | None = None,
         wait_for_token: bool = True,
         max_retries: int = 0,
         _task_id: str | None = None,
@@ -435,6 +450,7 @@ class Orchestrator:
             reply_to=reply_to,
             target_agent=target_agent,
             required_tags=required_tags or [],
+            target_group=target_group,
             max_retries=max_retries,
         )
         if idempotency_key is not None:
@@ -483,10 +499,11 @@ class Orchestrator:
                     **({"reply_to": reply_to} if reply_to is not None else {}),
                     **({"target_agent": target_agent} if target_agent is not None else {}),
                     **({"required_tags": required_tags} if required_tags else {}),
+                    **({"target_group": target_group} if target_group is not None else {}),
                 },
             ))
-            logger.info("Task %s queued (priority=%d, reply_to=%s, required_tags=%s)",
-                        task.id, priority, reply_to, required_tags)
+            logger.info("Task %s queued (priority=%d, reply_to=%s, required_tags=%s, target_group=%s)",
+                        task.id, priority, reply_to, required_tags, target_group)
         else:
             # Hold task until deps are satisfied
             self._waiting_tasks[task.id] = task
@@ -535,6 +552,7 @@ class Orchestrator:
                 "depends_on": t.depends_on,
                 **({"required_tags": t.required_tags} if t.required_tags else {}),
                 **({"target_agent": t.target_agent} if t.target_agent else {}),
+                **({"target_group": t.target_group} if t.target_group else {}),
             }
             for p, _seq, t in sorted(items, key=lambda x: (x[0], x[1]))
         ]
@@ -548,6 +566,7 @@ class Orchestrator:
                 "depends_on": t.depends_on,
                 **({"required_tags": t.required_tags} if t.required_tags else {}),
                 **({"target_agent": t.target_agent} if t.target_agent else {}),
+                **({"target_group": t.target_group} if t.target_group else {}),
             })
         return result
 
@@ -967,15 +986,33 @@ class Orchestrator:
                     continue
                 agent = target
             else:
-                agent = self.registry.find_idle_worker(required_tags=task.required_tags)
+                # Resolve group membership for filtering, if target_group is set
+                group_members: set[str] | None = None
+                if task.target_group is not None:
+                    group_members = self._group_manager.get(task.target_group)
+                    if group_members is None:
+                        # Unknown group — dead letter immediately
+                        await self._dead_letter(
+                            task,
+                            f"unknown target_group={task.target_group!r}",
+                        )
+                        continue
+                agent = self.registry.find_idle_worker(
+                    required_tags=task.required_tags,
+                    allowed_agent_ids=group_members,
+                )
             if agent is None:
                 retry_count = task.metadata.get("_retry_count", 0) + 1
                 task.metadata["_retry_count"] = retry_count
                 if retry_count >= self.config.dlq_max_retries:
+                    parts = []
+                    if task.required_tags:
+                        parts.append(f"required_tags={task.required_tags!r}")
+                    if task.target_group:
+                        parts.append(f"target_group={task.target_group!r}")
                     reason = (
-                        f"no idle agent with required_tags={task.required_tags!r} "
-                        f"after {retry_count} retries"
-                        if task.required_tags
+                        f"no idle agent with {', '.join(parts)} after {retry_count} retries"
+                        if parts
                         else f"no idle agent after {retry_count} retries"
                     )
                     await self._dead_letter(task, reason)
@@ -1878,6 +1915,16 @@ class Orchestrator:
         Design reference: DESIGN.md §10.20 (v0.25.0).
         """
         return self._workflow_manager
+
+    def get_group_manager(self) -> GroupManager:
+        """Return the GroupManager instance.
+
+        The GroupManager maintains named agent groups (logical pools) for
+        targeted task dispatch.  It is always instantiated (never None).
+
+        Design reference: DESIGN.md §10.26 (v0.31.0).
+        """
+        return self._group_manager
 
     # ------------------------------------------------------------------
     # Controls

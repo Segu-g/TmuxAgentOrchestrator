@@ -103,16 +103,24 @@ class AgentRegistry:
             None,
         )
 
-    def find_idle_worker(self, required_tags: list[str] | None = None) -> Agent | None:
+    def find_idle_worker(
+        self,
+        required_tags: list[str] | None = None,
+        allowed_agent_ids: set[str] | None = None,
+    ) -> Agent | None:
         """Return the first IDLE worker whose circuit is not OPEN, or None.
 
         When *required_tags* is non-empty, only agents whose ``tags`` attribute
         is a superset of *required_tags* are eligible.
 
+        When *allowed_agent_ids* is non-None, only agents whose ID appears in
+        that set are eligible (used to implement named group dispatch).
+
         Design reference:
         - FIPA Directory Facilitator (2002) — capability-based agent selection.
         - Kubernetes Node Affinity nodeSelector — label-set subset matching.
-        - DESIGN.md §10.14 (v0.18.0, 2026-03-05).
+        - Kubernetes Node Pools / Node Groups — restrict scheduling to a pool.
+        - DESIGN.md §10.14 (v0.18.0, 2026-03-05); §10.26 (v0.31.0).
         """
         needed: set[str] = set(required_tags) if required_tags else set()
         for agent in self._agents.values():
@@ -123,6 +131,8 @@ class AgentRegistry:
             if not self._breakers.get(agent.id, CircuitBreaker(agent.id)).is_allowed():
                 continue
             if needed and not needed.issubset(set(getattr(agent, "tags", []))):
+                continue
+            if allowed_agent_ids is not None and agent.id not in allowed_agent_ids:
                 continue
             return agent
         return None

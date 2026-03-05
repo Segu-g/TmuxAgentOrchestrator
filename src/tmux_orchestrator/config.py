@@ -32,6 +32,12 @@ class AgentConfig:
     # ALL required tags.  Reference: FIPA Directory Facilitator (2002),
     # Kubernetes Node Affinity (nodeSelector pattern).
     tags: list[str] = field(default_factory=list)
+    # --- Group membership (pre-registration at startup) ---
+    # Agent is automatically added to each named group when the orchestrator starts.
+    # Groups must exist in OrchestratorConfig.groups (or be created at runtime).
+    # Reference: Kubernetes Node Pool labels; AWS Auto Scaling Group tags.
+    # DESIGN.md §10.26 (v0.31.0)
+    groups: list[str] = field(default_factory=list)
     # --- Worktree lifecycle ---
     # When True and isolate=True, the orchestrator squash-merges the agent's
     # worktree branch into the main repo HEAD before teardown.  Commits made
@@ -106,6 +112,16 @@ class OrchestratorConfig:
     #   Rich Hickey "The Value of Values" (Datomic, 2012)
     result_store_enabled: bool = False
     result_store_dir: str = "~/.tmux_orchestrator/results"
+    # --- Named agent groups ---
+    # groups: list of {name, agent_ids} dicts describing pre-configured agent pools.
+    # Groups allow tasks to target a named pool instead of individual agents or tags.
+    # References:
+    #   Kubernetes Node Pools / Node Groups (GKE, EKS, AKS)
+    #   AWS Auto Scaling Groups https://docs.aws.amazon.com/autoscaling/ec2/userguide/auto-scaling-groups.html
+    #   Apache Mesos Roles https://mesos.apache.org/documentation/latest/roles/
+    #   HashiCorp Nomad Task Groups https://developer.hashicorp.com/nomad/docs/job-specification/group
+    # DESIGN.md §10.26 (v0.31.0)
+    groups: list[dict] = field(default_factory=list)
     # --- Webhook notifications ---
     # webhook_timeout: HTTP timeout (seconds) per delivery attempt.
     # Reference: GitHub Webhooks; Stripe Webhooks; RFC 2104 HMAC;
@@ -129,6 +145,7 @@ def load_config(path: str | Path) -> OrchestratorConfig:
             system_prompt=a.get("system_prompt"),
             context_files=a.get("context_files", []),
             tags=a.get("tags", []),
+            groups=a.get("groups", []),
             merge_on_stop=a.get("merge_on_stop", False),
             merge_target=a.get("merge_target"),
         )
@@ -165,5 +182,6 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         autoscale_system_prompt=data.get("autoscale_system_prompt"),
         result_store_enabled=data.get("result_store_enabled", False),
         result_store_dir=data.get("result_store_dir", "~/.tmux_orchestrator/results"),
+        groups=data.get("groups", []),
         webhook_timeout=data.get("webhook_timeout", 5.0),
     )

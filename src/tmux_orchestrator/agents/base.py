@@ -55,6 +55,10 @@ class Task:
     # ``tags`` list.  Empty list = no constraint (any idle worker matches).
     # Reference: FIPA Directory Facilitator (2002); Kubernetes nodeSelector.
     required_tags: list[str] = field(default_factory=list)
+    # Named agent group: when set, task is only dispatched to agents in this group.
+    # Acts as an AND-filter with required_tags (both conditions must be satisfied).
+    # Reference: Kubernetes Node Pools; AWS Auto Scaling Groups; DESIGN.md §10.26 (v0.31.0)
+    target_group: str | None = None
     # Per-task retry semantics: how many times this task may be re-enqueued on
     # failure before it is dead-lettered.  ``retry_count`` is incremented each
     # time the orchestrator retries on an errored RESULT.
@@ -78,6 +82,7 @@ class Task:
             "reply_to": self.reply_to,
             "target_agent": self.target_agent,
             "required_tags": self.required_tags,
+            "target_group": self.target_group,
             "max_retries": self.max_retries,
             "retry_count": self.retry_count,
             **({"metadata": self.metadata} if self.metadata else {}),

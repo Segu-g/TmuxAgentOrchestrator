@@ -99,6 +99,17 @@ def build_system(
 
         orchestrator.register_agent(agent)
 
+        # Pre-register agent into named groups listed in its AgentConfig.
+        # Groups that don't exist yet are created on-the-fly so that
+        # agent-level group membership works even without a top-level groups:
+        # entry in the YAML (auto-create semantics).
+        # DESIGN.md §10.26 (v0.31.0)
+        gm = orchestrator.get_group_manager()
+        for group_name in agent_cfg.groups:
+            if group_name not in gm:
+                gm.create(group_name)
+            gm.add_agent(group_name, agent_cfg.id)
+
     return orchestrator, bus, tmux
 
 
