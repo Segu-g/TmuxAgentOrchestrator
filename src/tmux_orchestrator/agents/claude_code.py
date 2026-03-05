@@ -27,9 +27,11 @@ logger = logging.getLogger(__name__)
 
 # Patterns that indicate Claude has finished and is waiting for input.
 # Adjust as the `claude` CLI evolves.
+# NOTE: match end-of-line (not whole-line) so trailing terminal padding / cursor
+# markers added by newer CLI versions do not prevent completion detection.
 _DONE_PATTERNS = [
-    re.compile(r"^\s*❯\s*$", re.MULTILINE),           # claude interactive prompt "❯"
-    re.compile(r"^\s*>\s*$", re.MULTILINE),            # bare ">" prompt (older versions)
+    re.compile(r"❯\s*$", re.MULTILINE),               # claude interactive prompt "❯"
+    re.compile(r"(?<!\S)>\s*$", re.MULTILINE),         # bare ">" prompt (older versions)
     re.compile(r"Human:\s*$", re.MULTILINE),           # Human: prompt
     re.compile(r"\$\s*$", re.MULTILINE),               # shell prompt fallback
 ]

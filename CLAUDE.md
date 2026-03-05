@@ -114,6 +114,8 @@ Each step is **required**. Never skip to the next step until the current one is 
 - Commit in logical units. Push to origin.
 
 #### Step 3 — E2E demonstration with REAL agents
+- Use `task_timeout: 900` in the demo YAML config. Real claude agents can take time;
+  never shrink or simplify tasks to avoid timeouts — increase the timeout instead.
 - After each feature set, create `~/Demonstration/v<version>-<topic>/demo.py`.
   Folder name format: `v{major}.{minor}.{patch}-{kebab-case-topic}`
   Example: `v0.13.0-reset-and-metrics`
