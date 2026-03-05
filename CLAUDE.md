@@ -73,24 +73,66 @@ pytest
 - **ClaudeCodeAgent**: launches `claude --dangerously-skip-permissions` (with `CLAUDECODE` stripped so it works inside a Claude Code session); waits for the initial `❯` prompt (`_wait_for_ready`) before marking IDLE; sends task via `send_keys`; polls pane output every 500 ms; declares completion when output settles for 3 consecutive cycles and matches a prompt pattern (`❯`, `$`, `>`, or `Human:`).
 - **Web UI**: single-page HTML served from `GET /`; auto-reconnecting WebSocket at `ws://host/ws`; polls REST endpoints every 3 s for agent/task table refresh.
 
-## Development Process (Claude Code autonomous development)
+## Autonomous Development Loop
 
-When developing this project autonomously, follow this cycle:
+**This entire process runs without asking the user for approval.**
+Ask the user (via GitHub Issues) only when a fundamental design decision cannot
+be resolved with research alone.
 
-1. **Research before implementing** — Collect references (books, papers, patterns) before each
-   improvement iteration. Record findings in `DESIGN.md` with citations.
-2. **E2E demonstration required** — Unit tests alone are insufficient. After completing a
-   feature set, create a demonstration in `~/Demonstration/<version>/` that exercises the
-   full application stack. Document results in `build-log.md`.
-3. **Demo feedback drives improvement** — Bugs found in demonstrations must be fixed before
-   the next research cycle. Record root cause and fix in `build-log.md`.
-4. **Commit in logical units** — Each version bump is one commit + push + tag.
-5. **GitHub Issues for questions** — Open an issue when a design decision requires user input.
-   Check issues for user replies at the start of each session.
-6. **DESIGN.md is the source of truth** — Record all design decisions, references, and
-   implementation history there. `§10.5` lists next iteration candidates (priority order).
-7. **Iterate continuously** — After each version, update `§10.5` with new candidates from
-   research and demo findings, then begin the next iteration.
+### The Mandatory Cycle
+
+```
+Research → Implement → Unit Tests → E2E Demo → Feedback → Research → …
+```
+
+Each step is **required**. Never skip to the next step until the current one is complete.
+
+#### Step 1 — Research first (before every iteration)
+- Search for academic papers, blog posts, and SE books relevant to the planned improvement.
+- Use `WebSearch` and `WebFetch` to collect references. Record findings in `DESIGN.md`
+  with citations (author, title, URL, year).
+- Write a brief justification: *why* this improvement, *what* the literature says, *how*
+  it maps to the codebase. Then and only then begin implementation.
+
+#### Step 2 — Implement + unit tests
+- Follow the normal TDD cycle (Red → Green → Refactor).
+- All existing tests must remain green. `uv run pytest tests/ -x -q`
+- Commit in logical units. Push to origin.
+
+#### Step 3 — E2E demonstration with REAL agents (mandatory, no mocks)
+- After each feature set, create a demonstration under `~/Demonstration/<topic>/demo.py`.
+- **Demonstrations MUST use real `ClaudeCodeAgent` instances** running actual `claude`
+  processes in real tmux panes. They must produce real artefacts (files, test results).
+- `HeadlessAgent` variants (`FastAgent`, `SlowAgent`, etc.) are only allowed in unit tests
+  and in `complex_pipeline` benchmarks — **never** in demonstrations that claim to validate
+  production behaviour.
+- Document demo results in `~/Demonstration/<topic>/build-log.md`:
+  - What passed / what failed
+  - Root cause of every failure
+  - Fix applied (or GitHub Issue opened if it needs user input)
+
+#### Step 4 — Feedback loop
+- Every bug or quality gap found in the demo **must** become either:
+  a. A fix in the current iteration (if the root cause is clear), or
+  b. A GitHub Issue if user input is required, or
+  c. A candidate in `DESIGN.md §10.5` for the next iteration.
+- After fixing demo bugs, re-run the demo to confirm all checks pass.
+- Then begin the next Research step for the next iteration.
+
+### When to Open a GitHub Issue
+Open an issue (not a user question) when:
+- A design decision requires user preference (e.g., API shape, UX trade-off).
+- A bug cannot be diagnosed without information only the user has.
+- An architectural change is large enough that user sign-off is prudent.
+
+**Never block the autonomous loop waiting for a response.** After opening the issue,
+continue with whatever iteration candidates remain in `DESIGN.md §10.5`.
+
+### Permanent Rules
+- `DESIGN.md` is the source of truth for design decisions, references, and iteration history.
+- `DESIGN.md §10.5` always lists the next candidates in priority order.
+- Every demo's `build-log.md` must be written before moving to the next iteration.
+- Do not use `--no-verify` or skip tests to meet a deadline.
 
 ## Key Decisions
 
