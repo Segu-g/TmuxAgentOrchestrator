@@ -517,6 +517,34 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 - **認証不要 `/metrics`** — Prometheus スクレイパーは認証ヘッダーを持たないことが多い。ネットワークレベルで保護（localhost バインドまたはファイアウォール）することを推奨。ドキュメントコメントに明記。
 - **`prometheus-client` を main deps に追加** — 既存の `httpx`, `webauthn` と同様に main deps へ追加。dev-only にしないのは、本番 web server が `/metrics` を提供するため。
 
+### 10.10 調査記録 (v0.14.0, 2026-03-05)
+
+#### 実装: タスク結果ルーティング (`reply_to` フィールド)
+
+**調査観点:**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| リクエスト-返信パターン | Request-Reply with Correlation IDs | ["Learning Notes #15 – Request Reply Pattern \| RabbitMQ" (parottasalna.com, 2024)](https://parottasalna.com/2024/12/28/learning-notes-15-request-reply-pattern-rabbitmq/) |
+| 階層エージェントシステムの情報フロー | 5軸タクソノミー (Control Hierarchy, Information Flow, Role Delegation, Temporal Layering, Communication Structure) | [Moore, D.J. "A Taxonomy of Hierarchical Multi-Agent Systems: Design Patterns, Coordination Mechanisms, and Industrial Applications" arXiv:2508.12683 (2025)](https://arxiv.org/abs/2508.12683) |
+| LLM エージェント間のコーディネーション | Pub/Sub vs Request-Reply のトレードオフ | [Galileo "Multi-Agent Coordination Strategies" (2025)](https://galileo.ai/blog/multi-agent-coordination-strategies) |
+
+**主要知見:**
+
+1. **Request-Reply パターン**: RabbitMQ のリクエスト-返信パターンは3つのコアコンポーネントから構成される — (a) 返信先キューを指定する `reply_to` プロパティ、(b) リクエストと返信を対応させる `correlation_id`、(c) リクエスト単位の一時的なルーティングテーブル。このシステムでは `task_id` が correlation ID として機能し、`_task_reply_to[task_id] = agent_id` が per-request routing table を提供する。
+
+2. **階層エージェントの情報フロー**: Moore (2025) によれば、階層エージェントシステムにおける情報フローは「上位から下位へのタスク配信」と「下位から上位への結果報告」の2方向で完結する必要がある。現行システムは RESULT を broadcast するのみで、親エージェントが結果を受信するには bus を直接購読する必要があった。`reply_to` により、暗黙的なバス監視なしに結果を親のメールボックスへ直接配送できる。
+
+3. **ピア比較**: LangChain LCEL、AutoGen、CrewAI はいずれも直接的な callback 関数 / return value パターンを使うため、メールボックスベースの非同期配送は本システム固有の非同期性・永続性要件 (プロセス境界を越えた配送) に対応したもの。
+
+**設計決定:**
+
+- **`Task.reply_to: str | None`** — Task dataclass に追加。ディスパッチループは `reply_to` を意識せず (透過的)、`_route_loop` のみが RESULT 処理時に確認する。SRP (Single Responsibility Principle) 維持。
+- **`_task_reply_to: dict[str, str]`** — task_id → agent_id のテーブルはオーケストレーター内でのみ保持。`submit_task()` で設定、`_route_result_reply()` で取得・削除 (配送後に自動クリーンアップ)。
+- **MailBox write + notify_stdin の2段階配送** — ファイル永続化 (Mailbox) と即時通知 (notify_stdin) を組み合わせることで、エージェントが後でスラッシュコマンドで読める状態を保ちつつリアルタイム通知も提供。
+- **未登録 `reply_to` エージェントは警告のみ** — クラッシュしない。エージェントがすでに停止している場合でも Mailbox への書き込みは試みる (将来の読み取り用)。
+- **`_mailbox` は orchestrator の設定可能属性** — `main.py` が `Mailbox` インスタンスを注入する設計 (依存性逆転; Mailbox をオーケストレーターの責務にしない)。
+
 ---
 
 ## 11. 今後の課題
@@ -528,6 +556,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~高~~ ~~エージェントの ERROR 状態からの自動リカバリ~~ | **完了 (v0.12.0)** — `_recovery_loop` + 指数バックオフ、`agent_recovered`/`agent_recovery_failed` イベント (Issue #3 クローズ) |
 | ~~高~~ ~~Director → ユーザーへの非同期プッシュ通知（現在はポーリング）~~ | **完了 (v0.12.0)** — SSE `/events` エンドポイント; Web UI の 3s ポーリングを SSE に置換 |
 | ~~中~~ ~~Web UI のエージェント階層ビジュアライゼーション（ツリー表示）~~ | **完了 (v0.11.0)** — `/agents/tree` エンドポイント + List/Tree トグル |
+| ~~中~~ ~~タスク結果を親エージェントのメールボックスに直接配送 (`reply_to`)~~ | **完了 (v0.14.0)** — `Task.reply_to` フィールド + `Orchestrator._route_result_reply()` + REST `POST /tasks` の `reply_to` パラメータ |
 | 中 | `/plan` と `/tdd` の出力を RESULT メッセージとして親に自動送信 |
 | 低 | エージェントのコンテキスト使用量モニタリング |
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |

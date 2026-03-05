@@ -6,6 +6,34 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.14.0] — 2026-03-05
+
+### Added
+
+**Task result routing — `reply_to` field**
+
+- New `Task.reply_to: str | None` field: when set, the orchestrator delivers
+  the completed RESULT directly to the named agent's mailbox (file) and calls
+  `agent.notify_stdin("__MSG__:<id>")` — closing the feedback loop for
+  multi-level hierarchies without requiring the parent to poll the bus
+- `Orchestrator.submit_task()` accepts new `reply_to: str | None` keyword arg
+- New `Orchestrator._route_result_reply()` coroutine handles per-task delivery
+  after RESULT messages are received in `_route_loop`
+- `_task_reply_to: dict[str, str]` routing table tracks task→agent mapping
+  (cleaned up on delivery to prevent unbounded growth)
+- `_mailbox: Mailbox | None` injectable attribute; callers (main.py / tests)
+  inject a configured `Mailbox` instance for file-based delivery
+- REST `POST /tasks` now accepts `reply_to` field and echoes it in the response
+- 6 new tests in `tests/test_result_routing.py`
+
+Design references:
+- Request-reply with correlation IDs: "Learning Notes #15 – Request Reply
+  Pattern | RabbitMQ" (parottasalna.com, 2024)
+- Hierarchical information flow: Moore, D.J. "A Taxonomy of Hierarchical
+  Multi-Agent Systems" arXiv:2508.12683 (2025)
+
+---
+
 ## [0.13.0] — 2026-03-05
 
 ### Added
