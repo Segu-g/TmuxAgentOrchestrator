@@ -79,10 +79,10 @@ class TaskResultPayload(_BasePayload):
     output: str | None = None
     error: str | None = None
 
-    @field_validator("error", mode="before")
+    @field_validator("output", "error", mode="before")
     @classmethod
-    def coerce_error_to_str(cls, v: Any) -> str | None:
-        """Coerce non-string error values to str for robustness against malformed messages."""
+    def coerce_to_str(cls, v: Any) -> str | None:
+        """Coerce non-string output/error values to str for robustness against malformed messages."""
         if v is None:
             return None
         if isinstance(v, str):

@@ -80,6 +80,23 @@
         "title": "SpawnAgent",
         "type": "object"
       },
+      "TaskBatchSubmit": {
+        "description": "Request body for POST /tasks/batch.",
+        "properties": {
+          "tasks": {
+            "items": {
+              "$ref": "#/components/schemas/TaskSubmit"
+            },
+            "title": "Tasks",
+            "type": "array"
+          }
+        },
+        "required": [
+          "tasks"
+        ],
+        "title": "TaskBatchSubmit",
+        "type": "object"
+      },
       "TaskSubmit": {
         "properties": {
           "metadata": {
@@ -542,6 +559,47 @@
           }
         },
         "summary": "Submit a new task"
+      }
+    },
+    "/tasks/batch": {
+      "post": {
+        "description": "Submit a list of tasks atomically.\n\nAll tasks in the batch are validated before any are enqueued.  If the\nrequest body is malformed, FastAPI returns 422 before this handler runs.\n\nDesign reference:\n- adidas API Guidelines \"Batch Operations\"\n  https://adidas.gitbook.io/api-guidelines/rest-api-guidelines/execution/batch-operations\n- PayPal Batch API (Medium, PayPal Tech Blog)\n  https://medium.com/paypal-tech/batch-an-api-to-bundle-multiple-paypal-rest-operations-6af6006e002",
+        "operationId": "submit_tasks_batch_tasks_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskBatchSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Tasks Batch Tasks Batch Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit multiple tasks in one request"
       }
     }
   }

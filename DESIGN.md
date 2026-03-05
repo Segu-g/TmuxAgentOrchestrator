@@ -545,6 +545,40 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 - **未登録 `reply_to` エージェントは警告のみ** — クラッシュしない。エージェントがすでに停止している場合でも Mailbox への書き込みは試みる (将来の読み取り用)。
 - **`_mailbox` は orchestrator の設定可能属性** — `main.py` が `Mailbox` インスタンスを注入する設計 (依存性逆転; Mailbox をオーケストレーターの責務にしない)。
 
+### 10.11 調査記録 (v0.15.0, 2026-03-05)
+
+#### 実装: `POST /tasks/batch` + AHC Best-of-N デモ
+
+**調査観点:**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| REST バッチ操作 | Bulk/Batch エンドポイント | [mscharhag: "Supporting bulk operations in REST APIs"](https://www.mscharhag.com/api-design/bulk-and-batch-operations); [adidas API Guidelines "Batch Operations"](https://adidas.gitbook.io/api-guidelines/rest-api-guidelines/execution/batch-operations) |
+| バッチ API の実装パターン | Resource-specific bulk sub-collection | [PayPal Tech Blog: "Batch: An API to bundle multiple REST operations"](https://medium.com/paypal-tech/batch-an-api-to-bundle-multiple-paypal-rest-operations-6af6006e002) |
+| Best-of-N サンプリング | 並列エージェント + スコア集約 | [Inference Scaling Laws (ICLR 2025)](https://proceedings.iclr.cc/paper_files/paper/2025/file/8c3caae2f725c8e2a55ecd600563d172-Paper-Conference.pdf); [OpenAI "Competitive Programming with Large Reasoning Models" arXiv:2502.06807 (2025)](https://arxiv.org/abs/2502.06807) |
+| 並列 LLM エージェント | Parallel agents with early termination | [arxiv:2507.08944 "Optimizing Sequential Multi-Step Tasks with Parallel LLM Agents" (2025)](https://arxiv.org/html/2507.08944v1) |
+| 多エージェント失敗分析 | Why multi-agent systems fail | [Cemri et al. "Why Do Multi-Agent LLM Systems Fail?" arXiv:2503.13657 (2025)](https://arxiv.org/pdf/2503.13657) |
+| AtCoder Heuristic Contest | 連続スコア最適化コンテスト | [AHC001 問題ページ](https://atcoder.jp/contests/ahc001/tasks/ahc001_a); [AHC058 Sakana AI 優勝](https://sakana.ai/ahc058/) |
+
+**主要知見:**
+
+1. **REST バッチ設計**: `POST /tasks/batch` は「リソース固有のバルクサブコレクション」パターンに準拠。汎用 `/batch` エンドポイント（PayPal 方式）は柔軟だが複雑。本システムではタスク提出という単一操作のバッチ化のため、シンプルな `{tasks: [...]}` リクエストボディを採用。すべてのタスクが検証済み後にキューイングされる「All or None」セマンティクスにより、部分的なエンキューによる一貫性問題を回避。
+
+2. **Best-of-N サンプリング**: Inference Scaling Laws (ICLR 2025) によれば、best-of-N サンプリングは推論スケーリングの中で最もシンプルかつ有効な手法の一つ。N が大きくなると小モデルでも大モデルに迫るパフォーマンスを発揮できる。競技プログラミングコンテキストでは OpenAI (2025) が「数千サンプルの中から最高スコアを選択する」方式を採用。本システムでは3エージェントが異なる戦略（greedy/random/DP）を並列実行し、スコアを比較する。
+
+3. **AHC001 問題**: 10000×10000 グリッドに N 社の広告矩形を配置し、面積満足度の総和を最大化する問題。オフラインスコアラーが公開されており、複数戦略を比較するのに適している。本デモでは実装負荷を下げるため、より単純な Weighted Knapsack 問題（0-1 ナップサック, N=15, C=50）を使用。明確な入出力フォーマットと検証可能なスコア関数を備え、greedy/random/DP の3戦略で差が出る設計。
+
+4. **並列エージェント失敗の教訓**: Cemri et al. (2025) によれば、多エージェントシステムが失敗する主要原因は (a) エラー伝播、(b) コンテキスト汚染、(c) 非効率な通信、(d) スケーリング問題。本デモでは各エージェントが完全に独立したタスク（ファイル名で区別）を受け取ることでコンテキスト汚染を回避。
+
+**設計決定:**
+
+- **`POST /tasks/batch` の検証は FastAPI に委任** — `TaskBatchSubmit` の `tasks: list[TaskSubmit]` 定義により、各 TaskSubmit のバリデーションは pydantic が担う。ハンドラーはバリデーション済みデータのみを受け取る。
+- **`TaskBatchSubmit` はモジュールレベルに定義** — 他の `TaskSubmit`、`AgentKillResponse` 等と同列に定義し、コードの一貫性を維持。
+- **バッチ内の全タスクを逐次エンキュー** — 現在の `Orchestrator.submit_task()` は async 関数であり、バッチハンドラー内でループ実行。将来的には `asyncio.gather()` で並列エンキューも可能だが、キューの順序保証のため逐次とした。
+- **デモ問題は Weighted Knapsack** — AHC001 の広告配置問題は実装が複雑すぎる（矩形重複判定など）ため、エージェントが10分以内に独立して解けるシンプルな 0-1 ナップサック問題を採用。最適解は既知（DP により score=154）なので、エージェントの解の品質を客観的に評価できる。
+- **スコアラー (`score.py`) は stdlib のみ使用** — 外部依存なしで `python score.py problem.txt solution.txt` → `SCORE=N` を出力。エージェントが自分でスコアを確認できる設計。
+- **`TaskResultPayload.output/error` の型強制** — 既存バグ修正: `output` フィールドが `str | None` であるにも関わらず `@field_validator` が `error` のみに適用されており、`output` に int が渡ると pydantic v2 が ValidationError を送出していた。`@field_validator("output", "error", mode="before")` に統合して解消。
+
 ---
 
 ## 11. 今後の課題
@@ -557,6 +591,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~高~~ ~~Director → ユーザーへの非同期プッシュ通知（現在はポーリング）~~ | **完了 (v0.12.0)** — SSE `/events` エンドポイント; Web UI の 3s ポーリングを SSE に置換 |
 | ~~中~~ ~~Web UI のエージェント階層ビジュアライゼーション（ツリー表示）~~ | **完了 (v0.11.0)** — `/agents/tree` エンドポイント + List/Tree トグル |
 | ~~中~~ ~~タスク結果を親エージェントのメールボックスに直接配送 (`reply_to`)~~ | **完了 (v0.14.0)** — `Task.reply_to` フィールド + `Orchestrator._route_result_reply()` + REST `POST /tasks` の `reply_to` パラメータ |
+| ~~中~~ ~~`POST /tasks/batch` — 複数タスクを一括提出~~ | **完了 (v0.15.0)** — `TaskBatchSubmit` + `POST /tasks/batch`; AHC デモで 3 タスクを並列提出 |
 | 中 | `/plan` と `/tdd` の出力を RESULT メッセージとして親に自動送信 |
 | 低 | エージェントのコンテキスト使用量モニタリング |
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |
@@ -566,19 +601,18 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 | 優先度 | シナリオ | パターン |
 |--------|----------|---------|
-| **高** | **AtCoder Heuristic Contest (AHC) best-of-N** | Competitive / best-of-N |
+| ~~**高**~~ ~~**AtCoder Heuristic Contest (AHC) best-of-N**~~ | **完了 (v0.15.0)** — 3 ClaudeCodeAgent 並列実行、Weighted Knapsack 問題、`POST /tasks/batch` で一括提出、スコアで勝者選択 |
 | 中 | Director → Workers でマイクロサービス API を分割実装 | Director → Workers |
 | 中 | agent-a が実装 → agent-b がレビュー → agent-a が修正 | Peer review pipeline |
 
-**AHC best-of-N シナリオ詳細**:
-- 過去の AHC 問題（AHC001〜AHC030）を使用（公開済み・オフラインスコアラーあり）
-- N ≥ 3 エージェントが同一問題を異なる戦略（greedy / random restart / simulated annealing など）で解く
-- 各エージェントがソルバースクリプトを書いて実行し、スコアを出力
-- オーケストレーターがスコアを収集して最高得点の解を選択
-- 検証項目: 正しい本数のソルバーが生成された・スコアが数値・勝者が選択された
-
-→ スコア関数が完全に定義されていて曖昧さがなく、複数エージェントの並列実行価値が明確。
-→ 詳細は CLAUDE.md「Recommended concrete scenario」を参照。
+**AHC best-of-N デモ完了 (v0.15.0)**:
+- 問題: Weighted Knapsack (N=15, C=50) — 最適解 score=154 (DP で検証済み)
+- 3 エージェント並列実行: agent-greedy (greedy by v/w ratio), agent-random (Monte Carlo 10k trials), agent-dp (0-1 DP exact)
+- `POST /tasks/batch` で3タスクを一括提出 (新機能)
+- 各エージェントが solver スクリプトを書いて実行 → solution ファイルに出力
+- `score.py` で各 solution を検証・スコア計算
+- オーケストレーターが最高スコアを選択して勝者を表示
+- デモフォルダ: `~/Demonstration/v0.15.0-ahc-best-of-n/`
 
 ### アーキテクチャ
 

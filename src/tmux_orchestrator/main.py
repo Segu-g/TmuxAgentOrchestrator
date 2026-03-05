@@ -109,18 +109,23 @@ def web(
     orchestrator, bus, tmux = _build_system(config)
     patch_web_url(orchestrator, host, port)
     hub = WebSocketHub(bus=bus)
-    fastapi_app = create_app(orchestrator=orchestrator, hub=hub, api_key=api_key)
-
-    # Wire orchestrator start/stop into the FastAPI app's lifespan via event handlers.
-    # create_app already uses lifespan for the WebSocket hub; these hooks extend it.
-    fastapi_app.router.on_startup.append(orchestrator.start)
 
     async def _shutdown() -> None:
         await orchestrator.stop()
         tmux.stop_watcher()
         tmux.kill_session()
 
-    fastapi_app.router.on_shutdown.append(_shutdown)
+    # Pass on_startup / on_shutdown into create_app's lifespan so that the
+    # orchestrator starts inside the FastAPI lifespan context.  Using
+    # router.on_startup is NOT sufficient when a lifespan context manager is
+    # defined — FastAPI ≥ 0.93 ignores router startup hooks in that case.
+    fastapi_app = create_app(
+        orchestrator=orchestrator,
+        hub=hub,
+        api_key=api_key,
+        on_startup=orchestrator.start,
+        on_shutdown=_shutdown,
+    )
 
     display_host = "localhost" if host in ("0.0.0.0", "") else host
     typer.echo(f"Web UI:  http://{display_host}:{port}/")

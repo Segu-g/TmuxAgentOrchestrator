@@ -166,3 +166,42 @@ async def test_readyz_no_workers_returns_503(client):
     assert r.status_code in (200, 503)  # status depends on orchestrator state
     data = r.json()
     assert "checks" in data
+
+
+def test_on_startup_hook_called_during_lifespan():
+    """create_app(on_startup=...) is called within the lifespan context manager.
+
+    Regression test: router.on_startup hooks are NOT called when a lifespan
+    context manager is provided (FastAPI >= 0.93). The on_startup parameter of
+    create_app() is the correct way to inject startup logic.
+
+    Uses starlette TestClient (not httpx.AsyncClient) because only TestClient
+    invokes the ASGI lifespan events.
+    """
+    from fastapi.testclient import TestClient
+
+    called: list[str] = []
+
+    async def startup_hook():
+        called.append("startup")
+
+    async def shutdown_hook():
+        called.append("shutdown")
+
+    app = create_app(
+        _MockOrchestrator(),
+        _MockHub(),
+        api_key=_API_KEY,
+        on_startup=startup_hook,
+        on_shutdown=shutdown_hook,
+    )
+
+    with TestClient(app, raise_server_exceptions=True) as c:
+        r = c.get("/healthz")
+        assert r.status_code == 200
+        assert "startup" in called, (
+            "on_startup hook was NOT called during lifespan — "
+            "check create_app lifespan integration"
+        )
+
+    assert "shutdown" in called, "on_shutdown hook was NOT called during lifespan teardown"

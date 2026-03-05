@@ -10,7 +10,7 @@ import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Callable
 
 import webauthn
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket
@@ -44,6 +44,12 @@ class TaskSubmit(BaseModel):
     priority: int = 0
     metadata: dict[str, Any] = {}
     reply_to: str | None = None  # agent_id that receives the RESULT in its mailbox
+
+
+class TaskBatchSubmit(BaseModel):
+    """Request body for POST /tasks/batch."""
+
+    tasks: list[TaskSubmit]
 
 
 class AgentKillResponse(BaseModel):
@@ -166,7 +172,14 @@ def _build_agent_tree(agents: list[dict]) -> list[dict]:
     return roots
 
 
-def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> FastAPI:
+def create_app(
+    orchestrator: Any,
+    hub: WebSocketHub,
+    *,
+    api_key: str = "",
+    on_startup: Callable[[], Any] | None = None,
+    on_shutdown: Callable[[], Any] | None = None,
+) -> FastAPI:
     """Create and wire up the FastAPI application.
 
     Parameters
@@ -175,6 +188,14 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
         The :class:`~tmux_orchestrator.orchestrator.Orchestrator` instance.
     hub:
         A :class:`WebSocketHub` already connected to the bus.
+    on_startup:
+        Optional async callable invoked during lifespan startup (after hub).
+        Use this to start the orchestrator when using the web server.
+        ``router.on_startup`` hooks are NOT called when a ``lifespan`` context
+        manager is provided (FastAPI ≥ 0.93 behaviour), so callers must use
+        this parameter instead.
+    on_shutdown:
+        Optional async callable invoked during lifespan shutdown (before hub).
     """
     auth = _make_combined_auth(api_key)
 
@@ -182,7 +203,11 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
     async def _lifespan(application: FastAPI):  # noqa: ARG001
         await hub.start()
         logger.info("WebSocket hub started")
+        if on_startup is not None:
+            await on_startup()
         yield
+        if on_shutdown is not None:
+            await on_shutdown()
         await hub.stop()
         logger.info("WebSocket hub stopped")
 
@@ -323,6 +348,33 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
         if task.reply_to is not None:
             result["reply_to"] = task.reply_to
         return result
+
+    @app.post("/tasks/batch", summary="Submit multiple tasks in one request", dependencies=[Depends(auth)])
+    async def submit_tasks_batch(body: TaskBatchSubmit) -> dict:
+        """Submit a list of tasks atomically.
+
+        All tasks in the batch are validated before any are enqueued.  If the
+        request body is malformed, FastAPI returns 422 before this handler runs.
+
+        Design reference:
+        - adidas API Guidelines "Batch Operations"
+          https://adidas.gitbook.io/api-guidelines/rest-api-guidelines/execution/batch-operations
+        - PayPal Batch API (Medium, PayPal Tech Blog)
+          https://medium.com/paypal-tech/batch-an-api-to-bundle-multiple-paypal-rest-operations-6af6006e002
+        """
+        results: list[dict] = []
+        for item in body.tasks:
+            task = await orchestrator.submit_task(
+                item.prompt,
+                priority=item.priority,
+                metadata=item.metadata,
+                reply_to=item.reply_to,
+            )
+            record: dict = {"task_id": task.id, "prompt": task.prompt, "priority": task.priority}
+            if task.reply_to is not None:
+                record["reply_to"] = task.reply_to
+            results.append(record)
+        return {"tasks": results}
 
     @app.get("/tasks", summary="List pending tasks", dependencies=[Depends(auth)])
     async def list_tasks() -> list[dict]:

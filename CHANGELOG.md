@@ -6,6 +6,49 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.15.0] — 2026-03-05
+
+### Added
+
+**`POST /tasks/batch` — submit multiple tasks in one request**
+
+- New REST endpoint `POST /tasks/batch` accepts `{"tasks": [...]}` body where
+  each item is a full `TaskSubmit` (prompt, priority, metadata, reply_to)
+- Returns `{"tasks": [...]}` with task_id, prompt, priority, and optional
+  reply_to for each submitted task
+- All tasks validated before any are enqueued (all-or-none semantics)
+- New `TaskBatchSubmit` Pydantic model alongside existing request models
+- 8 new tests in `tests/test_batch_tasks.py` covering: response structure,
+  unique IDs, priorities, reply_to propagation, empty batch, auth, invalid
+  body, and queue visibility
+
+**AHC Best-of-N Demo — `~/Demonstration/v0.15.0-ahc-best-of-n/`**
+
+- Orchestrates 3 real `ClaudeCodeAgent` instances solving the same Weighted
+  Knapsack problem (N=15, C=50) with different strategies in parallel:
+  - `agent-greedy`: greedy by value/weight ratio
+  - `agent-random`: Monte Carlo sampling (10 000 trials)
+  - `agent-dp`: exact 0-1 dynamic programming (optimal score=154)
+- Each agent independently writes a solver, runs it, and writes a solution file
+- `score.py` validates solutions and outputs `SCORE=N`; orchestrator selects winner
+- Uses `POST /tasks/batch` to submit all 3 tasks simultaneously
+- Demo files: `problem.txt`, `score.py`, `ahc_config.yaml`, `run_demo.py`
+
+**Bug fix: `TaskResultPayload.output` type coercion**
+
+- `@field_validator("output", "error", mode="before")` — previously only
+  `error` was coerced; `output` with non-string values (e.g. int from
+  hypothesis-generated payloads) raised `ValidationError`
+- Fixes pre-existing property-test failure in `tests/test_properties.py`
+
+Design references:
+- REST batch: adidas API Guidelines "Batch Operations"; PayPal Tech Blog
+  "Batch: An API to bundle multiple REST operations"
+- Best-of-N: Inference Scaling Laws (ICLR 2025); OpenAI arXiv:2502.06807 (2025)
+- Multi-agent failures: Cemri et al. arXiv:2503.13657 (2025)
+
+---
+
 ## [0.14.0] — 2026-03-05
 
 ### Added
