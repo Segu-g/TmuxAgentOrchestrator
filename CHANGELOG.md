@@ -6,6 +6,45 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.24.0] — 2026-03-05
+
+### Added
+
+**Task Result Persistence — `ResultStore` + `GET /results` + `GET /results/dates`**
+
+Implements an append-only JSONL result store following the Event Sourcing
+pattern (Fowler 2005) with CQRS-style separation of write (append) and read
+(query) paths (Greg Young 2010). Every task completion is recorded as an
+immutable, time-stamped fact on disk. Results survive orchestrator restarts,
+enabling post-mortem analysis, workflow resumption, and audit trails.
+
+References:
+- Martin Fowler "Event Sourcing" (2005) https://martinfowler.com/eaa.html
+- Greg Young "CQRS Documents" (2010)
+- Rich Hickey "The Value of Values" (Datomic, 2012)
+
+- `ResultStore` (`result_store.py`): new module. Thread-safe append-only JSONL
+  store. File layout: `{store_dir}/{session_name}/{YYYY-MM-DD}.jsonl`. Each
+  line is a JSON object: `{task_id, agent_id, prompt, result_text, error,
+  duration_s, ts}`. `query()` supports filtering by `agent_id`, `task_id`,
+  `date` with a `limit` cap. `all_dates()` returns sorted list of dates with
+  data.
+- `OrchestratorConfig` new fields: `result_store_enabled` (default `False`),
+  `result_store_dir` (default `~/.tmux_orchestrator/results`).
+- `Orchestrator._result_store` — created when `result_store_enabled=True`; wired
+  into `_record_agent_history()` so every RESULT message is persisted.
+- REST `GET /results` — query persisted results with optional `agent_id`,
+  `task_id`, `date`, `limit` query params. Returns `[]` when store disabled.
+- REST `GET /results/dates` — list dates with persisted data.
+
+### Tests
+
+- 23 new tests in `tests/test_result_store.py`
+
+Total: **409 tests** (was 386).
+
+---
+
 ## [0.23.0] — 2026-03-05
 
 ### Added

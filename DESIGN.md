@@ -886,6 +886,60 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.19 調査記録 (v0.24.0, 2026-03-05)
+
+**実装テーマ: Task Result Persistence — Event Sourcing + CQRS**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| 追記専用ログ | Event Sourcing | Martin Fowler "Event Sourcing" (2005) https://martinfowler.com/eaa.html |
+| 読み書き分離 | CQRS (Command Query Responsibility Segregation) | Greg Young "CQRS Documents" (2010) https://cqrs.files.wordpress.com/2010/11/cqrs_documents.pdf |
+| イミュータブルなファクト | "Value of Values" | Rich Hickey, Datomic (2012) https://www.infoq.com/presentations/Value-Values/ |
+
+**主要知見:**
+
+1. **Event Sourcing (Fowler 2005)**: アプリケーション状態のすべての変化を順序付きイベントとして記録する。「現在の状態」を直接保存するのではなく、「状態変化のシーケンス」を保存する。これにより、過去の任意の時点の状態を再現でき、監査証跡が自然に生まれる。タスク完了（RESULT メッセージ）はまさにこの意味での「イベント」であり、追記専用 JSONL ファイルが最もシンプルな実装。
+
+2. **CQRS (Greg Young 2010)**: 書き込みパス（append）と読み取りパス（query）を分離する。`ResultStore.append()` は低遅延の単純なファイル追記、`ResultStore.query()` は任意の複雑さのフィルタリングを担う。これにより書き込みが読み取りの複雑さに影響されない。
+
+3. **Datomic "Value of Values" (Hickey 2012)**: 各レコードはイミュータブルで時刻スタンプ付きのファクト。更新・削除は一切しない。これにより並行書き込みの複雑さが大幅に減少（ロックはファイル追記の瞬間のみ必要）。
+
+4. **JSONL フォーマット**: 1行1レコードの JSON Lines 形式は部分読み込み・ストリーミング処理が容易で、gzip 圧縮効率も高い。バイナリフォーマット（MessagePack, Avro）より可読性が高く、外部ツール（`jq`, `grep`）との親和性が高い。
+
+5. **Thread safety**: `threading.Lock` によるアトミックなファイル追記。asyncio との混在（orchestrator は async、result store の append は同期）のため、`threading.Lock`（asyncio ロックではなく）を使用。これにより asyncio イベントループをブロックせず、短い I/O はブロッキングでも許容範囲内。
+
+**設計決定:**
+
+- **JSONL ファイルは日付単位**: 1日1ファイル (`YYYY-MM-DD.jsonl`)。単一ファイルに全期間を集約すると時系列クエリがスキャン全件になるが、日付単位なら特定日のみスキャン可能。ローテーションも単純。
+- **`result_store_enabled=False` がデフォルト**: 予期しない I/O を避ける。永続化が必要な場合のみ YAML で有効化する保守的設計。
+- **`result_text` は 4000 文字でトランケート**: タスク出力が数万行になりうる (LLM 出力)。完全な出力は `_buffer_director_result()` の 40 行テール抽出と同様に過剰なディスク使用を防ぐためトランケート。完全な出力が必要なら agent の worktree ファイルを参照すれば良い。
+- **`prompt` は 500 文字でトランケート**: 識別・デバッグには十分。
+- **`_record_agent_history()` から統合呼び出し**: `_task_started_at` と `_task_started_prompt` がすでにポップされた後のデータ（duration, prompt）を再利用できるため、`_record_agent_history` の末尾で `_result_store.append()` を呼ぶ設計が最も自然。例外は `logger.exception()` でサイレント処理し、result store の失敗でタスク処理全体を止めない。
+
+**テスト (23テスト, 合計409テスト):**
+- `append()` が正しいファイルに有効な JSON 行を書き込む
+- エラーフィールドの永続化
+- 同日に複数レコード
+- `query(agent_id=)` によるフィルタリング
+- `query(task_id=)` によるフィルタリング
+- `query(date=)` によるフィルタリング
+- `query(limit=)` の上限適用
+- `all_dates()` のソート順保証
+- スレッドセーフ: 50スレッド並行 append → 全行有効 JSON
+- REST `GET /results`: フィルタ動作・disabled 時の空リスト
+- REST `GET /results/dates`: 日付一覧
+- `Orchestrator._result_store` の有効化・無効化
+
+**デモシナリオ (v0.24.0):**
+- シナリオ: "Persistent Audit Trail"
+- 2エージェント: analyst (温度データ分析 → analysis.txt), summarizer (analysis.txt 読み込み → summary.txt)
+- `result_store_enabled=True`, `result_store_dir=/tmp/v024-results/`
+- Orchestrator 停止後に JSONL ファイルを直接読み込んでリザルトを表示
+- オーケストレーター再起動後も結果が生存することを実証
+- デモフォルダ: `~/Demonstration/v0.24.0-result-persistence/`
+
+---
+
 ## 11. 今後の課題
 
 ### 機能
@@ -902,6 +956,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~中~~ ~~Rate limiting / バックプレッシャー (Token Bucket)~~ | **完了 (v0.20.0)** — `TokenBucketRateLimiter` + `GET /rate-limit`, `PUT /rate-limit`; `OrchestratorConfig.rate_limit_rps/burst`; `wait_for_token` param; 24 テスト (326 合計) |
 | 中 | `/plan` と `/tdd` の出力を RESULT メッセージとして親に自動送信 |
 | ~~高~~ ~~キュー深度オートスケーリング~~ | **完了 (v0.23.0)** — `AutoScaler` MAPE-Kループ; `GET/PUT /orchestrator/autoscaler`; `OrchestratorConfig.autoscale_*`; 23テスト (386合計) |
+| ~~中~~ ~~タスク結果の永続化（Event Sourcing）~~ | **完了 (v0.24.0)** — `ResultStore` 追記専用 JSONL; `GET /results`, `GET /results/dates`; `OrchestratorConfig.result_store_enabled/dir`; 23テスト (409合計) |
 | ~~低~~ ~~エージェントのコンテキスト使用量モニタリング~~ | **完了 (v0.21.0)** — `ContextMonitor` + `GET /agents/{id}/stats`, `GET /context-stats`; `context_warning`/`notes_updated`/`summarize_triggered` STATUS イベント; `context_auto_summarize`; 21 テスト (347 合計) |
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |
 | ~~低~~ ~~Prometheus メトリクス (`/metrics`)~~ | **完了 (v0.13.0)** — `GET /metrics` (prometheus_client 直接使用; 認証不要) |
@@ -919,6 +974,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~低~~ ~~Context monitor + TSP best-of-N~~ | **完了 (v0.21.0)** — 3 agents (nearest-neighbor/2-opt/random-restart), GET /context-stats 実証, TSP N=10 cities |
 | ~~高~~ ~~Dynamic Agent Creation — コードレビューパイプライン~~ | **完了 (v0.22.0)** — テンプレート0で起動 → `create_agent()` で generator/reviewer を動的追加 → fibonacci.py 生成 → REVIEW.md 生成; デモフォルダ: `~/Demonstration/v0.22.0-dynamic-agents/` |
 | ~~高~~ ~~Queue-Depth Autoscaling — バースト負荷処理~~ | **完了 (v0.23.0)** — 0エージェントで起動 → AutoScaler (min=0, max=3, threshold=2) が6タスクバーストを検出 → 3エージェントを動的作成 → クールダウン後にスケールゼロ; デモフォルダ: `~/Demonstration/v0.23.0-autoscaling/` |
+| ~~中~~ ~~Persistent Audit Trail — 結果永続化~~ | **完了 (v0.24.0)** — analyst + summarizer, result_store_enabled=True, Orchestrator停止後も JSONL ファイルが残ることを実証; デモフォルダ: `~/Demonstration/v0.24.0-result-persistence/` |
 
 **AHC best-of-N デモ完了 (v0.15.0)**:
 - 問題: Weighted Knapsack (N=15, C=50) — 最適解 score=154 (DP で検証済み)
