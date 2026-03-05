@@ -628,6 +628,91 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
         return {"agent_id": agent_id, "reset": True}
 
+    @app.post(
+        "/agents/{agent_id}/drain",
+        summary="Drain an agent — stop it after its current task completes",
+        dependencies=[Depends(auth)],
+    )
+    async def drain_agent(agent_id: str) -> dict:
+        """Put *agent_id* into graceful drain mode.
+
+        - **IDLE**: immediately stops the agent and removes it from the registry.
+          Returns ``{status: "stopped_immediately"}``.
+        - **BUSY**: marks the agent as ``DRAINING``; it will be auto-stopped and
+          removed from the registry once its current task finishes.
+          Returns ``{status: "draining"}``.
+        - **DRAINING / STOPPED / ERROR**: returns 409 Conflict.
+
+        A STATUS event ``agent_draining`` (or ``agent_drained`` for immediate stops)
+        is published to the bus.
+
+        Design references:
+        - Kubernetes Pod ``terminationGracePeriodSeconds``
+        - HAProxy graceful restart
+        - UNIX ``SO_LINGER`` graceful socket close
+        - AWS ECS ``stopTimeout``
+        - DESIGN.md §10.23 (v0.28.0)
+        """
+        try:
+            result = await orchestrator.drain_agent(agent_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
+        status = result.get("status")
+        if status in ("already_draining", "already_stopped"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Agent {agent_id!r} cannot be drained (current status: {status})",
+            )
+        return result
+
+    @app.get(
+        "/agents/{agent_id}/drain",
+        summary="Check drain status of an agent",
+        dependencies=[Depends(auth)],
+    )
+    async def get_agent_drain_status(agent_id: str) -> dict:
+        """Return the drain status of *agent_id*.
+
+        Response fields:
+        - ``agent_id``: the agent's ID
+        - ``draining``: ``true`` if the agent is currently in DRAINING state
+        - ``status``: the agent's current status value
+
+        Returns 404 if the agent is not registered.
+
+        Design reference: DESIGN.md §10.23 (v0.28.0).
+        """
+        agent = orchestrator.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
+        from tmux_orchestrator.agents.base import AgentStatus  # noqa: PLC0415
+        return {
+            "agent_id": agent_id,
+            "draining": agent.status == AgentStatus.DRAINING,
+            "status": agent.status.value,
+        }
+
+    @app.post(
+        "/orchestrator/drain",
+        summary="Drain all agents — graceful orchestrator shutdown",
+        dependencies=[Depends(auth)],
+    )
+    async def drain_orchestrator() -> dict:
+        """Drain all registered agents.
+
+        Iterates over every registered agent and calls ``drain_agent()``:
+        - IDLE agents are stopped immediately.
+        - BUSY agents are marked DRAINING and auto-stopped after their current task.
+
+        Response fields:
+        - ``draining``: agent IDs that are now draining (were BUSY)
+        - ``stopped_immediately``: agent IDs stopped immediately (were IDLE)
+        - ``already_stopped``: agent IDs skipped (already STOPPED, ERROR, or DRAINING)
+
+        Design reference: DESIGN.md §10.23 (v0.28.0).
+        """
+        return await orchestrator.drain_all()
+
     @app.get(
         "/agents/{agent_id}/stats",
         summary="Per-agent context usage stats",

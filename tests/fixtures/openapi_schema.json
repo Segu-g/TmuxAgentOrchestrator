@@ -636,6 +636,88 @@
         "summary": "Stop an agent"
       }
     },
+    "/agents/{agent_id}/drain": {
+      "get": {
+        "description": "Return the drain status of *agent_id*.\n\nResponse fields:\n- ``agent_id``: the agent's ID\n- ``draining``: ``true`` if the agent is currently in DRAINING state\n- ``status``: the agent's current status value\n\nReturns 404 if the agent is not registered.\n\nDesign reference: DESIGN.md \u00a710.23 (v0.28.0).",
+        "operationId": "get_agent_drain_status_agents__agent_id__drain_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Agent Drain Status Agents  Agent Id  Drain Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Check drain status of an agent"
+      },
+      "post": {
+        "description": "Put *agent_id* into graceful drain mode.\n\n- **IDLE**: immediately stops the agent and removes it from the registry.\n  Returns ``{status: \"stopped_immediately\"}``.\n- **BUSY**: marks the agent as ``DRAINING``; it will be auto-stopped and\n  removed from the registry once its current task finishes.\n  Returns ``{status: \"draining\"}``.\n- **DRAINING / STOPPED / ERROR**: returns 409 Conflict.\n\nA STATUS event ``agent_draining`` (or ``agent_drained`` for immediate stops)\nis published to the bus.\n\nDesign references:\n- Kubernetes Pod ``terminationGracePeriodSeconds``\n- HAProxy graceful restart\n- UNIX ``SO_LINGER`` graceful socket close\n- AWS ECS ``stopTimeout``\n- DESIGN.md \u00a710.23 (v0.28.0)",
+        "operationId": "drain_agent_agents__agent_id__drain_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Drain Agent Agents  Agent Id  Drain Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Drain an agent \u2014 stop it after its current task completes"
+      }
+    },
     "/agents/{agent_id}/history": {
       "get": {
         "description": "Return the last *limit* completed task records for *agent_id*.\n\nEach record contains:\n- ``task_id``: unique task identifier\n- ``prompt``: the task prompt text\n- ``started_at``: ISO timestamp when the task was dispatched\n- ``finished_at``: ISO timestamp when the RESULT arrived\n- ``duration_s``: wall-clock seconds from dispatch to RESULT\n- ``status``: ``\"success\"`` or ``\"error\"``\n- ``error``: error message string, or null on success\n\nResults are ordered most-recent-first.  Pass ``?limit=N`` to control\nhow many records are returned (default 50, capped at 200).\n\nDesign reference: TAMAS (IBM, 2025) \"Beyond Black-Box Benchmarking:\nObservability, Analytics, and Optimization of Agentic Systems\"\narXiv:2503.06745 \u2014 per-agent task history enables bottleneck analysis.\nLangfuse \"AI Agent Observability\" (2024): tracing decision paths.",
@@ -1009,6 +1091,27 @@
           }
         },
         "summary": "Reconfigure autoscaler parameters"
+      }
+    },
+    "/orchestrator/drain": {
+      "post": {
+        "description": "Drain all registered agents.\n\nIterates over every registered agent and calls ``drain_agent()``:\n- IDLE agents are stopped immediately.\n- BUSY agents are marked DRAINING and auto-stopped after their current task.\n\nResponse fields:\n- ``draining``: agent IDs that are now draining (were BUSY)\n- ``stopped_immediately``: agent IDs stopped immediately (were IDLE)\n- ``already_stopped``: agent IDs skipped (already STOPPED, ERROR, or DRAINING)\n\nDesign reference: DESIGN.md \u00a710.23 (v0.28.0).",
+        "operationId": "drain_orchestrator_orchestrator_drain_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Drain Orchestrator Orchestrator Drain Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Drain all agents \u2014 graceful orchestrator shutdown"
       }
     },
     "/orchestrator/pause": {
