@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import threading
@@ -51,7 +52,7 @@ class TmuxInterface:
         self._stop_event = threading.Event()
         self._watcher_thread: threading.Thread | None = None
         # Event loop reference captured at construction time for thread-safe scheduling
-        self._loop: "asyncio.AbstractEventLoop | None" = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     # ------------------------------------------------------------------
     # Session management
