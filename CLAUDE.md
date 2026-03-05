@@ -100,7 +100,9 @@ Each step is **required**. Never skip to the next step until the current one is 
 - Commit in logical units. Push to origin.
 
 #### Step 3 — E2E demonstration with REAL agents
-- After each feature set, create a demonstration under `~/Demonstration/<topic>/demo.py`.
+- After each feature set, create a demonstration under `~/Demonstration/v<version>-<topic>/demo.py`.
+  The folder name MUST include the version number, e.g. `v0.13.0-reset-and-metrics`.
+  Format: `v{major}.{minor}.{patch}-{kebab-case-topic}`
 - **Demonstrations MUST use real `ClaudeCodeAgent` instances** running actual `claude`
   processes in real tmux panes. They must produce real artefacts (files, test results).
 - Mocks and `HeadlessAgent` variants (`FastAgent`, `SlowAgent`, etc.) are useful and
