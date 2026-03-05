@@ -108,16 +108,19 @@ Each step is **required**. Never skip to the next step until the current one is 
 - After each feature set, create `~/Demonstration/v<version>-<topic>/demo.py`.
   Folder name format: `v{major}.{minor}.{patch}-{kebab-case-topic}`
   Example: `v0.13.0-reset-and-metrics`
-- **Write `demo.py`, then immediately run it with `uv run python demo.py`.**
+- **Write `demo.py`, then immediately run it from the project root:**
+  ```
+  PYTHONPATH=src uv run python ~/Demonstration/v<version>-<topic>/demo.py
+  ```
   Running the demo is not optional — writing the script without executing it does not count.
 - If the demo fails, debug and fix the root cause before proceeding to Step 4.
   Do not move on while the demo is broken.
 - **Demonstrations MUST use real `ClaudeCodeAgent` instances** running actual `claude`
   processes in real tmux panes. They must produce real artefacts (files, test results).
-- Mocks and `HeadlessAgent` variants (`FastAgent`, `SlowAgent`, etc.) are useful and
-  appropriate in unit tests and infrastructure benchmarks.
-  They must NOT be used in demonstrations — the point of a demo is to validate that the
-  real system works end-to-end, which mocks cannot do.
+- Mocks, `HeadlessAgent`, and any in-process fake agents (`FastAgent`, `SlowAgent`, etc.)
+  are appropriate in unit tests only. They must NOT appear in demonstrations.
+  **Inspecting queue state or `_task_priorities` without dispatching real tasks does not count
+  as a demonstration.** The demo must show tasks being dispatched to and completed by real agents.
 
 **Demos must justify multi-agent orchestration.**
 A demo with 1 agent doing 1 task is not sufficient — it fails to demonstrate the value
