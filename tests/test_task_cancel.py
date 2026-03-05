@@ -161,8 +161,8 @@ async def test_cancel_unknown_task_returns_false() -> None:
         await orch.stop()
 
 
-async def test_cancel_dispatched_task_returns_false() -> None:
-    """cancel_task returns False for a task that was already dispatched."""
+async def test_cancel_dispatched_task_returns_true() -> None:
+    """cancel_task returns True for an in-progress task (cancels it via interrupt)."""
     bus = Bus()
     tmux = make_tmux_mock()
     config = make_config()
@@ -176,9 +176,11 @@ async def test_cancel_dispatched_task_returns_false() -> None:
         task = await orch.submit_task("slow task")
         # Wait for the agent to start processing
         await asyncio.wait_for(agent.started_event.wait(), timeout=2.0)
-        # Task is now dispatched (no longer in queue)
+        # Task is now dispatched (in-progress) — cancel_task should return True
         result = await orch.cancel_task(task.id)
-        assert result is False
+        assert result is True
+        # Task ID should be in _cancelled_task_ids
+        assert task.id in orch._cancelled_task_ids
     finally:
         await orch.stop()
 
