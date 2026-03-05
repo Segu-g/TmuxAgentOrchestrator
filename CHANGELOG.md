@@ -6,6 +6,68 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.16.0] — 2026-03-05
+
+### Added
+
+**Shared Scratchpad REST API — `GET/PUT/DELETE /scratchpad/{key}`**
+
+Implements the Blackboard architectural pattern (Buschmann et al., 1996):
+a simple in-process key-value store that agents in pipeline workflows can
+use to share intermediate results without file I/O or direct P2P messaging.
+
+- `GET  /scratchpad/`          — list all key-value pairs
+- `PUT  /scratchpad/{key}`     — write arbitrary JSON value; body: `{"value": ...}`; returns `{"key", "updated": true}`
+- `GET  /scratchpad/{key}`     — read a value (404 if not found)
+- `DELETE /scratchpad/{key}`   — delete an entry (404 if not found)
+- State is in-process; cleared on server restart
+- 17 new tests in `tests/test_scratchpad.py`
+
+**`target_agent` task routing — dispatch a task to a specific agent**
+
+Implements the Message Router pattern (Hohpe & Woolf "Enterprise Integration
+Patterns", 2003): when a task is submitted with `target_agent` set, the
+dispatch loop routes it exclusively to the named agent.
+
+- `Task.target_agent: str | None` — new field in the `Task` dataclass
+- `POST /tasks` and `POST /tasks/batch` accept optional `target_agent` parameter
+- Dispatch loop: if `target_agent` is set and the agent exists but is busy,
+  the task is re-queued and retried (up to `dlq_max_retries` times)
+- If `target_agent` names an unknown agent, the task is dead-lettered immediately
+- Response body includes `target_agent` when set
+- 8 new tests in `tests/test_target_agent.py`
+
+**Bug fix: non-isolated agents must not overwrite existing CLAUDE.md** (v0.15.1)
+
+- `ClaudeCodeAgent._write_agent_claude_md()` is now only called when
+  `isolate=True`; non-isolated agents share an existing directory that
+  may already have a project-level `CLAUDE.md` — overwriting it would
+  destroy project context (hotfix 9635538)
+- 3 new tests in `tests/test_context_files.py`
+
+**Peer Review Pipeline Demo — `~/Demonstration/v0.16.0-peer-review-pipeline/`**
+
+- Orchestrates 2 real `ClaudeCodeAgent` instances in a 3-phase sequential pipeline:
+  1. `agent-author` writes `data_processor.py` (CSV parsing, filtering, aggregation)
+  2. `agent-reviewer` reads the code, writes `review.md` (MODERATE severity, 5 edge cases)
+     and `test_data_processor.py` (12 tests covering edge cases)
+  3. `agent-author` reads the review and refines `data_processor.py` (RFC 4180 compliance,
+     proper error handling, empty-input fix)
+- Uses `target_agent` routing to guarantee each task goes to the correct agent
+- Uses shared scratchpad to pass the review summary (`SEVERITY=MODERATE EDGE_CASES=5
+  TESTS=12`) and author revision confirmation back to the orchestrator
+- Both agents use `isolate=false` and share the workspace directory
+- Demo files: `peer_review_config.yaml`, `run_demo.py`, `workspace/`
+
+Design references:
+- Blackboard pattern: Buschmann et al. "Pattern-Oriented Software Architecture
+  Vol 1: A System of Patterns" (1996)
+- Message Router: Hohpe & Woolf "Enterprise Integration Patterns" (2003)
+- AgentReview: Jin et al. "Exploring Peer Review Dynamics with LLM Agents"
+  (EMNLP 2024) — arXiv:2406.12708
+
+---
+
 ## [0.15.0] — 2026-03-05
 
 ### Added

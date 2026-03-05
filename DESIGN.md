@@ -581,6 +581,37 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.12 調査記録 (v0.16.0, 2026-03-05)
+
+#### 実装: 共有スクラッチパッド + target_agent ルーティング + Peer Review Pipeline デモ
+
+**調査観点:**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| 共有作業メモリ | Blackboard パターン | Buschmann et al. "Pattern-Oriented Software Architecture Vol 1: A System of Patterns" (1996), Ch. 4 — Blackboard |
+| メッセージルーター | Message Router | Hohpe & Woolf "Enterprise Integration Patterns" (2003), p.78-82 — Message Router |
+| LLM ピアレビュー | Multi-agent peer review simulation | Jin et al. "AgentReview: Exploring Peer Review Dynamics with LLM Agents" EMNLP 2024, [arXiv:2406.12708](https://arxiv.org/html/2406.12708v2) |
+| LLM コードレビュー | Iterative LLM code review | ACM TOSEM "LLM-Based Multi-Agent Systems for Software Engineering" (2025) [doi:10.1145/3712003](https://dl.acm.org/doi/10.1145/3712003) |
+
+**主要知見:**
+
+1. **Blackboard パターン**: Buschmann et al. (1996) は、複数の独立した「ナレッジソース」（エージェント）が共有データ構造（Blackboard）を読み書きすることで協調する設計パターンを記述。各エージェントは他のエージェントの処理を知らずに、Blackboard の状態に基づいて行動する。本実装では `/scratchpad/{key}` REST API がこの役割を担い、agent-reviewer が書いたレビュー要約を agent-author と orchestrator の両方が参照できる。
+
+2. **Message Router (EIP)**: Hohpe & Woolf (2003) の Message Router パターンは、受信者の識別に基づいてメッセージを適切なチャネルにルーティングする。本実装では `target_agent` フィールドがタスクの「宛先フィルター」として機能し、dispatch loop が条件を評価してルーティングを決定する。
+
+3. **AgentReview (EMNLP 2024)**: LLM エージェントによる査読シミュレーション。複数の Reviewer エージェント、AC エージェント、Author エージェントが 5 フェーズのパイプラインで協調。本デモの author/reviewer 2 エージェント構成はこのアーキテクチャを単純化したもの。
+
+**設計決定:**
+
+- **`_scratchpad` はモジュールレベル辞書** — サーバー起動中に永続し、再起動でクリアされる。永続化が必要な場合は SQLite や Redis に置き換え可能（インターフェースは同一）。
+- **`GET /scratchpad/` と `GET /scratchpad/{key}` の共存** — FastAPI はパスの最初にリテラル `/scratchpad/` を試み、次に `{key}` パスパラメータにマッチする。`/` サフィックスを必須とすることで曖昧さを排除。
+- **`target_agent` が未登録 → 即死文字キュー** — 存在しないエージェントへのルーティングは明確なプログラミングエラーであり、再試行しても解消しない。再試行せず即 DLQ に移す設計でオペレーターへの早期通知を実現。
+- **`target_agent` がビジー → 通常の再試行** — エージェントが現在処理中の場合は一時的な状態であり、通常の `dlq_max_retries` 上限内で再試行する。再試行間隔は既存の 0.2s sleep と同じ（後で設定可能にできる）。
+- **デモ工夫**: `target_agent` ルーティングにより、agent-author → agent-reviewer → agent-author という明確な順序が保証される。両エージェントが同時に IDLE でも、タスクが「正しい」エージェントにのみ渡される。
+
+---
+
 ## 11. 今後の課題
 
 ### 機能
@@ -603,7 +634,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 |--------|----------|---------|
 | ~~**高**~~ ~~**AtCoder Heuristic Contest (AHC) best-of-N**~~ | **完了 (v0.15.0)** — 3 ClaudeCodeAgent 並列実行、Weighted Knapsack 問題、`POST /tasks/batch` で一括提出、スコアで勝者選択 |
 | 中 | Director → Workers でマイクロサービス API を分割実装 | Director → Workers |
-| 中 | agent-a が実装 → agent-b がレビュー → agent-a が修正 | Peer review pipeline |
+| ~~中~~ ~~agent-a が実装 → agent-b がレビュー → agent-a が修正~~ | **完了 (v0.16.0)** — Peer review pipeline デモ |
 
 **AHC best-of-N デモ完了 (v0.15.0)**:
 - 問題: Weighted Knapsack (N=15, C=50) — 最適解 score=154 (DP で検証済み)
@@ -614,6 +645,15 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 - オーケストレーターが最高スコアを選択して勝者を表示
 - デモフォルダ: `~/Demonstration/v0.15.0-ahc-best-of-n/`
 
+**Peer Review Pipeline デモ完了 (v0.16.0)**:
+- 2 エージェント 3 フェーズ順次パイプライン
+- Phase 1: agent-author が `data_processor.py` を実装 (CSV, filter, aggregate)
+- Phase 2: agent-reviewer が `review.md` (MODERATE, 5 edge cases) + `test_data_processor.py` (12 tests) を書く
+- Phase 3: agent-author がレビューを読んで `data_processor.py` を改善 (RFC 4180, エラー処理, 空文字対応)
+- `target_agent` ルーティング (v0.16.0) でタスクが正しいエージェントに届くことを保証
+- 共有スクラッチパッド (v0.16.0) でレビュー要約を報告
+- デモフォルダ: `~/Demonstration/v0.16.0-peer-review-pipeline/`
+
 ### アーキテクチャ
 
 | 優先度 | 課題 |
@@ -621,4 +661,4 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~高~~ ~~CLAUDE.md の動的更新（タスク変更時に役割説明を更新）~~ | **クローズ**: タスク生存期間 = エージェント生存期間の原則により不要。Workers は ephemeral であるべき (Issue #4, 2026-03-05) |
 | ~~中~~ ~~コンテキストファイルの自動コピー (`context_files` の実装)~~ | **完了 (v0.11.0)** — `ClaudeCodeAgent._copy_context_files()` |
 | 中 | `/summarize` による NOTES.md 更新をオーケストレーターに通知 |
-| 低 | エージェント間の共有スクラッチパッド（読み取り専用の共有ファイル）|
+| ~~低~~ ~~エージェント間の共有スクラッチパッド~~ | **完了 (v0.16.0)** — `GET/PUT/DELETE /scratchpad/{key}` REST API; Blackboard パターン; 17 テスト |
