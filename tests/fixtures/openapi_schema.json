@@ -521,6 +521,60 @@
         "title": "TaskSubmit",
         "type": "object"
       },
+      "TddWorkflowSubmit": {
+        "description": "Request body for POST /workflows/tdd \u2014 3-agent TDD workflow.\n\nSubmits a Red\u2192Green\u2192Refactor Workflow DAG with three context-isolated\nsub-agents:\n  1. ``test-writer``: writes failing tests for *feature* (RED phase)\n  2. ``implementer``: reads tests from the scratchpad and writes the\n     minimal implementation that makes them pass (GREEN phase)\n  3. ``refactorer``: reviews the implementation and improves code quality\n     while keeping tests green (REFACTOR phase)\n\nArtifacts are passed via the shared scratchpad (Blackboard pattern).  The\n``test-writer`` writes the test file path to\n``{scratchpad_prefix}/tests_path``; the ``implementer`` reads it and\nwrites the implementation path to ``{scratchpad_prefix}/impl_path``; the\n``refactorer`` reads both.\n\nDesign references:\n- TDFlow arXiv:2510.23761 (2025): context-isolated sub-agents achieve\n  88.8% on SWE-Bench Lite.\n- alexop.dev \"Forcing Claude Code to TDD\" (2025): context isolation is\n  mandatory for genuine test-first development.\n- Blackboard pattern (Buschmann 1996): shared scratchpad decouples\n  producers from consumers.\n- DESIGN.md \u00a710.31 (v0.36.0)",
+        "properties": {
+          "feature": {
+            "title": "Feature",
+            "type": "string"
+          },
+          "implementer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Implementer Tags",
+            "type": "array"
+          },
+          "language": {
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "refactorer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Refactorer Tags",
+            "type": "array"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "test_writer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Test Writer Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "feature"
+        ],
+        "title": "TddWorkflowSubmit",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -2490,6 +2544,47 @@
           }
         },
         "summary": "Submit a multi-step workflow DAG"
+      }
+    },
+    "/workflows/tdd": {
+      "post": {
+        "description": "Submit a context-isolated 3-agent TDD workflow DAG.\n\nAutomatically builds and submits a 3-step Workflow DAG:\n\n1. **test-writer** (RED): writes failing pytest tests for *feature*\n   and stores the test file path in the scratchpad.\n2. **implementer** (GREEN): reads the test file path from scratchpad,\n   writes the minimal implementation that makes tests pass, and stores\n   the implementation file path.\n3. **refactorer** (REFACTOR): reads both paths from scratchpad, verifies\n   tests still pass, and improves code quality.\n\nThe scratchpad acts as a Blackboard \u2014 agents communicate via shared\nstate without direct P2P messaging.  This enforces context isolation:\neach agent starts with exactly the information it needs.\n\nReturns:\n- ``workflow_id``: workflow run UUID for status polling\n- ``name``: human-readable name (``tdd/{feature}``)\n- ``task_ids``: dict with keys ``test_writer``, ``implementer``,\n  ``refactorer`` mapping to global task IDs\n- ``scratchpad_prefix``: scratchpad namespace for this run\n  (e.g. ``tdd/{workflow_id[:8]}``)\n\nDesign references:\n- TDFlow arXiv:2510.23761 (2025): context isolation via sub-agents\n  achieves 88.8% on SWE-Bench Lite.\n- alexop.dev \"Forcing Claude Code to TDD\" (2025): genuine TDD\n  requires separate context windows for each phase.\n- Blackboard pattern (Buschmann 1996): shared working memory.\n- DESIGN.md \u00a710.31 (v0.36.0)",
+        "operationId": "submit_tdd_workflow_workflows_tdd_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TddWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Tdd Workflow Workflows Tdd Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a 3-agent TDD workflow (Red\u2192Green\u2192Refactor)"
       }
     },
     "/workflows/{workflow_id}": {

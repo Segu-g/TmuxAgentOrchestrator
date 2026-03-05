@@ -253,6 +253,52 @@ class WorkflowSubmit(BaseModel):
     tasks: list[WorkflowTaskSpec]
 
 
+class TddWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/tdd — 3-agent TDD workflow.
+
+    Submits a Red→Green→Refactor Workflow DAG with three context-isolated
+    sub-agents:
+      1. ``test-writer``: writes failing tests for *feature* (RED phase)
+      2. ``implementer``: reads tests from the scratchpad and writes the
+         minimal implementation that makes them pass (GREEN phase)
+      3. ``refactorer``: reviews the implementation and improves code quality
+         while keeping tests green (REFACTOR phase)
+
+    Artifacts are passed via the shared scratchpad (Blackboard pattern).  The
+    ``test-writer`` writes the test file path to
+    ``{scratchpad_prefix}/tests_path``; the ``implementer`` reads it and
+    writes the implementation path to ``{scratchpad_prefix}/impl_path``; the
+    ``refactorer`` reads both.
+
+    Design references:
+    - TDFlow arXiv:2510.23761 (2025): context-isolated sub-agents achieve
+      88.8% on SWE-Bench Lite.
+    - alexop.dev "Forcing Claude Code to TDD" (2025): context isolation is
+      mandatory for genuine test-first development.
+    - Blackboard pattern (Buschmann 1996): shared scratchpad decouples
+      producers from consumers.
+    - DESIGN.md §10.31 (v0.36.0)
+    """
+
+    feature: str
+    language: str = "python"
+    # Optional per-phase required_tags for agent capability routing
+    test_writer_tags: list[str] = []
+    implementer_tags: list[str] = []
+    refactorer_tags: list[str] = []
+    # When set, the refactorer RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    from pydantic import field_validator
+
+    @field_validator("feature")
+    @classmethod
+    def feature_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("feature must not be empty")
+        return v
+
+
 # ---------------------------------------------------------------------------
 # Module-level auth state
 # ---------------------------------------------------------------------------
@@ -1064,6 +1110,180 @@ def create_app(
             "workflow_id": run.id,
             "name": run.name,
             "task_ids": local_to_global,
+        }
+
+    @app.post(
+        "/workflows/tdd",
+        summary="Submit a 3-agent TDD workflow (Red→Green→Refactor)",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_tdd_workflow(body: TddWorkflowSubmit) -> dict:
+        """Submit a context-isolated 3-agent TDD workflow DAG.
+
+        Automatically builds and submits a 3-step Workflow DAG:
+
+        1. **test-writer** (RED): writes failing pytest tests for *feature*
+           and stores the test file path in the scratchpad.
+        2. **implementer** (GREEN): reads the test file path from scratchpad,
+           writes the minimal implementation that makes tests pass, and stores
+           the implementation file path.
+        3. **refactorer** (REFACTOR): reads both paths from scratchpad, verifies
+           tests still pass, and improves code quality.
+
+        The scratchpad acts as a Blackboard — agents communicate via shared
+        state without direct P2P messaging.  This enforces context isolation:
+        each agent starts with exactly the information it needs.
+
+        Returns:
+        - ``workflow_id``: workflow run UUID for status polling
+        - ``name``: human-readable name (``tdd/{feature}``)
+        - ``task_ids``: dict with keys ``test_writer``, ``implementer``,
+          ``refactorer`` mapping to global task IDs
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+          (e.g. ``tdd/{workflow_id[:8]}``)
+
+        Design references:
+        - TDFlow arXiv:2510.23761 (2025): context isolation via sub-agents
+          achieves 88.8% on SWE-Bench Lite.
+        - alexop.dev "Forcing Claude Code to TDD" (2025): genuine TDD
+          requires separate context windows for each phase.
+        - Blackboard pattern (Buschmann 1996): shared working memory.
+        - DESIGN.md §10.31 (v0.36.0)
+        """
+        import uuid as _uuid  # noqa: PLC0415
+
+        lang = body.language
+        feature_slug = body.feature.replace(" ", "_")
+
+        # Register workflow first to get a stable run ID for the scratchpad prefix.
+        # We submit tasks in a second pass with the prefix baked into prompts.
+        wm = orchestrator.get_workflow_manager()
+        wf_name = f"tdd/{body.feature}"
+
+        # Pre-generate a workflow run UUID so we can derive the scratchpad prefix
+        # before submitting tasks.  We call wm.submit() after task creation with
+        # the actual task IDs.
+        pre_run_id = str(_uuid.uuid4())
+        scratchpad_prefix = f"tdd/{pre_run_id[:8]}"
+        tests_path_key = f"{scratchpad_prefix}/tests_path"
+        impl_path_key = f"{scratchpad_prefix}/impl_path"
+
+        # --- Prompt templates (context isolation) ---
+        # test-writer gets: feature name + language + where to store artifacts
+        # It must NOT know how the feature will be implemented.
+        test_writer_prompt = (
+            f"You are the TEST-WRITER agent in a Red→Green→Refactor TDD workflow.\n"
+            f"\n"
+            f"**Feature to test:** {body.feature}\n"
+            f"**Language:** {lang}\n"
+            f"\n"
+            f"Your task (RED phase):\n"
+            f"1. Write failing {lang} pytest tests for '{body.feature}'.\n"
+            f"   - Focus on behaviour, not implementation.\n"
+            f"   - Tests must fail when run against an empty/stub implementation.\n"
+            f"   - Use descriptive test function names (they are the specification).\n"
+            f"2. Save the test file as `test_{feature_slug}.py`.\n"
+            f"3. Verify the tests fail: run `python -m pytest <test_file> -v` and confirm failures.\n"
+            f"4. Write the test file path to the shared scratchpad:\n"
+            f"   ```\n"
+            f"   curl -s -X PUT -H \"X-API-Key: $TMUX_ORCHESTRATOR_API_KEY\" \\\n"
+            f"     \"$WEB_BASE_URL/scratchpad/{tests_path_key}\" \\\n"
+            f"     -H 'Content-Type: application/json' \\\n"
+            f"     -d '{{\"value\": \"<test_file_absolute_path>\"}}'\n"
+            f"   ```\n"
+            f"   (The scratchpad prefix for this run is: `{scratchpad_prefix}`)\n"
+            f"\n"
+            f"Do NOT write any implementation code. Focus only on tests."
+        )
+
+        # implementer gets: feature name + language + where to READ test path
+        # It must NOT see the test-writer's rationale — only the test file.
+        implementer_prompt = (
+            f"You are the IMPLEMENTER agent in a Red→Green→Refactor TDD workflow.\n"
+            f"\n"
+            f"**Feature to implement:** {body.feature}\n"
+            f"**Language:** {lang}\n"
+            f"\n"
+            f"Your task (GREEN phase):\n"
+            f"1. Read the test file path from the shared scratchpad:\n"
+            f"   ```\n"
+            f"   curl -s -H \"X-API-Key: $TMUX_ORCHESTRATOR_API_KEY\" \\\n"
+            f"     \"$WEB_BASE_URL/scratchpad/{tests_path_key}\" \\\n"
+            f"     | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"value\"])'\n"
+            f"   ```\n"
+            f"   (Scratchpad prefix: `{scratchpad_prefix}`)\n"
+            f"2. Read the test file to understand what needs to be implemented.\n"
+            f"3. Write the MINIMAL {lang} implementation of '{body.feature}' that makes all tests pass.\n"
+            f"   - Write only enough code to pass the tests — no over-engineering.\n"
+            f"4. Verify: run `python -m pytest <test_file> -v` and confirm all tests pass.\n"
+            f"5. Write the implementation file path to the scratchpad:\n"
+            f"   ```\n"
+            f"   curl -s -X PUT -H \"X-API-Key: $TMUX_ORCHESTRATOR_API_KEY\" \\\n"
+            f"     \"$WEB_BASE_URL/scratchpad/{impl_path_key}\" \\\n"
+            f"     -H 'Content-Type: application/json' \\\n"
+            f"     -d '{{\"value\": \"<impl_file_absolute_path>\"}}'\n"
+            f"   ```\n"
+            f"\n"
+            f"Implement '{body.feature}' to make the tests pass."
+        )
+
+        # refactorer gets: feature name + where to READ both paths
+        refactorer_prompt = (
+            f"You are the REFACTORER agent in a Red→Green→Refactor TDD workflow.\n"
+            f"\n"
+            f"**Feature:** {body.feature}\n"
+            f"**Language:** {lang}\n"
+            f"\n"
+            f"Your task (REFACTOR phase):\n"
+            f"1. Read artifact paths from the shared scratchpad (prefix: `{scratchpad_prefix}`):\n"
+            f"   - Test file path: "
+            f"`curl -s -H \"X-API-Key: $TMUX_ORCHESTRATOR_API_KEY\" "
+            f"\"$WEB_BASE_URL/scratchpad/{tests_path_key}\"`\n"
+            f"   - Impl file path: "
+            f"`curl -s -H \"X-API-Key: $TMUX_ORCHESTRATOR_API_KEY\" "
+            f"\"$WEB_BASE_URL/scratchpad/{impl_path_key}\"`\n"
+            f"2. Verify tests still pass: `python -m pytest <test_file> -v`\n"
+            f"3. Refactor and improve the implementation:\n"
+            f"   - Remove duplication, improve naming, add docstrings.\n"
+            f"   - Do NOT change behaviour — all tests must remain green.\n"
+            f"4. Run tests again to confirm: `python -m pytest <test_file> -v`\n"
+            f"5. Write a brief summary of improvements to stdout.\n"
+            f"\n"
+            f"Refactor '{body.feature}' to improve code quality while keeping tests green."
+        )
+
+        # --- Submit the 3-step DAG ---
+        tw_task = await orchestrator.submit_task(
+            test_writer_prompt,
+            required_tags=body.test_writer_tags or None,
+        )
+        impl_task = await orchestrator.submit_task(
+            implementer_prompt,
+            required_tags=body.implementer_tags or None,
+            depends_on=[tw_task.id],
+        )
+        refactorer_task = await orchestrator.submit_task(
+            refactorer_prompt,
+            required_tags=body.refactorer_tags or None,
+            depends_on=[impl_task.id],
+            reply_to=body.reply_to,
+        )
+
+        # Register with WorkflowManager
+        run = wm.submit(
+            name=wf_name,
+            task_ids=[tw_task.id, impl_task.id, refactorer_task.id],
+        )
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": {
+                "test_writer": tw_task.id,
+                "implementer": impl_task.id,
+                "refactorer": refactorer_task.id,
+            },
+            "scratchpad_prefix": scratchpad_prefix,
         }
 
     @app.get(

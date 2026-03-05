@@ -1647,6 +1647,58 @@ v0.34.0 で `OrchestratorConfig.api_key` を導入した際に、API キーが `
 
 ---
 
+### 10.31 調査記録 (v0.36.0, 2026-03-05)
+
+#### 選択した機能: `POST /workflows/tdd` — 3エージェント TDD ワークフロー
+
+**選択理由:**
+
+§11 の高優先度バックログ筆頭に挙げられており、v0.35.0 (セキュリティ修正) で全 687 テストが通過し基盤が整った。
+TDFlow (arXiv:2510.23761) の実証 — SWE-Bench Lite 88.8% pass rate — が最も強い研究的裏付けを持つ。
+既存の Workflow DAG (v0.25.0)・tags (v0.18.0)・target_group (v0.31.0)・Scratchpad (v0.16.0) をフル活用できるため実装パスが明確。
+
+**選択しなかった候補:**
+
+- `役割別 system_prompt テンプレートライブラリ` — 有用だが、TDD ワークフローより後に実装するのが自然 (TDD ワークフローがテンプレートを最初に使うユースケースになる)。
+- `POST /workflows/debate` — 高優先度だが TDD の方が先に実証価値が高い。TDD は決定論的に検証可能 (テストが通るか否か)。
+- `Codified Context インフラ` — 中規模変更で依存なし。TDD ワークフローより先に実装する理由がない。
+
+**実装スコープ:**
+
+1. `POST /workflows/tdd` エンドポイント — YAML 宣言した `test-writer` / `implementer` / `refactorer` 3ロールに対して Workflow DAG を自動生成して投入する。
+2. `test-writer` → `implementer` ハンドオフ: test-writer が failing test を書いたら Scratchpad にファイルパスを書き込み、implementer がそれを読んで実装する。
+3. `refactorer` ステップ: implementer の成果物を受け取り、リファクタリングを行う。
+4. `reply_to` チェーン: 各エージェントが完了を次のエージェントに通知。
+5. デモシナリオ: fizzbuzz / 素数判定。
+
+**参考文献:**
+
+| テーマ | 参考文献 |
+|--------|---------|
+| TDFlow — 4サブエージェント TDD ワークフロー (SWE-Bench 88.8%) | arXiv:2510.23761 "TDFlow: Agentic Workflows for Test Driven Development" (CMU/UCSD/JHU 2025) https://arxiv.org/abs/2510.23761 |
+| context isolation が true TDD に必須 | alexop.dev "Forcing Claude Code to TDD: An Agentic Red-Green-Refactor Loop" (2025) https://alexop.dev/posts/custom-tdd-workflow-claude-code-vue/ |
+| Agent-as-handoff でフェーズゲート実装 | Tweag "Agentic Coding Handbook — TDD" (2025) https://tweag.github.io/agentic-coding-handbook/WORKFLOW_TDD/ |
+| Blackboard / Scratchpad パターン | AppsTek "Design Patterns for Agentic AI and Multi-Agent Systems" (2025) https://appstekcorp.com/staging/8353/blog/design-patterns-for-agentic-ai-and-multi-agent-systems/ |
+| Handoff orchestration pattern | Microsoft Azure "Hand Off AI Agent Tasks" (2025) https://learn.microsoft.com/en-us/azure/logic-apps/set-up-handoff-agent-workflow |
+
+**主要知見:**
+
+1. **TDFlow (arXiv:2510.23761)**: 4サブエージェント (patch proposal / debugging / revision / test generation) が context 分離で動作。各エージェントは直前のフェーズの出力のみを受け取り、長文コンテキスト負荷を削減。SWE-Bench Lite 88.8%、Verified 94.3%。
+2. **alexop.dev**: 1コンテキストで TDD を実装すると test writer が実装を想定してテストを書いてしまう「context pollution」が発生。3エージェント (test-writer / implementer / refactorer) の分離が必須。各エージェントは「必要な情報のみ」を受け取る。
+3. **Tweag**: test cases が各フェーズ間のアーティファクト。テスト名が仕様書代わりになるため、明確な命名規則が品質に直結。
+4. **Blackboard / Scratchpad**: エージェントが直接通信せず共有ストアにアーティファクトを書き込む。既存 Scratchpad API (`PUT/GET /scratchpad/{key}`) がこのパターンに直接対応。
+
+**設計決定:**
+
+- `POST /workflows/tdd` エンドポイント: `{ "feature": "str", "language": "python", "target_agent": null }` を受け付けて Workflow DAG を生成。
+- 3フェーズ Workflow DAG: `step_1` (test-writer) → `step_2` (implementer, depends_on step_1) → `step_3` (refactorer, depends_on step_2)。
+- アーティファクト受け渡し: Scratchpad をブラックボードとして使用 (`tdd/{task_id}/tests_path`, `tdd/{task_id}/impl_path`)。
+- フェーズゲート: test-writer は failing test を書いた後に `pytest --collect-only` で確認してから Scratchpad に書き込む。
+- `required_tags` で各フェーズを適切なエージェントに割り当て (タグ: `tdd-test-writer`, `tdd-implementer`, `tdd-refactorer`)。ただしタグがない場合は任意のアイドルエージェントが担当。
+- `reply_to`: 各フェーズの RESULT を Workflow エンジンが処理 (depends_on 経由)。
+
+---
+
 ## 11. 今後の課題
 
 > 以下のバックログは、完了済み項目（旧 §11 テーブルの全 ~~完了~~ エントリ、§10.N 実装履歴）を除去し、
