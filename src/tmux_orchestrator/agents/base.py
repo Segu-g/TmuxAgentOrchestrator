@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import secrets
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -75,13 +76,25 @@ class Task:
     # Apache Airflow priority_weight upstream/downstream rules;
     # DESIGN.md §10.27 (v0.32.0)
     inherit_priority: bool = True
+    # TTL (Time-to-Live): when set, the task expires *ttl* seconds after
+    # submission.  None = never expires.  *submitted_at* records wall-clock
+    # submission time (time.time()) and is set automatically.  *expires_at* is
+    # computed once at submit_task() time as submitted_at + ttl; both fields
+    # are read-only after that point.
+    # Reference: RabbitMQ TTL (https://www.rabbitmq.com/docs/ttl);
+    # Azure Service Bus message expiration (Microsoft Docs 2024);
+    # AWS SQS MessageRetentionPeriod; Dapr pubsub-message-ttl;
+    # DESIGN.md §10.28 (v0.33.0)
+    ttl: float | None = None
+    submitted_at: float = field(default_factory=time.time)
+    expires_at: float | None = None
 
     def __lt__(self, other: "Task") -> bool:
         return self.priority < other.priority
 
     def to_dict(self) -> dict:
         """Return a JSON-serialisable representation of this task."""
-        return {
+        d: dict = {
             "task_id": self.id,
             "prompt": self.prompt,
             "priority": self.priority,
@@ -94,8 +107,12 @@ class Task:
             "max_retries": self.max_retries,
             "retry_count": self.retry_count,
             "inherit_priority": self.inherit_priority,
+            "submitted_at": self.submitted_at,
+            "ttl": self.ttl,
+            "expires_at": self.expires_at,
             **({"metadata": self.metadata} if self.metadata else {}),
         }
+        return d
 
 
 class Agent(ABC):

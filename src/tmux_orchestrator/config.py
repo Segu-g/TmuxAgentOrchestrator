@@ -128,6 +128,18 @@ class OrchestratorConfig:
     # Zalando RESTful API Guidelines §webhook; Shopify webhook verification.
     # DESIGN.md §10.25 (v0.30.0)
     webhook_timeout: float = 5.0
+    # --- Task TTL (Time-to-Live / expiry) ---
+    # default_task_ttl: global default TTL in seconds applied to tasks that do
+    #   not set an explicit ttl.  None = no default (tasks never expire unless
+    #   ttl is set per-task).
+    # ttl_reaper_poll: poll interval (seconds) for the background reaper that
+    #   scans _waiting_tasks for expired entries.
+    # Reference: RabbitMQ TTL docs (https://www.rabbitmq.com/docs/ttl);
+    # Azure Service Bus message expiration (Microsoft Docs 2024);
+    # AWS SQS MessageRetentionPeriod; Dapr pubsub-message-ttl;
+    # DESIGN.md §10.28 (v0.33.0)
+    default_task_ttl: float | None = None
+    ttl_reaper_poll: float = 1.0
 
 
 def load_config(path: str | Path) -> OrchestratorConfig:
@@ -184,4 +196,6 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         result_store_dir=data.get("result_store_dir", "~/.tmux_orchestrator/results"),
         groups=data.get("groups", []),
         webhook_timeout=data.get("webhook_timeout", 5.0),
+        default_task_ttl=data.get("default_task_ttl"),
+        ttl_reaper_poll=data.get("ttl_reaper_poll", 1.0),
     )

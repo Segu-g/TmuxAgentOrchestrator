@@ -220,6 +220,14 @@ class Orchestrator:
         # Sha, Rajkumar, Lehoczky "Priority Inheritance Protocols" IEEE (1990);
         # DESIGN.md §10.27 (v0.32.0)
         self._task_priorities: dict[str, int] = {}
+        # TTL reaper asyncio.Task — started in start(), cancelled in stop().
+        # Scans _waiting_tasks every ttl_reaper_poll seconds and expires entries
+        # whose expires_at has elapsed.  The dispatch loop handles expiry for
+        # tasks that are dequeued before being dispatched.
+        # Reference: RabbitMQ "Time-To-Live and Expiration" docs;
+        # Azure Service Bus message expiration (Microsoft Docs 2024);
+        # DESIGN.md §10.28 (v0.33.0)
+        self._ttl_reaper_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -257,6 +265,10 @@ class Orchestrator:
         self._context_monitor.start()
         if self._autoscaler is not None:
             self._autoscaler.start()
+        self._ttl_reaper_task = asyncio.create_task(
+            self._ttl_reaper_loop(poll=self.config.ttl_reaper_poll),
+            name="orchestrator-ttl-reaper",
+        )
         logger.info("Orchestrator started with %d agents", len(self.registry.all_agents()))
 
     async def stop(self) -> None:
@@ -268,6 +280,7 @@ class Orchestrator:
             t for t in [
                 self._dispatch_task, self._router_task,
                 self._watchdog_task, self._recovery_task,
+                self._ttl_reaper_task,
             ] if t
         ]
         for t in internal_tasks:
@@ -404,6 +417,7 @@ class Orchestrator:
         wait_for_token: bool = True,
         max_retries: int = 0,
         inherit_priority: bool = True,
+        ttl: float | None = None,
         _task_id: str | None = None,
     ) -> Task:
         """Submit a new task to the priority queue.
@@ -467,6 +481,10 @@ class Orchestrator:
             ]
             if parent_priorities:
                 effective_priority = min(priority, min(parent_priorities))
+        # Resolve effective TTL: per-task ttl overrides default_task_ttl
+        effective_ttl = ttl if ttl is not None else self.config.default_task_ttl
+        submitted_at = time.time()
+        expires_at = (submitted_at + effective_ttl) if effective_ttl is not None else None
         task = Task(
             id=_task_id if _task_id is not None else str(uuid.uuid4()),
             prompt=prompt,
@@ -479,6 +497,9 @@ class Orchestrator:
             target_group=target_group,
             max_retries=max_retries,
             inherit_priority=inherit_priority,
+            ttl=effective_ttl,
+            submitted_at=submitted_at,
+            expires_at=expires_at,
         )
         # Record this task's priority for use by future dependent tasks.
         self._task_priorities[task.id] = effective_priority
@@ -579,6 +600,9 @@ class Orchestrator:
                 "prompt": t.prompt,
                 "status": "queued",
                 "depends_on": t.depends_on,
+                "submitted_at": t.submitted_at,
+                "ttl": t.ttl,
+                "expires_at": t.expires_at,
                 **({"required_tags": t.required_tags} if t.required_tags else {}),
                 **({"target_agent": t.target_agent} if t.target_agent else {}),
                 **({"target_group": t.target_group} if t.target_group else {}),
@@ -593,6 +617,9 @@ class Orchestrator:
                 "prompt": t.prompt,
                 "status": "waiting",
                 "depends_on": t.depends_on,
+                "submitted_at": t.submitted_at,
+                "ttl": t.ttl,
+                "expires_at": t.expires_at,
                 **({"required_tags": t.required_tags} if t.required_tags else {}),
                 **({"target_agent": t.target_agent} if t.target_agent else {}),
                 **({"target_group": t.target_group} if t.target_group else {}),
@@ -988,6 +1015,14 @@ class Orchestrator:
                 logger.info("Task %s skipped (tombstone-cancelled)", task.id)
                 continue
 
+            # TTL expiry check: discard task if it has passed its expiry time.
+            # Reference: RabbitMQ queue-head expiry; Azure Service Bus AbsoluteExpiryTime;
+            # DESIGN.md §10.28 (v0.33.0)
+            if task.expires_at is not None and time.time() > task.expires_at:
+                self._task_queue.task_done()
+                await self._expire_task(task, from_reaper=False)
+                continue
+
             # --- Agent selection: respect target_agent routing ---
             if task.target_agent is not None:
                 # Task must be routed to a specific agent.
@@ -1065,6 +1100,39 @@ class Orchestrator:
             # tasks pile up in the first agent's queue (agent.status stays IDLE
             # until the run loop gets to run).
             await asyncio.sleep(0)
+
+    async def _expire_task(self, task: Task, *, from_reaper: bool = False) -> None:
+        """Mark *task* as expired and cascade dependency failures.
+
+        Called from _dispatch_loop (queued expiry) and _ttl_reaper_loop
+        (waiting-task expiry).  Publishes ``task_expired`` STATUS event,
+        calls WorkflowManager.on_task_failed(), and cascades
+        ``task_dependency_failed`` to waiting dependents via _on_dep_failed().
+
+        Reference: RabbitMQ "Time-To-Live and Expiration" docs;
+        Azure Service Bus message expiration; DESIGN.md §10.28 (v0.33.0)
+        """
+        expired_at = time.time()
+        self._failed_tasks.add(task.id)
+        self._workflow_manager.on_task_failed(task.id)
+        await self.bus.publish(Message(
+            type=MessageType.STATUS,
+            from_id="__orchestrator__",
+            payload={
+                "event": "task_expired",
+                "task_id": task.id,
+                "expired_at": expired_at,
+                "ttl": task.ttl,
+                "submitted_at": task.submitted_at,
+                "expires_at": task.expires_at,
+                "from_reaper": from_reaper,
+            },
+        ))
+        await self._on_dep_failed(task.id)
+        logger.info(
+            "Task %s expired (ttl=%.1f, expired_at=%.3f, from_reaper=%s)",
+            task.id, task.ttl or 0.0, expired_at, from_reaper,
+        )
 
     async def _dead_letter(self, task: Task, reason: str) -> None:
         """Move *task* to the dead letter queue and publish a STATUS event."""
@@ -1239,6 +1307,63 @@ class Orchestrator:
                         "Recovery: agent %s did not reach IDLE after restart (status=%s)",
                         agent_id, agent.status,
                     )
+
+    # ------------------------------------------------------------------
+    # TTL Reaper loop
+    # ------------------------------------------------------------------
+
+    async def _ttl_reaper_loop(self, *, poll: float = 1.0) -> None:
+        """Background task that expires waiting tasks whose TTL has elapsed.
+
+        Tasks that enter ``_waiting_tasks`` (held for dependency resolution)
+        never pass through ``_dispatch_loop``, so a separate reaper is needed
+        to expire them.  The reaper runs every *poll* seconds (default 1 s,
+        configurable via ``OrchestratorConfig.ttl_reaper_poll``).
+
+        Expired tasks are removed from ``_waiting_tasks``, added to
+        ``_failed_tasks``, and cascade-failed to their own dependents via
+        ``_on_dep_failed()`` (same path as task failure).  A ``task_expired``
+        STATUS event is published for each expired task.
+
+        Design decisions:
+        - Only ``_waiting_tasks`` is scanned here; queued tasks are checked in
+          ``_dispatch_loop`` at dequeue time (lazy expiry, more efficient than
+          periodic queue scan).
+        - Poll interval of 1 s is a reasonable default — sub-second TTLs are
+          unusual for agentic tasks (typical TTL range: seconds to minutes).
+        - Already-cancelled tasks (in ``_cancelled_task_ids``) are skipped.
+
+        Reference: RabbitMQ TTL — "The server guarantees that expired messages
+        will not be delivered" (rabbitmq.com/docs/ttl);
+        Azure Service Bus ExpiresAtUtc (Microsoft Docs 2024);
+        DESIGN.md §10.28 (v0.33.0)
+        """
+        while True:
+            try:
+                await asyncio.sleep(poll)
+            except asyncio.CancelledError:
+                break
+
+            now = time.time()
+            expired_ids = [
+                tid
+                for tid, t in list(self._waiting_tasks.items())
+                if t.expires_at is not None and now > t.expires_at
+                and tid not in self._cancelled_task_ids
+            ]
+            for tid in expired_ids:
+                task = self._waiting_tasks.pop(tid, None)
+                if task is None:
+                    # Already removed by another path (race window)
+                    continue
+                # Clean up reverse-lookup entries for this task
+                for dep in task.depends_on:
+                    if dep in self._task_dependents:
+                        try:
+                            self._task_dependents[dep].remove(tid)
+                        except ValueError:
+                            pass
+                await self._expire_task(task, from_reaper=True)
 
     # ------------------------------------------------------------------
     # Supervision callback
