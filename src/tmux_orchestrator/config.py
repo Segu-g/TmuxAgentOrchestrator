@@ -140,6 +140,12 @@ class OrchestratorConfig:
     # DESIGN.md §10.28 (v0.33.0)
     default_task_ttl: float | None = None
     ttl_reaper_poll: float = 1.0
+    # --- Web API key (written to agent context files for authenticated REST calls) ---
+    # When the web server is started with an API key, the key is stored here so that
+    # agents can include it in REST requests (notify_parent, /progress, /send-message).
+    # Empty string = no authentication required.
+    # Reference: RFC 7235 HTTP Authentication; DESIGN.md §10.29 (v0.34.0)
+    api_key: str = ""
 
 
 def load_config(path: str | Path) -> OrchestratorConfig:

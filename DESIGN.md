@@ -1530,7 +1530,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~中~~ ~~エージェント能力タグ + スマートディスパッチ~~ | **完了 (v0.18.0)** — `AgentConfig.tags` + `Task.required_tags` + `find_idle_worker(required_tags)` + REST `required_tags` パラメータ; 23 テスト |
 | ~~中~~ ~~キューポーズ/レジューム + タスク優先度ライブ更新~~ | **完了 (v0.19.0)** — `POST /orchestrator/pause|resume`, `GET /orchestrator/status`, `PATCH /tasks/{id}`; 18 テスト (302 合計) |
 | ~~中~~ ~~Rate limiting / バックプレッシャー (Token Bucket)~~ | **完了 (v0.20.0)** — `TokenBucketRateLimiter` + `GET /rate-limit`, `PUT /rate-limit`; `OrchestratorConfig.rate_limit_rps/burst`; `wait_for_token` param; 24 テスト (326 合計) |
-| 中 | `/plan` と `/tdd` の出力を RESULT メッセージとして親に自動送信 |
+| ~~中~~ ~~/plan と /tdd の出力を RESULT メッセージとして親に自動送信~~ | **完了 (v0.34.0)** — `slash_notify.py` の `notify_parent()` が PEER_MSG を親に POST; `/plan` + `/tdd` コマンドに通知ブロック追加; `OrchestratorConfig.api_key` + `ClaudeCodeAgent._api_key` + `patch_api_key()` で API キーを自動伝播; 12テスト (671合計) |
 | ~~高~~ ~~キュー深度オートスケーリング~~ | **完了 (v0.23.0)** — `AutoScaler` MAPE-Kループ; `GET/PUT /orchestrator/autoscaler`; `OrchestratorConfig.autoscale_*`; 23テスト (386合計) |
 | ~~中~~ ~~タスク結果の永続化（Event Sourcing）~~ | **完了 (v0.24.0)** — `ResultStore` 追記専用 JSONL; `GET /results`, `GET /results/dates`; `OrchestratorConfig.result_store_enabled/dir`; 23テスト (409合計) |
 | ~~高~~ ~~Workflow DAG API — パイプライン一括提出~~ | **完了 (v0.25.0)** — `WorkflowManager` + `validate_dag()` + `POST/GET /workflows`; Kahn's algorithm; local_id→task_id変換; 29テスト (438合計) |

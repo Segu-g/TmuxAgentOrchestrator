@@ -6,6 +6,71 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.34.0] — 2026-03-05
+
+### Added
+
+**Slash Command Parent Notification (`/plan` and `/tdd`)**
+
+When an orchestrated agent runs `/plan` or `/tdd`, the slash command now
+automatically notifies its parent agent via the REST API so that the Director
+can track sub-agent progress without polling.
+
+- **`src/tmux_orchestrator/slash_notify.py`** (new module):
+  - `build_parent_message(agent_id, event_type, extra)` — builds a structured
+    payload dict suitable for `POST /agents/{parent_id}/message`.
+  - `notify_parent(event_type, extra, *, timeout=10)` — reads
+    `__orchestrator_context__.json` from the current working directory to
+    discover the agent's own ID, REST API base URL, and API key.  Resolves the
+    parent agent via `GET /agents`, then POSTs a `PEER_MSG` to the parent.
+    Fire-and-forget: failures are swallowed so slash commands always succeed.
+  - When `event_type == "plan_created"` and `PLAN.md` exists in cwd, its
+    content is embedded in the payload under `"plan_content"`.
+  - Returns `True` on success, `False` when not in an orchestrated environment,
+    when no parent exists, or on any HTTP/network error.
+
+- **`/plan` slash command** (`.claude/commands/plan.md`): calls
+  `notify_parent("plan_created", {"description": ..., "plan_path": "PLAN.md"})`
+  after writing `PLAN.md`.
+
+- **`/tdd` slash command** (`.claude/commands/tdd.md`): calls
+  `notify_parent("tdd_cycle_started", {"feature": ..., "phase": "red"})`
+  after displaying the TDD checklist.
+
+- **`OrchestratorConfig.api_key: str = ""`** (new field in `config.py`):
+  Stores the web API key so it can be propagated to agent context files.
+  When the web server is started with `--api-key`, the key is stored here
+  and written into each agent's `__orchestrator_context__.json` under
+  `"api_key"`.
+
+- **`ClaudeCodeAgent._api_key`** (new parameter): agents now accept and store
+  the API key; `_context_extras()` includes it in the context file when set.
+  This allows `notify_parent()` (and other slash commands) to authenticate
+  REST calls without the user manually configuring the key.
+
+- **`factory.patch_api_key(orchestrator, api_key)`** (new function in
+  `factory.py`): updates `api_key` on all registered `ClaudeCodeAgent`
+  instances and on `orchestrator.config`.  Called from `main.py web` after the
+  API key is determined (auto-generated or user-supplied).
+
+- **`Orchestrator._spawn_subagent()` and `create_agent()`**: both now forward
+  `api_key=self.config.api_key` to newly created agents so that dynamically
+  spawned sub-agents inherit the API key automatically.
+
+Design references:
+- Google ADK "AgentTool pattern" — child captures final response and forwards
+  to parent (google.github.io/adk-docs/agents/multi-agents/).
+- Semantic Kernel "ResponseCallback" — parent observes each agent's structured
+  output (learn.microsoft.com/en-us/semantic-kernel/frameworks/agent/).
+- Existing `/progress` slash command — established the child→parent REST
+  notification pattern reused here.
+- DESIGN.md §10.29 (v0.34.0)
+
+**Tests**: 12 new tests in `tests/test_slash_notify.py`.
+Total test count: 671 (was 659).
+
+---
+
 ## [0.33.0] — 2026-03-05
 
 ### Added

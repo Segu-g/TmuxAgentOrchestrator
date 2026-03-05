@@ -15,7 +15,7 @@ from typing import Annotated, Optional
 import typer
 import uvicorn
 
-from tmux_orchestrator.factory import build_system, patch_web_url
+from tmux_orchestrator.factory import build_system, patch_api_key, patch_web_url
 from tmux_orchestrator.logging_config import setup_json_logging, setup_text_logging
 
 app = typer.Typer(
@@ -108,6 +108,7 @@ def web(
 
     orchestrator, bus, tmux = _build_system(config)
     patch_web_url(orchestrator, host, port)
+    patch_api_key(orchestrator, api_key)
     hub = WebSocketHub(bus=bus)
 
     async def _shutdown() -> None:

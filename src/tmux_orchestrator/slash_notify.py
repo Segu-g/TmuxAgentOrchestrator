@@ -119,6 +119,7 @@ def notify_parent(
 
     agent_id: str = ctx.get("agent_id", "unknown")
     api: str = ctx.get("web_base_url", "http://localhost:8000").rstrip("/")
+    api_key: str = ctx.get("api_key", "")
 
     # Enrich extra: attach plan content when available
     enriched = dict(extra)
@@ -130,12 +131,17 @@ def notify_parent(
             except OSError:
                 pass
 
+    # Build common HTTP headers (include API key when set)
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+
     # Resolve parent_id via GET /agents
     parent_id: str | None = None
     try:
         req = urllib.request.Request(
             f"{api}/agents",
-            headers={"Content-Type": "application/json"},
+            headers=headers,
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             agents = json.loads(resp.read())
@@ -161,7 +167,7 @@ def notify_parent(
         post_req = urllib.request.Request(
             f"{api}/agents/{parent_id}/message",
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         with urllib.request.urlopen(post_req, timeout=timeout) as resp:

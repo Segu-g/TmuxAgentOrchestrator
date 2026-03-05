@@ -85,6 +85,7 @@ def build_system(
                 isolate=agent_cfg.isolate,
                 session_name=config.session_name,
                 web_base_url=config.web_base_url,
+                api_key=config.api_key,
                 task_timeout=effective_timeout,
                 role=agent_cfg.role,
                 command=agent_cfg.command
@@ -129,3 +130,21 @@ def patch_web_url(orchestrator: Orchestrator, host: str, port: int) -> None:
     for agent in orchestrator.registry.all_agents().values():
         if isinstance(agent, ClaudeCodeAgent):
             agent._web_base_url = url
+
+
+def patch_api_key(orchestrator: Orchestrator, api_key: str) -> None:
+    """Update ``api_key`` on all ``ClaudeCodeAgent`` instances and the orchestrator config.
+
+    Called after the web server is started so that the API key (which may have been
+    auto-generated if not supplied on the CLI) is propagated to the orchestrator config
+    and to each agent's context file.
+
+    This ensures that ``notify_parent()``, ``/progress``, and other slash commands that
+    call the REST API will include the correct ``X-API-Key`` header.
+    """
+    from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent  # noqa: PLC0415
+
+    orchestrator.config.api_key = api_key
+    for agent in orchestrator.registry.all_agents().values():
+        if isinstance(agent, ClaudeCodeAgent):
+            agent._api_key = api_key

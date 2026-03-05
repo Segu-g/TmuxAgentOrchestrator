@@ -53,6 +53,7 @@ class ClaudeCodeAgent(Agent):
         cwd_override: Path | None = None,
         session_name: str = "orchestrator",
         web_base_url: str = "http://localhost:8000",
+        api_key: str = "",
         task_timeout: float | None = None,
         role: AgentRole | str = AgentRole.WORKER,
         parent_pane: "libtmux.Pane | None" = None,
@@ -79,6 +80,7 @@ class ClaudeCodeAgent(Agent):
         self._cwd_override = cwd_override
         self._session_name = session_name
         self._web_base_url = web_base_url
+        self._api_key = api_key
         # Normalise role to AgentRole enum for consistent comparisons
         self.role: AgentRole = AgentRole(role) if isinstance(role, str) else role
         # When set, the agent is a sub-agent and shares its parent's tmux window
@@ -134,7 +136,13 @@ class ClaudeCodeAgent(Agent):
         logger.info("ClaudeCodeAgent %s started in pane %s (role=%s)", self.id, pane.id, self.role)
 
     def _context_extras(self) -> dict[str, Any]:
-        return {"session_name": self._session_name, "web_base_url": self._web_base_url}
+        extras: dict[str, Any] = {
+            "session_name": self._session_name,
+            "web_base_url": self._web_base_url,
+        }
+        if self._api_key:
+            extras["api_key"] = self._api_key
+        return extras
 
     # ------------------------------------------------------------------
     # Context localization — writes agent-specific files to worktree
