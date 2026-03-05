@@ -52,6 +52,12 @@ class OrchestratorConfig:
     recovery_attempts: int = 3   # max restart attempts per agent before giving up
     recovery_backoff_base: float = 5.0  # seconds; attempt N waits backoff_base^N seconds
     recovery_poll: float = 2.0   # seconds between recovery checks
+    # --- Rate limiting (token bucket) ---
+    # rate_limit_rps: token refill rate in tasks per second; 0 = unlimited (default)
+    # rate_limit_burst: bucket capacity; defaults to 2× rps or 1 when rps == 0
+    # Reference: Tanenbaum "Computer Networks" 5th ed. §5.3; DESIGN.md §10.16 (v0.20.0)
+    rate_limit_rps: float = 0.0
+    rate_limit_burst: int = 0
 
 
 def load_config(path: str | Path) -> OrchestratorConfig:
@@ -88,4 +94,6 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         recovery_attempts=data.get("recovery_attempts", 3),
         recovery_backoff_base=data.get("recovery_backoff_base", 5.0),
         recovery_poll=data.get("recovery_poll", 2.0),
+        rate_limit_rps=data.get("rate_limit_rps", 0.0),
+        rate_limit_burst=data.get("rate_limit_burst", 0),
     )

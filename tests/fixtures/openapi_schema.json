@@ -45,6 +45,25 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "RateLimitUpdate": {
+        "description": "Request body for PUT /rate-limit.\n\nSet ``rate=0`` to disable rate limiting (unlimited throughput).",
+        "properties": {
+          "burst": {
+            "default": 0,
+            "title": "Burst",
+            "type": "integer"
+          },
+          "rate": {
+            "title": "Rate",
+            "type": "number"
+          }
+        },
+        "required": [
+          "rate"
+        ],
+        "title": "RateLimitUpdate",
+        "type": "object"
+      },
       "ScratchpadWrite": {
         "description": "Request body for PUT /scratchpad/{key}.",
         "properties": {
@@ -659,6 +678,66 @@
           }
         },
         "summary": "Orchestrator operational status"
+      }
+    },
+    "/rate-limit": {
+      "get": {
+        "description": "Return the current rate limiter configuration and token availability.\n\nFields:\n- ``enabled``: True when rate limiting is active.\n- ``rate``: refill rate in tokens per second.\n- ``burst``: bucket capacity (maximum burst size).\n- ``available_tokens``: tokens currently available (live snapshot).",
+        "operationId": "get_rate_limit_rate_limit_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Rate Limit Rate Limit Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get rate limiter status"
+      },
+      "put": {
+        "description": "Create or update the token-bucket rate limiter.\n\nSet ``rate=0`` to disable rate limiting (unlimited throughput).\n``burst`` is ignored when ``rate=0``.\n\nReturns the updated rate limiter status.",
+        "operationId": "put_rate_limit_rate_limit_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RateLimitUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Put Rate Limit Rate Limit Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reconfigure rate limiter"
       }
     },
     "/scratchpad/": {

@@ -51,6 +51,12 @@ class _MockOrchestrator:
     def is_paused(self) -> bool:
         return False
 
+    def get_rate_limiter_status(self) -> dict:
+        return {"enabled": False, "rate": 0.0, "burst": 0, "available_tokens": 0.0}
+
+    def reconfigure_rate_limiter(self, *, rate: float, burst: int) -> dict:
+        return {"enabled": rate > 0, "rate": rate, "burst": burst, "available_tokens": float(burst)}
+
 
 @pytest.fixture(autouse=True)
 def reset_state():

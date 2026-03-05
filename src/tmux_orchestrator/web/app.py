@@ -87,6 +87,16 @@ class TaskPriorityUpdate(BaseModel):
     priority: int
 
 
+class RateLimitUpdate(BaseModel):
+    """Request body for PUT /rate-limit.
+
+    Set ``rate=0`` to disable rate limiting (unlimited throughput).
+    """
+
+    rate: float
+    burst: int = 0
+
+
 # ---------------------------------------------------------------------------
 # Module-level auth state
 # ---------------------------------------------------------------------------
@@ -636,6 +646,37 @@ def create_app(
             "agent_count": len(orchestrator.list_agents()),
             "dlq_depth": len(orchestrator.list_dlq()),
         }
+
+    @app.get(
+        "/rate-limit",
+        summary="Get rate limiter status",
+        dependencies=[Depends(auth)],
+    )
+    async def get_rate_limit() -> dict:
+        """Return the current rate limiter configuration and token availability.
+
+        Fields:
+        - ``enabled``: True when rate limiting is active.
+        - ``rate``: refill rate in tokens per second.
+        - ``burst``: bucket capacity (maximum burst size).
+        - ``available_tokens``: tokens currently available (live snapshot).
+        """
+        return orchestrator.get_rate_limiter_status()
+
+    @app.put(
+        "/rate-limit",
+        summary="Reconfigure rate limiter",
+        dependencies=[Depends(auth)],
+    )
+    async def put_rate_limit(body: RateLimitUpdate) -> dict:
+        """Create or update the token-bucket rate limiter.
+
+        Set ``rate=0`` to disable rate limiting (unlimited throughput).
+        ``burst`` is ignored when ``rate=0``.
+
+        Returns the updated rate limiter status.
+        """
+        return orchestrator.reconfigure_rate_limiter(rate=body.rate, burst=body.burst)
 
     @app.post("/agents/{agent_id}/message", summary="Send a message to an agent", dependencies=[Depends(auth)])
     async def send_message(agent_id: str, body: SendMessage) -> dict:

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from tmux_orchestrator.agents.base import Agent, AgentStatus, Task
 from tmux_orchestrator.bus import Bus, Message, MessageType
 from tmux_orchestrator.messaging import Mailbox
+from tmux_orchestrator.rate_limiter import RateLimitExceeded, TokenBucketRateLimiter
 from tmux_orchestrator.registry import AgentRegistry
 from tmux_orchestrator.supervision import supervised_task
 
@@ -101,6 +102,20 @@ class Orchestrator:
         # Tracks when each agent started its current task (for history duration).
         self._task_started_at: dict[str, float] = {}
         self._task_started_prompt: dict[str, str] = {}
+        # Token-bucket rate limiter for task submission backpressure.
+        # None → unlimited (default).  Set via set_rate_limiter() or
+        # reconfigure_rate_limiter(), or auto-created from config if
+        # config.rate_limit_rps > 0.
+        # Reference: Tanenbaum "Computer Networks" 5th ed. §5.3 — Token Bucket;
+        # DESIGN.md §10.16 (v0.20.0)
+        if config.rate_limit_rps > 0:
+            burst = config.rate_limit_burst or max(1, int(config.rate_limit_rps * 2))
+            self._rate_limiter: TokenBucketRateLimiter | None = TokenBucketRateLimiter(
+                rate=config.rate_limit_rps,
+                burst=burst,
+            )
+        else:
+            self._rate_limiter = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -182,6 +197,44 @@ class Orchestrator:
         return items
 
     # ------------------------------------------------------------------
+    # Rate limiter
+    # ------------------------------------------------------------------
+
+    def set_rate_limiter(self, rl: TokenBucketRateLimiter | None) -> None:
+        """Attach or detach a rate limiter for task submission.
+
+        Pass ``None`` to remove any rate limiting (unlimited throughput).
+        """
+        self._rate_limiter = rl
+
+    def get_rate_limiter_status(self) -> dict:
+        """Return the current rate limiter status dict.
+
+        When no limiter is set, returns ``{"enabled": False, ...}`` with
+        zeroed fields to allow safe consumption by REST clients.
+        """
+        if self._rate_limiter is None:
+            return {"enabled": False, "rate": 0.0, "burst": 0, "available_tokens": 0.0}
+        return self._rate_limiter.status()
+
+    def reconfigure_rate_limiter(self, *, rate: float, burst: int) -> dict:
+        """Create or reconfigure the rate limiter in place.
+
+        If no limiter is attached, a new one is created.  Returns the
+        updated status dict.
+
+        Setting ``rate=0`` disables the limiter (``enabled=False``).
+        """
+        if rate == 0.0:
+            # Disable: replace with a disabled limiter so status() works cleanly
+            self._rate_limiter = TokenBucketRateLimiter(rate=0.0, burst=0)
+        elif self._rate_limiter is None:
+            self._rate_limiter = TokenBucketRateLimiter(rate=rate, burst=burst)
+        else:
+            self._rate_limiter.reconfigure(rate=rate, burst=burst)
+        return self.get_rate_limiter_status()
+
+    # ------------------------------------------------------------------
     # Task submission
     # ------------------------------------------------------------------
 
@@ -196,7 +249,41 @@ class Orchestrator:
         reply_to: str | None = None,
         target_agent: str | None = None,
         required_tags: list[str] | None = None,
+        wait_for_token: bool = True,
     ) -> Task:
+        """Submit a new task to the priority queue.
+
+        Parameters
+        ----------
+        wait_for_token:
+            When ``True`` (default), waits asynchronously for a rate-limit
+            token if the bucket is empty.  When ``False``, raises
+            ``RateLimitExceeded`` immediately if no token is available.
+        """
+        # ---- Rate limiting (token bucket) ----
+        if self._rate_limiter is not None and self._rate_limiter.enabled:
+            if wait_for_token:
+                await self._rate_limiter.acquire()
+            else:
+                acquired = self._rate_limiter.try_acquire()
+                if not acquired:
+                    # Publish observability event before raising
+                    await self.bus.publish(Message(
+                        type=MessageType.STATUS,
+                        from_id="__orchestrator__",
+                        payload={
+                            "event": "rate_limit_exceeded",
+                            "prompt": prompt,
+                            "rate": self._rate_limiter.rate,
+                            "burst": self._rate_limiter.burst,
+                            "available_tokens": self._rate_limiter.status()["available_tokens"],
+                        },
+                    ))
+                    raise RateLimitExceeded(
+                        rate=self._rate_limiter.rate,
+                        burst=self._rate_limiter.burst,
+                        available=self._rate_limiter.status()["available_tokens"],
+                    )
         # Idempotency deduplication: return existing task for duplicate keys.
         if idempotency_key is not None:
             existing_id = self._idempotency_keys.get(idempotency_key)
