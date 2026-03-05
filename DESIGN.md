@@ -864,6 +864,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~中~~ ~~ポーズ/レジューム + 優先度ライブ更新デモ~~ | **完了 (v0.19.0)** — 3 agents, WIS best-of-N, ポーズ中に3タスク投入, PATCH で優先度変更, レジューム後に優先度順ディスパッチ実証 |
 | ~~中~~ ~~Rate limit + Graph Coloring best-of-N~~ | **完了 (v0.20.0)** — 3 agents (greedy/backtrack/local), rate_limit_rps=3.0 burst=3, GET/PUT /rate-limit 実証, Graph Coloring 15-node 22-edge K=4 |
 | ~~低~~ ~~Context monitor + TSP best-of-N~~ | **完了 (v0.21.0)** — 3 agents (nearest-neighbor/2-opt/random-restart), GET /context-stats 実証, TSP N=10 cities |
+| ~~高~~ ~~Dynamic Agent Creation — コードレビューパイプライン~~ | **完了 (v0.22.0)** — テンプレート0で起動 → `create_agent()` で generator/reviewer を動的追加 → fibonacci.py 生成 → REVIEW.md 生成; デモフォルダ: `~/Demonstration/v0.22.0-dynamic-agents/` |
 
 **AHC best-of-N デモ完了 (v0.15.0)**:
 - 問題: Weighted Knapsack (N=15, C=50) — 最適解 score=154 (DP で検証済み)
@@ -891,3 +892,5 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~中~~ ~~コンテキストファイルの自動コピー (`context_files` の実装)~~ | **完了 (v0.11.0)** — `ClaudeCodeAgent._copy_context_files()` |
 | ~~中~~ ~~`/summarize` による NOTES.md 更新をオーケストレーターに通知~~ | **完了 (v0.21.0)** — `ContextMonitor._check_notes_updated()` が mtime 変化を検出し `notes_updated` STATUS イベントを発行 |
 | ~~低~~ ~~エージェント間の共有スクラッチパッド~~ | **完了 (v0.16.0)** — `GET/PUT/DELETE /scratchpad/{key}` REST API; Blackboard パターン; 17 テスト |
+| ~~高~~ ~~Directorが実行時にエージェントを動的追加~~ | **完了 (v0.22.0)** — `Orchestrator.create_agent()` + `POST /agents/new` + CONTROL `create_agent`; テンプレート不要で agent_id/tags/system_prompt/isolate/command を指定して即時起動 (Issue #5) |
+| ~~中~~ ~~worktreeからmainブランチへのコミット還元~~ | **完了 (v0.22.0)** — `WorktreeManager.teardown(merge_to_base=True)` でスカッシュマージ; `keep_branch()` でブランチ保持; `AgentConfig.merge_on_stop=True` で自動化 |

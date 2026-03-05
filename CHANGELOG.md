@@ -6,6 +6,58 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.22.0] — 2026-03-05
+
+### Added
+
+**Dynamic Agent Creation — `Orchestrator.create_agent()` + `POST /agents/new`**
+
+Resolves GitHub Issue #5. Previously, spawning sub-agents required a
+pre-configured YAML template (`template_id`). A Director running a complex
+task could not spin up specialist workers on the fly.
+
+Motivated by: Hewitt et al. "A Universal Modular Actor Formalism for Artificial
+Intelligence" (IJCAI 1973) — actor model (dynamic spawning of actors at
+runtime); Varela & Malenfant "Messages are the Medium" (1990) — on-demand
+actor instantiation; AWS ECS dynamic task scaling pattern.
+
+- `Orchestrator.create_agent(**kwargs)` — create, register, and start a new
+  `ClaudeCodeAgent` at runtime. Accepts: `agent_id`, `tags`, `system_prompt`,
+  `isolate`, `merge_on_stop`, `command`, `role`, `task_timeout`, `parent_id`.
+  Auto-generates IDs (`dyn-{hex6}` or `{parent_id}-dyn-{hex6}`).
+  Publishes `STATUS agent_created` after start.
+- `POST /agents/new` — REST endpoint exposing `create_agent()` directly.
+  Returns 409 on duplicate `agent_id`.
+- CONTROL `{action: "create_agent"}` — bus-based path so Director agents
+  can create workers without a REST call. Same parameters as `create_agent()`.
+
+**Worktree merge-on-stop — contribute agent commits to original branch**
+
+Agents running in isolated git worktrees now have lifecycle options to
+preserve their commits after the agent stops, without using `isolate=False`.
+
+- `WorktreeManager.teardown(merge_to_base=True)` — squash-merges the agent's
+  worktree branch (`worktree/{agent_id}`) into the main repo HEAD before
+  removing the worktree and branch. A no-op when there are no new commits.
+- `WorktreeManager.keep_branch(agent_id)` — removes the worktree directory
+  but preserves the branch for manual inspection and merging.
+- `AgentConfig.merge_on_stop: bool = False` — YAML/config flag that
+  automatically sets `teardown(merge_to_base=True)` for that agent.
+- Exposed in `ClaudeCodeAgent(merge_on_stop=)`, `POST /agents/new`, and the
+  CONTROL `create_agent` handler.
+
+### Tests
+
+- 11 new tests in `tests/test_dynamic_agent.py` — covers create_agent() unit
+  behaviour, auto-ID generation, P2P grant, STATUS event, CONTROL dispatch,
+  REST 200/409 paths.
+- 3 new tests in `tests/test_worktree.py` — covers squash merge, keep_branch,
+  and no-op when no new commits.
+
+Total: **361 tests** (was 347).
+
+---
+
 ## [0.21.0] — 2026-03-05
 
 ### Added
