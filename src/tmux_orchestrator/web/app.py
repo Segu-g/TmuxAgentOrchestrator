@@ -347,6 +347,23 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
         await agent.stop()
         return AgentKillResponse(agent_id=agent_id, stopped=True)
 
+    @app.post("/agents/{agent_id}/reset", summary="Manually reset an agent from ERROR state", dependencies=[Depends(auth)])
+    async def reset_agent(agent_id: str) -> dict:
+        """Stop and restart *agent_id*, clearing ERROR and permanently-failed state.
+
+        Use this endpoint when an agent exhausted automatic recovery attempts
+        and needs a manual restart.  Returns 404 if the agent is not registered.
+
+        Design note: ``POST /agents/{id}/reset`` follows the action sub-resource
+        pattern — an imperative verb endpoint rather than a PUT state replacement.
+        Reference: DESIGN.md §11; Nordic APIs "Designing a True REST State Machine".
+        """
+        try:
+            await orchestrator.reset_agent(agent_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
+        return {"agent_id": agent_id, "reset": True}
+
     @app.post("/agents/{agent_id}/message", summary="Send a message to an agent", dependencies=[Depends(auth)])
     async def send_message(agent_id: str, body: SendMessage) -> dict:
         agent = orchestrator.get_agent(agent_id)
@@ -472,6 +489,75 @@ def create_app(orchestrator: Any, hub: WebSocketHub, *, api_key: str = "") -> Fa
     async def dead_letter_queue() -> list:
         """Return tasks that could not be dispatched after exhausting retries."""
         return orchestrator.list_dlq()
+
+    # ------------------------------------------------------------------
+    # Prometheus metrics (no auth — Prometheus scraper compatibility)
+    # ------------------------------------------------------------------
+
+    @app.get("/metrics", include_in_schema=False)
+    async def prometheus_metrics():
+        """Expose Prometheus-format metrics for the orchestrator.
+
+        No authentication required so that Prometheus (or OpenTelemetry
+        collectors) can scrape without managing credentials.  Expose this
+        port only on a trusted network or bind it to localhost.
+
+        Metrics exposed:
+        - ``tmux_agent_status_total{status}`` — gauge: agent count per status
+        - ``tmux_task_queue_size`` — gauge: current task queue depth
+        - ``tmux_bus_drop_total{agent_id}`` — gauge: per-agent bus drop count
+
+        Reference: prometheus_client Python library;
+                   DESIGN.md §10.6 (Prometheus metrics, low priority);
+                   OneUptime blog (2025-01-06) — python-custom-metrics-prometheus.
+        """
+        from prometheus_client import (  # noqa: PLC0415
+            CONTENT_TYPE_LATEST,
+            CollectorRegistry,
+            Gauge,
+            generate_latest,
+        )
+        from fastapi.responses import Response  # noqa: PLC0415
+
+        registry = CollectorRegistry()
+
+        # --- Agent status distribution ---
+        agent_status_gauge = Gauge(
+            "tmux_agent_status_total",
+            "Number of agents per status",
+            ["status"],
+            registry=registry,
+        )
+        agents = orchestrator.list_agents()
+        status_counts: dict[str, int] = {}
+        for a in agents:
+            s = a.get("status", "UNKNOWN")
+            status_counts[s] = status_counts.get(s, 0) + 1
+        for status_val, count in status_counts.items():
+            agent_status_gauge.labels(status=status_val).set(count)
+
+        # --- Task queue depth ---
+        task_queue_gauge = Gauge(
+            "tmux_task_queue_size",
+            "Current number of tasks waiting in the queue",
+            registry=registry,
+        )
+        task_queue_gauge.set(len(orchestrator.list_tasks()))
+
+        # --- Bus drop counts ---
+        bus_drop_gauge = Gauge(
+            "tmux_bus_drop_total",
+            "Total dropped bus messages per agent",
+            ["agent_id"],
+            registry=registry,
+        )
+        for a in agents:
+            drops = a.get("bus_drops", 0)
+            if drops:
+                bus_drop_gauge.labels(agent_id=a["id"]).set(drops)
+
+        output = generate_latest(registry)
+        return Response(content=output, media_type=CONTENT_TYPE_LATEST)
 
     # ------------------------------------------------------------------
     # WebSocket — session cookie OR API key query param

@@ -623,6 +623,60 @@ class Orchestrator:
     # Controls
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Manual agent reset
+    # ------------------------------------------------------------------
+
+    async def reset_agent(self, agent_id: str) -> None:
+        """Manually reset an agent that is in ERROR or permanently-failed state.
+
+        Clears the permanently-failed flag and recovery attempt counter for
+        *agent_id*, then stops and restarts the agent so it returns to IDLE.
+        This allows operators to recover an agent that exhausted automatic
+        retry attempts without restarting the entire orchestrator.
+
+        Raises ``KeyError`` if *agent_id* is not registered.
+
+        Design: action sub-resource pattern — POST to a verb endpoint
+        (``/agents/{id}/reset``) rather than a state-replacement PUT, because
+        the reset is an imperative side-effectful action, not a pure resource
+        update.  Reference: Nordic APIs "Designing a True REST State Machine";
+        DESIGN.md §11.
+        """
+        agent = self.registry.get(agent_id)
+        if agent is None:
+            raise KeyError(agent_id)
+
+        # Clear recovery bookkeeping so the auto-recovery loop can retry again
+        self._permanently_failed.discard(agent_id)
+        self._recovery_attempts.pop(agent_id, None)
+
+        try:
+            await agent.stop()
+        except Exception:  # noqa: BLE001
+            logger.exception("reset_agent: error stopping agent %s", agent_id)
+
+        try:
+            await agent.start()
+        except Exception:  # noqa: BLE001
+            logger.exception("reset_agent: error restarting agent %s", agent_id)
+            agent.status = AgentStatus.ERROR
+            raise
+
+        await self.bus.publish(Message(
+            type=MessageType.STATUS,
+            from_id="__orchestrator__",
+            payload={
+                "event": "agent_reset",
+                "agent_id": agent_id,
+            },
+        ))
+        logger.info("Orchestrator manually reset agent %s", agent_id)
+
+    # ------------------------------------------------------------------
+    # Controls
+    # ------------------------------------------------------------------
+
     def pause(self) -> None:
         self._paused = True
         logger.info("Dispatch paused")
