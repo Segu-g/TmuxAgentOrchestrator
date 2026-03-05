@@ -87,12 +87,17 @@ Research → Implement → Unit Tests → E2E Demo → Feedback → Research →
 
 Each step is **required**. Never skip to the next step until the current one is complete.
 
-#### Step 1 — Research first (before every iteration)
-- Search for academic papers, blog posts, and SE books relevant to the planned improvement.
-- Use `WebSearch` and `WebFetch` to collect references. Record findings in `DESIGN.md`
-  with citations (author, title, URL, year).
+#### Step 1 — Research first (before every iteration) — MANDATORY, NO EXCEPTIONS
+- **The very first action in every iteration MUST be `WebSearch`.**
+  Do NOT read any code file, do NOT write any code, until web research is complete.
+- Search for academic papers, blog posts, RFC specifications, and SE books relevant
+  to the planned feature. Minimum 3 queries with `WebSearch`; follow up with `WebFetch`
+  for relevant pages.
+- Record findings in `DESIGN.md §10.N` with full citations (author, title, URL, year).
 - Write a brief justification: *why* this improvement, *what* the literature says, *how*
-  it maps to the codebase. Then and only then begin implementation.
+  it maps to the codebase.
+- **References must come from actual web searches, not from training knowledge alone.**
+  Verify URLs are reachable. Then and only then begin implementation.
 
 #### Step 2 — Implement + unit tests
 - Follow the normal TDD cycle (Red → Green → Refactor).
