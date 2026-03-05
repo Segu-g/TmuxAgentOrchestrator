@@ -938,6 +938,67 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 - オーケストレーター再起動後も結果が生存することを実証
 - デモフォルダ: `~/Demonstration/v0.24.0-result-persistence/`
 
+### 10.20 調査記録 (v0.25.0, 2026-03-05)
+
+**実装テーマ: Workflow DAG API — multi-step pipeline submission as a unit**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| タスク依存グラフ | DAG (Directed Acyclic Graph) | Apache Airflow DAG model https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/dags.html |
+| パイプライン提出 | Workflow orchestration | Prefect "Modern Data Stack" https://www.prefect.io/guide/blog/modern-data-stack |
+| 依存関係解決 | Topological sort / Register renaming | Tomasulo's algorithm (IBM J. Res. Dev. 1967); Cormen et al. "Introduction to Algorithms" 4th ed. §22.4 |
+| ステートマシン | State machine workflow | AWS Step Functions https://docs.aws.amazon.com/step-functions/latest/dg/concepts-amazon-states-language.html |
+| トポロジカルソート | Kahn's algorithm | Kahn, A.B. (1962). "Topological sorting of large networks". CACM 5(11):558–562 |
+
+**主要知見:**
+
+1. **Apache Airflow DAGモデル**: タスクを有向非巡回グラフ (DAG) で表現し、依存関係を宣言的に定義する。ノードはタスク、エッジは「このタスクが完了してから次を開始する」という制約。Airflowではタスク間の依存関係を`>>` 演算子で表現するが、RESTスキーマでは `depends_on: [local_id]` のリストで表現する。
+
+2. **Tomasulo アルゴリズムとのアナロジー**: IBM の Robert Tomasulo (1967) が提案したアウトオブオーダー実行のレジスタリネーミング技術は、本実装の「local_id → global task_id の変換」と構造的に等価。local_id はユーザー空間の「レジスタ名」、global task_id はハードウェアの「物理レジスタ番号」。変換後、本来の依存関係が保持されたまま並列実行可能なタスクは即時ディスパッチされる。
+
+3. **Kahn's アルゴリズム (1962)**: in-degree ベースのトポロジカルソート。O(V+E) の計算量で依存関係の順序を決定し、同時に閉路の検出も行う (result != len(steps) の場合、閉路が存在)。DFSベースの手法と異なり、ソート結果が直接実行順序になるため実装が自然。
+
+4. **AWS Step Functions とのアプローチの違い**: Step Functionsは永続的なステートマシンとしてワークフローを定義し、各ステート遷移をサービス側で管理する。本実装はより軽量で、WorkflowManager は「完了の観察者」に徹し、実行制御はOrchestrator の既存の dispatch ループと depends_on メカニズムに委ねる。この分離により、workflow 機能追加がコアロジックに影響を与えない。
+
+5. **Prefect のコンセプトとの比較**: Prefect は Python デコレータで DAG を定義し、再試行・スケジューリング・UIを提供する。本実装は「提出時点での DAG 定義」のみをサポートし、ランタイムでの再試行は既存の DLQ + retry 機構に委ねる。Prefect の "flow" 概念に対応するのが `WorkflowRun`、"task" に対応するのが `Task` である。
+
+**設計決定:**
+
+- **WorkflowManager は常に有効**: `result_store_enabled=False` がデフォルトだった ResultStore とは異なり、WorkflowManager はゼロオーバーヘッドなため常時インスタンス化。ワークフローが提出されない場合は `_runs` と `_task_to_workflow` が空のまま。
+- **local_id → global task_id の変換はサーバーサイド**: クライアントが UUID を管理する必要がない。Apache Airflow のタスク ID がノード識別子として機能するのと同様に、local_id はワークフロー内の参照名として機能し、グローバル名前空間での衝突を避ける。
+- **WorkflowManager は「観察者」パターン**: Orchestrator の dispatch ループを変更せず、RESULT メッセージ処理に `on_task_complete()` / `on_task_failed()` の呼び出しを追加するだけ。既存の `_completed_tasks` 管理と直交する。
+- **validate_dag() の分離**: DAG 検証ロジック (Kahn's algorithm) を `workflow_manager.py` に独立した純粋関数として定義。テストが容易で、REST ハンドラ外での再利用が可能。
+- **`WorkflowRun.status` の遷移**: `pending` → `running` (最初のタスク完了/失敗時) → `complete` (全成功) / `failed` (任意の失敗)。Prefect のフロー状態モデルに倣う。
+
+**テスト (29テスト, 合計438テスト):**
+- `WorkflowManager.submit()` がランを登録する
+- `on_task_complete()` — 部分完了時: `running`
+- `on_task_complete()` — 全完了時: `complete` + `completed_at` セット
+- `on_task_failed()` — 即時 `failed`
+- 未知の task_id は no-op
+- `validate_dag()` — linear, diamond topology
+- `validate_dag()` — 閉路検出で `ValueError`
+- `validate_dag()` — 未知の local_id で `ValueError`
+- `POST /workflows` — 正常ケース: workflow_id + task_ids マップ
+- `POST /workflows` — local→global マッピングの正確性
+- `POST /workflows` — depends_on が正しく変換される
+- `POST /workflows` — 閉路で 400 返却
+- `POST /workflows` — 未知 local_id で 400 返却
+- `POST /workflows` — 認証なしで 401
+- `GET /workflows` — 空リスト / 複数ワークフロー
+- `GET /workflows/{id}` — 正常ケース / 404
+- 統合テスト: `_route_loop` が RESULT を受信すると `WorkflowManager` が `complete` に遷移
+
+**デモシナリオ (v0.25.0):**
+- シナリオ: "3-Step Code Pipeline"
+- 2エージェント: agent-implementer / agent-reviewer
+- Task A: implementer が quicksort / mergesort / heapsort を実装 (`sorter.py`)
+- Task B (after A): reviewer が `sorter.py` をレビューし `review.md` を書く
+- Task C (after B): implementer が `review.md` を読んで修正 + エッジケーステスト追加
+- `validate_dag()` + `WorkflowManager.submit()` で一括提出
+- workflow の `pending` → `running` → `complete` 遷移を実証
+- デモフォルダ: `~/Demonstration/v0.25.0-workflow-dag/`
+
 ---
 
 ## 11. 今後の課題
@@ -957,6 +1018,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | 中 | `/plan` と `/tdd` の出力を RESULT メッセージとして親に自動送信 |
 | ~~高~~ ~~キュー深度オートスケーリング~~ | **完了 (v0.23.0)** — `AutoScaler` MAPE-Kループ; `GET/PUT /orchestrator/autoscaler`; `OrchestratorConfig.autoscale_*`; 23テスト (386合計) |
 | ~~中~~ ~~タスク結果の永続化（Event Sourcing）~~ | **完了 (v0.24.0)** — `ResultStore` 追記専用 JSONL; `GET /results`, `GET /results/dates`; `OrchestratorConfig.result_store_enabled/dir`; 23テスト (409合計) |
+| ~~高~~ ~~Workflow DAG API — パイプライン一括提出~~ | **完了 (v0.25.0)** — `WorkflowManager` + `validate_dag()` + `POST/GET /workflows`; Kahn's algorithm; local_id→task_id変換; 29テスト (438合計) |
 | ~~低~~ ~~エージェントのコンテキスト使用量モニタリング~~ | **完了 (v0.21.0)** — `ContextMonitor` + `GET /agents/{id}/stats`, `GET /context-stats`; `context_warning`/`notes_updated`/`summarize_triggered` STATUS イベント; `context_auto_summarize`; 21 テスト (347 合計) |
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |
 | ~~低~~ ~~Prometheus メトリクス (`/metrics`)~~ | **完了 (v0.13.0)** — `GET /metrics` (prometheus_client 直接使用; 認証不要) |
@@ -975,6 +1037,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~高~~ ~~Dynamic Agent Creation — コードレビューパイプライン~~ | **完了 (v0.22.0)** — テンプレート0で起動 → `create_agent()` で generator/reviewer を動的追加 → fibonacci.py 生成 → REVIEW.md 生成; デモフォルダ: `~/Demonstration/v0.22.0-dynamic-agents/` |
 | ~~高~~ ~~Queue-Depth Autoscaling — バースト負荷処理~~ | **完了 (v0.23.0)** — 0エージェントで起動 → AutoScaler (min=0, max=3, threshold=2) が6タスクバーストを検出 → 3エージェントを動的作成 → クールダウン後にスケールゼロ; デモフォルダ: `~/Demonstration/v0.23.0-autoscaling/` |
 | ~~中~~ ~~Persistent Audit Trail — 結果永続化~~ | **完了 (v0.24.0)** — analyst + summarizer, result_store_enabled=True, Orchestrator停止後も JSONL ファイルが残ることを実証; デモフォルダ: `~/Demonstration/v0.24.0-result-persistence/` |
+| ~~高~~ ~~Workflow DAG — 3-Step Code Pipeline~~ | **完了 (v0.25.0)** — agent-implementer + agent-reviewer, Task A→B→C (実装→レビュー→修正+テスト), `validate_dag()` + `WorkflowManager` で一括提出; デモフォルダ: `~/Demonstration/v0.25.0-workflow-dag/` |
 
 **AHC best-of-N デモ完了 (v0.15.0)**:
 - 問題: Weighted Knapsack (N=15, C=50) — 最適解 score=154 (DP で検証済み)

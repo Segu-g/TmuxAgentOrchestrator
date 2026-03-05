@@ -6,6 +6,57 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.25.0] — 2026-03-05
+
+### Added
+
+**Workflow DAG API — `WorkflowManager` + `POST /workflows` + `GET /workflows`**
+
+Implements a REST-level Workflow DAG submission API that lets users submit an
+entire multi-step pipeline as a single atomic request. Previously, tasks had
+to be submitted one by one with manually-managed `depends_on` IDs. Now a DAG
+of tasks with local cross-references is submitted in one call; the server
+translates local IDs to global task IDs and enforces topological ordering.
+
+Design references:
+- Apache Airflow DAG model — task dependencies as directed acyclic graph
+- Prefect "Modern Data Stack" workflow orchestration
+- Tomasulo's algorithm (IBM 1967) — register renaming == local_id → global_task_id
+- AWS Step Functions — state machine for workflow orchestration
+- Kahn's algorithm (1962) — topological sort in O(V+E)
+
+New components:
+- `WorkflowManager` (`workflow_manager.py`): lightweight observer that tracks
+  workflow runs and their completion state. Always enabled (zero overhead when
+  no workflows are submitted). `on_task_complete()` / `on_task_failed()` called
+  from `Orchestrator._route_loop` when RESULT messages arrive.
+- `WorkflowRun` dataclass: stores `id`, `name`, `task_ids`, `status`, timestamps.
+- `validate_dag()`: validates and topologically sorts a list of task spec dicts
+  using Kahn's algorithm; raises `ValueError` on unknown dependencies or cycles.
+- `WorkflowTaskSpec`, `WorkflowSubmit` Pydantic models for the REST body.
+
+New REST endpoints:
+- `POST /workflows` — submit a named workflow DAG. Validates DAG, assigns
+  global task IDs, submits tasks with correct `depends_on` translation,
+  registers with WorkflowManager. Returns `{workflow_id, name, task_ids}`.
+  Returns 400 on cycle or unknown `depends_on` reference.
+- `GET /workflows` — list all submitted workflow runs and their status.
+- `GET /workflows/{workflow_id}` — status of a specific workflow run.
+
+Orchestrator integration:
+- `Orchestrator._workflow_manager: WorkflowManager` — always instantiated.
+- `Orchestrator._route_loop`: calls `on_task_complete()` / `on_task_failed()`
+  when processing RESULT messages.
+- `Orchestrator.get_workflow_manager()` — accessor for tests and REST layer.
+
+### Tests
+
+- 29 new tests in `tests/test_workflow_manager.py`
+
+Total: **438 tests** (was 409).
+
+---
+
 ## [0.24.0] — 2026-03-05
 
 ### Added
