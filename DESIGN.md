@@ -1754,6 +1754,31 @@ v0.36.0 デモのタイムアウト問題も `task_timeout: 900` に変更する
 
 ---
 
+## 10.12 Stop Hook 完了検出 (v0.38.0) — 調査記録
+
+### 選定根拠
+
+**選択した機能**: Claude Code `Stop` フックによる完了検出の置き換え (v0.38.0)
+
+**選択理由**:
+- §11 の「高」優先度リストで最上位に近い技術基盤改善。
+- v0.37.0 デモ (`build-log.md`) で「v0.38.0 — Stop hook completion detection」が明示的に次イテレーション候補として指定されていた。
+- 現行の 500ms ポーリング + regex は脆弱: Claude CLI バージョンアップで `❯` プロンプトの形式が変わると完了検出が失敗する。v0.36.0 デモでも 300秒タイムアウトが発生した根本原因。
+- Claude Code の `Stop` フックは決定論的な完了通知を提供し、より信頼性が高い。
+
+**選択しなかった機能**:
+- `POST /workflows/tdd` — TDD ワークフローは基盤として Stop hook が完成してから実装する方が信頼性が高い。
+- `ProcessPort` 抽象インターフェース — アーキテクチャリファクタリングで、ユーザー価値より低い。Stop hook 完了後に自然に実装できる。
+- Codified Context — 有用だが Stop hook より緊急度が低い。
+
+---
+
+### Step 1 — 調査記録 (WebSearch 結果)
+
+*WebSearch 実行後に記録する*
+
+---
+
 ## 11. 今後の課題
 
 > 以下のバックログは、完了済み項目（旧 §11 テーブルの全 ~~完了~~ エントリ、§10.N 実装履歴）を除去し、
@@ -1771,9 +1796,9 @@ v0.36.0 デモのタイムアウト問題も `task_timeout: 900` に変更する
 
 | 優先度 | 課題 | 根拠 |
 |--------|------|------|
-| 高 | **`POST /workflows/tdd` — Red→Green→Refactor を3エージェントに自動分担する TDD ワークフロー** — `test-writer`（failing tests のみ記述）・`implementer`（テストを見て最小実装）・`refactorer`（改善）の3ロールを YAML 宣言し、各エージェントが別コンテキストウィンドウで動作する Workflow DAG を一発投入できるエンドポイントを追加する。コンテキスト分離が真の test-first を保証するため、単一エージェントの `/tdd` では得られない品質が期待できる | TDFlow arXiv:2510.23761 (CMU/UCSD/JHU 2025): test-driven agentic workflow が SWE-Bench Lite で 88.8% pass rate（次点比 +27.8%）。alexop.dev "Forcing Claude Code to TDD" (2025): 「真の TDD には別コンテキストが必須」。既存の Workflow DAG (v0.25.0) + tags (v0.18.0) + target_group (v0.31.0) で実現可能。 |
-| 高 | **役割別 system_prompt テンプレートライブラリ + `system_prompt_file:` YAML フィールド** — `.claude/prompts/roles/` に tester / implementer / reviewer / spec-writer / judge / advocate / critic の7種類のプロンプトファイルを提供し、`AgentConfig.system_prompt_file:` フィールドで参照できるようにする。各ファイルに「役割・禁止事項・完了条件・/plan /tdd の使い方・迎合抑制指示」を標準化して記述する | Vellum "Best practices for building multi-agent systems" (2025): 役割特化プロンプトとステート分離が精度向上に最も効果的。ChatEval ICLR 2024 (arXiv:2308.07201): 役割の多様性が討論品質を決定する最重要因子。同一ロール複数エージェントは性能低下を招く。CONSENSAGENT ACL 2025: 迎合抑制プロンプトが正答率・効率の両方を改善。 |
-| 高 | **`POST /workflows/debate` — Advocate + Critic + Judge の3エージェント討論ワークフロー** — `advocate`（提案作成）・`critic`（反論・改善点、Devil's Advocate）・`judge`（総合判断）が最大 3 ラウンド（`max_rounds` パラメータ）討論し、出力を `DECISION.md` としてスクラッチパッドに書き出す Workflow DAG エンドポイントを追加する | Du et al. ICML 2024 (arXiv:2305.14325): 多エージェント討論で事実性・推論精度が単一 LLM 比で有意向上。A-HMAD Springer 2025: 役割異種化で +10% 精度向上。DEBATE ACL 2024 (arXiv:2405.09935): 3エージェント構成が NLG 評価 SOTA。最適ラウンド数は 3 で飽和 (Chen et al. 2024)。 |
+| ~~高~~ | ~~**`POST /workflows/tdd`**~~ | ~~完了 v0.36.0~~ |
+| ~~高~~ | ~~**`POST /workflows/debate`**~~ | ~~完了 v0.37.0 — advocate/critic/judge 3役割, 1–3ラウンド, judge→DECISION.md. ALL 27 CHECKS PASSED. デモ: SQLite vs PostgreSQL, Advocate(PG)勝利.~~ |
+| 高 | **役割別 system_prompt テンプレートライブラリ + `system_prompt_file:` YAML フィールド** — `.claude/prompts/roles/` に tester / implementer / reviewer / spec-writer / judge / advocate / critic の7種類のプロンプトファイルを提供し、`AgentConfig.system_prompt_file:` フィールドで参照できるようにする。各ファイルに「役割・禁止事項・完了条件・/plan /tdd の使い方・迎合抑制指示」を標準化して記述する | Vellum "Best practices for building multi-agent systems" (2025): 役割特化プロンプトとステート分離が精度向上に最も効果的。ChatEval ICLR 2024 (arXiv:2308.07201): 役割の多様性が討論品質を決定する最重要因子。同一ロール複数エージェントは性能低下を招く。CONSENSAGENT ACL 2025: 迎合抑制プロンプトが正答率・効率の両方を改善。v0.37.0 で advocate/critic/judge の 3 テンプレート (`.claude/prompts/roles/`) を追加。残りは tester / implementer / reviewer / spec-writer。 |
 | 高 | **`POST /workflows/adr` — Architecture Decision Record (ADR) 自動生成ワークフロー** — `proposer`（案提示）→ `reviewer`（技術的批評）→ `synthesizer`（ADR 文書化）の3エージェントが MADR フォーマット (title / status / context / decision / consequences) の `DECISION.md` を生成するテンプレートを追加。`context_files` に既存 ADR を渡すことで過去の決定との整合性を保つ | MAD in Requirements Engineering arXiv:2507.05981 (2025): MAD が要件分類 F1 を 0.726→0.841 に向上。SocraSynth arXiv:2402.06634: モデレーター + 対立エージェント + ジャッジ構成が設計討論に直接適用可能。`debate` ワークフローと共通基盤で実装できる。 |
 | 高 | **Codified Context インフラ** — プロジェクト規約・禁止事項を機械可読な YAML/JSON 仕様ファイルとして `.claude/specs/` に配置し、`AgentConfig.context_spec_files` (glob パターン) でタスク開始時にワークツリーへ自動コピーする。エージェントがセッションをまたいでも規約を忘れない基盤を実現する | Vasilopoulos arXiv:2602.20478 "Codified Context" (2026-02): 108,000行 C# 分散システムで 283 セッションにわたり規約を維持。Hot-memory constitution + Cold-memory spec documents の2層構造が有効。既存の `context_files` (v0.11.0) 機構の自然な拡張。 |
 | 高 | **チェックポイント永続化による中断再開** — `ResultStore` (v0.24.0 JSONL) を拡張し、タスク進行状態・ワークフロー状態スナップショットを SQLite に保存。`tmux-orchestrator web --resume` フラグでプロセス再起動後に最後のチェックポイントから継続できるようにする | LangGraph は checkpointer + PostgresSaver で fault-tolerant persistence を提供 (LangChain docs 2025)。現状はプロセス再起動でキュー・ワークフロー状態が消滅する。ResultStore (v0.24.0) が JSONL 追記基盤として既に存在しており、SQLite 拡張は自然な次ステップ。 |
@@ -1814,9 +1839,9 @@ v0.36.0 デモのタイムアウト問題も `task_timeout: 900` に変更する
 
 | 優先度 | シナリオ | パターン |
 |--------|----------|---------|
-| 高 | **TDD ワークフローデモ — fizzbuzz / 素数判定** | 3エージェント (test-writer / implementer / refactorer)、`POST /workflows/tdd` 一発投入、test-writer の failing test が implementer のコンテキストに漏れないことを実証 |
+| ~~高~~ | ~~**TDD ワークフローデモ**~~ | ~~完了 v0.36.0 (タイムアウト 300s → 次回 900s で再試行)~~ |
+| ~~高~~ | ~~**Debate ワークフローデモ**~~ | ~~完了 v0.37.0 — SQLite vs PostgreSQL、2ラウンド、ALL 27 CHECKS PASSED。Advocate(PG)勝利~~ |
 | 高 | **ADR 自動生成デモ — "SQLite vs PostgreSQL 選択"** | `POST /workflows/adr`、proposer+reviewer+synthesizer、`DECISION.md` がスクラッチパッドに書き出されることを実証。past ADR を `context_files` で参照 |
-| 高 | **Debate ワークフローデモ — アーキテクチャ設計判断** | `POST /workflows/debate`、advocate+critic+judge、2ラウンド討論、`DECISION.md` 出力。role_prompt_file に `advocate.md`/`critic.md`/`judge.md` を使用 |
 | 中 | **AgentMesh 型 4ロール開発パイプラインデモ (Planner → Coder → Debugger → Reviewer)** | `examples/agentmesh_config.yaml` + `POST /workflows`、1つの機能要求から完全実装+レビューまでを4エージェントが自動処理。Workflow DAG + tags (v0.18.0) + target_group (v0.31.0) で宣言的に記述 |
 | 中 | **Delphi 型合意形成デモ — "マイクロサービス vs モノリス"** | `POST /workflows/delphi`、5ペルソナエージェント、3ラウンド、各ラウンドの `delphi_round_{n}.md` 生成と最終 `consensus.md` を実証 |
 | 中 | **Red Team / Blue Team セキュリティレビューデモ** | `POST /workflows/redblue`、blue-team が FastAPI エンドポイントを実装、red-team が入力検証・認証・レートリミットの欠陥を列挙、arbiter がリスク評価レポートを生成 |
