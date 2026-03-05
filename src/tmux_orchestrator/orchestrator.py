@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from tmux_orchestrator.agents.base import Agent, AgentStatus, Task
 from tmux_orchestrator.bus import Bus, Message, MessageType
+from tmux_orchestrator.context_monitor import ContextMonitor
 from tmux_orchestrator.messaging import Mailbox
 from tmux_orchestrator.rate_limiter import RateLimitExceeded, TokenBucketRateLimiter
 from tmux_orchestrator.registry import AgentRegistry
@@ -116,6 +117,18 @@ class Orchestrator:
             )
         else:
             self._rate_limiter = None
+        # Context window monitor: tracks pane output size, estimates token count,
+        # detects NOTES.md updates, and optionally auto-injects /summarize.
+        # Reference: Liu et al. "Lost in the Middle" TACL 2024; DESIGN.md §11 (v0.21.0)
+        self._context_monitor = ContextMonitor(
+            bus=bus,
+            tmux=tmux,
+            agents=lambda: list(self.registry.all_agents().values()),
+            context_window_tokens=config.context_window_tokens,
+            warn_threshold=config.context_warn_threshold,
+            auto_summarize=config.context_auto_summarize,
+            poll_interval=config.context_monitor_poll,
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -150,10 +163,12 @@ class Orchestrator:
             ),
             name="orchestrator-recovery",
         )
+        self._context_monitor.start()
         logger.info("Orchestrator started with %d agents", len(self.registry.all_agents()))
 
     async def stop(self) -> None:
-        """Stop dispatch, routing, watchdog, and all agents."""
+        """Stop dispatch, routing, watchdog, context monitor, and all agents."""
+        self._context_monitor.stop()
         internal_tasks = [
             t for t in [
                 self._dispatch_task, self._router_task,
@@ -195,6 +210,18 @@ class Orchestrator:
         items = self._director_pending.copy()
         self._director_pending.clear()
         return items
+
+    # ------------------------------------------------------------------
+    # Context monitor
+    # ------------------------------------------------------------------
+
+    def get_agent_context_stats(self, agent_id: str) -> dict | None:
+        """Return context usage stats for *agent_id*, or None if not tracked."""
+        return self._context_monitor.get_stats(agent_id)
+
+    def all_agent_context_stats(self) -> list[dict]:
+        """Return context usage stats for all tracked agents."""
+        return self._context_monitor.all_stats()
 
     # ------------------------------------------------------------------
     # Rate limiter

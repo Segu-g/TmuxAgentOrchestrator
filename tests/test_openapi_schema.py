@@ -62,6 +62,15 @@ class _MockOrchestrator:
     def reconfigure_rate_limiter(self, *, rate: float, burst: int) -> dict:
         return {"enabled": False, "rate": 0.0, "burst": 0, "available_tokens": 0.0}
 
+    def get_agent_context_stats(self, agent_id: str) -> dict | None:
+        return None
+
+    def all_agent_context_stats(self) -> list:
+        return []
+
+    def get_agent_history(self, agent_id: str, limit: int = 50) -> list | None:
+        return None
+
 
 @pytest.fixture
 def fastapi_app():

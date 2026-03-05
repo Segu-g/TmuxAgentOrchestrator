@@ -468,6 +468,51 @@ def create_app(
         return {"agent_id": agent_id, "reset": True}
 
     @app.get(
+        "/agents/{agent_id}/stats",
+        summary="Per-agent context usage stats",
+        dependencies=[Depends(auth)],
+    )
+    async def agent_context_stats(agent_id: str) -> dict:
+        """Return context window usage statistics for *agent_id*.
+
+        Fields:
+        - ``pane_chars``: character count of the last captured pane output.
+        - ``estimated_tokens``: estimated token count (pane_chars / 4).
+        - ``context_window_tokens``: configured total context window size.
+        - ``context_pct``: percentage of context window used (0-100+).
+        - ``warn_threshold_pct``: threshold at which context_warning is emitted.
+        - ``notes_mtime``: mtime of NOTES.md at last check (Unix timestamp).
+        - ``notes_updates``: number of NOTES.md changes detected.
+        - ``context_warnings``: number of context_warning events emitted.
+        - ``summarize_triggers``: number of /summarize auto-injections.
+        - ``last_polled``: monotonic timestamp of the last poll cycle.
+
+        Returns 404 if the agent is unknown or not yet tracked by the monitor.
+
+        Design reference: Liu et al. "Lost in the Middle" TACL 2024
+        (https://arxiv.org/abs/2307.03172) — context saturation degrades recall;
+        monitoring context size enables proactive compression. DESIGN.md §11 (v0.21.0).
+        """
+        stats = orchestrator.get_agent_context_stats(agent_id)
+        if stats is None:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} context stats not yet available")
+        return stats
+
+    @app.get(
+        "/context-stats",
+        summary="Context usage stats for all agents",
+        dependencies=[Depends(auth)],
+    )
+    async def all_context_stats() -> list:
+        """Return context window usage statistics for all tracked agents.
+
+        See ``GET /agents/{id}/stats`` for field descriptions.
+
+        Design reference: DESIGN.md §11 (v0.21.0) — エージェントのコンテキスト使用量モニタリング.
+        """
+        return orchestrator.all_agent_context_stats()
+
+    @app.get(
         "/agents/{agent_id}/history",
         summary="Per-agent task history",
         dependencies=[Depends(auth)],

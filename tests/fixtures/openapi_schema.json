@@ -510,6 +510,69 @@
         "summary": "Manually reset an agent from ERROR state"
       }
     },
+    "/agents/{agent_id}/stats": {
+      "get": {
+        "description": "Return context window usage statistics for *agent_id*.\n\nFields:\n- ``pane_chars``: character count of the last captured pane output.\n- ``estimated_tokens``: estimated token count (pane_chars / 4).\n- ``context_window_tokens``: configured total context window size.\n- ``context_pct``: percentage of context window used (0-100+).\n- ``warn_threshold_pct``: threshold at which context_warning is emitted.\n- ``notes_mtime``: mtime of NOTES.md at last check (Unix timestamp).\n- ``notes_updates``: number of NOTES.md changes detected.\n- ``context_warnings``: number of context_warning events emitted.\n- ``summarize_triggers``: number of /summarize auto-injections.\n- ``last_polled``: monotonic timestamp of the last poll cycle.\n\nReturns 404 if the agent is unknown or not yet tracked by the monitor.\n\nDesign reference: Liu et al. \"Lost in the Middle\" TACL 2024\n(https://arxiv.org/abs/2307.03172) \u2014 context saturation degrades recall;\nmonitoring context size enables proactive compression. DESIGN.md \u00a711 (v0.21.0).",
+        "operationId": "agent_context_stats_agents__agent_id__stats_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Agent Context Stats Agents  Agent Id  Stats Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Per-agent context usage stats"
+      }
+    },
+    "/context-stats": {
+      "get": {
+        "description": "Return context window usage statistics for all tracked agents.\n\nSee ``GET /agents/{id}/stats`` for field descriptions.\n\nDesign reference: DESIGN.md \u00a711 (v0.21.0) \u2014 \u30a8\u30fc\u30b8\u30a7\u30f3\u30c8\u306e\u30b3\u30f3\u30c6\u30ad\u30b9\u30c8\u4f7f\u7528\u91cf\u30e2\u30cb\u30bf\u30ea\u30f3\u30b0.",
+        "operationId": "all_context_stats_context_stats_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {},
+                  "title": "Response All Context Stats Context Stats Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Context usage stats for all agents"
+      }
+    },
     "/director/chat": {
       "post": {
         "operationId": "director_chat_director_chat_post",

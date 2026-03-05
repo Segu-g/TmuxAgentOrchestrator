@@ -58,6 +58,17 @@ class OrchestratorConfig:
     # Reference: Tanenbaum "Computer Networks" 5th ed. §5.3; DESIGN.md §10.16 (v0.20.0)
     rate_limit_rps: float = 0.0
     rate_limit_burst: int = 0
+    # --- Context window monitoring ---
+    # context_window_tokens: total context window size (default 200 000 for Claude Sonnet/Opus).
+    # context_warn_threshold: fraction (0-1) at which context_warning is published (default 0.75).
+    # context_auto_summarize: when True, /summarize is injected into agent pane at threshold.
+    # context_monitor_poll: poll interval in seconds (default 5.0).
+    # Reference: Liu et al. "Lost in the Middle" TACL 2024 https://arxiv.org/abs/2307.03172
+    # Reference: Anthropic context windows docs https://platform.claude.com/docs/en/build-with-claude/context-windows
+    context_window_tokens: int = 200_000
+    context_warn_threshold: float = 0.75
+    context_auto_summarize: bool = False
+    context_monitor_poll: float = 5.0
 
 
 def load_config(path: str | Path) -> OrchestratorConfig:
@@ -96,4 +107,8 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         recovery_poll=data.get("recovery_poll", 2.0),
         rate_limit_rps=data.get("rate_limit_rps", 0.0),
         rate_limit_burst=data.get("rate_limit_burst", 0),
+        context_window_tokens=data.get("context_window_tokens", 200_000),
+        context_warn_threshold=data.get("context_warn_threshold", 0.75),
+        context_auto_summarize=data.get("context_auto_summarize", False),
+        context_monitor_poll=data.get("context_monitor_poll", 5.0),
     )
