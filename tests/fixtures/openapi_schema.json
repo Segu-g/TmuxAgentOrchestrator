@@ -377,6 +377,17 @@
               }
             ],
             "title": "Target Group"
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ttl"
           }
         },
         "required": [
@@ -491,6 +502,17 @@
               }
             ],
             "title": "Target Group"
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ttl"
           }
         },
         "required": [
@@ -657,6 +679,17 @@
               }
             ],
             "title": "Target Group"
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ttl"
           }
         },
         "required": [

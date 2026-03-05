@@ -66,6 +66,12 @@ class TaskSubmit(BaseModel):
     # Prevents high-priority dependent tasks from being delayed by lower-priority work.
     # Reference: Liu & Layland JACM (1973); DESIGN.md §10.27 (v0.32.0)
     inherit_priority: bool = True
+    # TTL (Time-to-Live) in seconds.  None = never expires (default).
+    # When set, the task is automatically expired *ttl* seconds after submission
+    # if it has not yet been dispatched to an agent (queued) or if it is still
+    # waiting for dependency resolution (waiting).
+    # Reference: RabbitMQ TTL; Azure Service Bus; DESIGN.md §10.28 (v0.33.0)
+    ttl: float | None = None
 
 
 class TaskBatchItem(BaseModel):
@@ -95,6 +101,8 @@ class TaskBatchItem(BaseModel):
     # depends_on may reference: global task IDs OR sibling local_ids in this batch.
     # Sibling local_ids are resolved to global IDs at submission time.
     depends_on: list[str] = []
+    # TTL in seconds; None = use orchestrator default_task_ttl (or never expires).
+    ttl: float | None = None
 
 
 class TaskBatchSubmit(BaseModel):
@@ -234,6 +242,8 @@ class WorkflowTaskSpec(BaseModel):
     # Priority inheritance: when True (default), child task priority = min(own, parent).
     # Reference: Liu & Layland JACM (1973); DESIGN.md §10.27 (v0.32.0)
     inherit_priority: bool = True
+    # TTL in seconds; None = use orchestrator default_task_ttl (or never expires).
+    ttl: float | None = None
 
 
 class WorkflowSubmit(BaseModel):
@@ -527,6 +537,7 @@ def create_app(
             target_group=body.target_group,
             max_retries=body.max_retries,
             inherit_priority=body.inherit_priority,
+            ttl=body.ttl,
         )
         result: dict = {
             "task_id": task.id,
@@ -535,6 +546,9 @@ def create_app(
             "max_retries": task.max_retries,
             "retry_count": task.retry_count,
             "inherit_priority": task.inherit_priority,
+            "submitted_at": task.submitted_at,
+            "ttl": task.ttl,
+            "expires_at": task.expires_at,
         }
         if task.depends_on:
             result["depends_on"] = task.depends_on
@@ -595,6 +609,7 @@ def create_app(
                 required_tags=item.required_tags or None,
                 target_group=item.target_group,
                 max_retries=item.max_retries,
+                ttl=item.ttl,
                 _task_id=local_to_global.get(item.local_id) if item.local_id else None,
             )
             record: dict = {
@@ -603,6 +618,9 @@ def create_app(
                 "priority": task.priority,
                 "max_retries": task.max_retries,
                 "retry_count": task.retry_count,
+                "submitted_at": task.submitted_at,
+                "ttl": task.ttl,
+                "expires_at": task.expires_at,
             }
             if item.local_id:
                 record["local_id"] = item.local_id
@@ -652,6 +670,9 @@ def create_app(
                 "status": task_status,
                 "max_retries": 0,
                 "retry_count": 0,
+                "submitted_at": item.get("submitted_at"),
+                "ttl": item.get("ttl"),
+                "expires_at": item.get("expires_at"),
             }
             if item.get("depends_on"):
                 record["depends_on"] = item["depends_on"]
@@ -1030,6 +1051,7 @@ def create_app(
                 target_group=spec.get("target_group"),
                 max_retries=spec.get("max_retries", 0),
                 inherit_priority=spec.get("inherit_priority", True),
+                ttl=spec.get("ttl"),
             )
             local_to_global[spec["local_id"]] = task.id
             global_task_ids.append(task.id)
@@ -1252,6 +1274,9 @@ def create_app(
                 "max_retries": waiting_task.max_retries,
                 "retry_count": waiting_task.retry_count,
                 "inherit_priority": waiting_task.inherit_priority,
+                "submitted_at": waiting_task.submitted_at,
+                "ttl": waiting_task.ttl,
+                "expires_at": waiting_task.expires_at,
             }
             if blocking:
                 resp["blocking"] = blocking
@@ -1276,6 +1301,9 @@ def create_app(
                     "max_retries": active.max_retries if active else 0,
                     "retry_count": active.retry_count if active else 0,
                     "inherit_priority": active.inherit_priority if active else True,
+                    "submitted_at": item.get("submitted_at"),
+                    "ttl": item.get("ttl"),
+                    "expires_at": item.get("expires_at"),
                 }
                 if blocking:
                     resp["blocking"] = blocking
@@ -1302,6 +1330,9 @@ def create_app(
                         "max_retries": ct.max_retries,
                         "retry_count": ct.retry_count,
                         "inherit_priority": ct.inherit_priority,
+                        "submitted_at": ct.submitted_at,
+                        "ttl": ct.ttl,
+                        "expires_at": ct.expires_at,
                     }
                     if blocking:
                         resp["blocking"] = blocking
