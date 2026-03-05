@@ -6,6 +6,51 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.23.0] — 2026-03-05
+
+### Added
+
+**Queue-Depth Autoscaling — `AutoScaler` + `POST /orchestrator/autoscaler`**
+
+Implements elastic agent pool management using the MAPE-K autonomic computing
+loop (Thijssen 2009). Agents are created/stopped automatically based on queue
+depth, without any manual intervention.
+
+References:
+- Kubernetes HPA AverageValue metric (queue-depth-based scaling)
+- Thijssen "Autonomic Computing" MIT Press 2009 — MAPE-K loop
+- AWS Auto Scaling Groups cooldown periods
+
+- `AutoScaler` (`autoscaler.py`): new module. Scale-up when
+  `queue_depth > threshold × idle_agents`; scale-down after queue drains
+  for `autoscale_cooldown` seconds. Tracks only its own created agents so
+  pre-registered YAML agents are never accidentally stopped.
+- `OrchestratorConfig` new fields: `autoscale_min`, `autoscale_max`,
+  `autoscale_threshold`, `autoscale_cooldown`, `autoscale_poll`,
+  `autoscale_agent_tags`, `autoscale_system_prompt`.
+- `Orchestrator.queue_depth()` — returns current queue size.
+- `Orchestrator.get_autoscaler_status()` — disabled-safe status dict.
+- REST `GET /orchestrator/autoscaler` — current scaling state.
+- REST `PUT /orchestrator/autoscaler` — live reconfiguration (min/max/threshold/cooldown).
+- AutoScaler integrated into `Orchestrator.start()`/`stop()` lifecycle.
+
+### Also
+
+- `merge_target` parameter added to `WorktreeManager.teardown()`, `AgentConfig`,
+  `ClaudeCodeAgent`, `Orchestrator.create_agent()`, and `POST /agents/new`.
+  When `merge_on_stop=True`, the squash merge now targets the specified branch
+  instead of always merging into current HEAD. The main repo is restored to its
+  original branch after the merge completes.
+
+### Tests
+
+- 23 new tests in `tests/test_autoscaler.py`
+- 2 new tests in `tests/test_worktree.py` (merge_target)
+
+Total: **386 tests** (was 361).
+
+---
+
 ## [0.22.0] — 2026-03-05
 
 ### Added

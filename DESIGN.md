@@ -834,6 +834,58 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 
 ---
 
+### 10.18 調査記録 (v0.23.0, 2026-03-05)
+
+**実装テーマ: Queue-Depth Autoscaling — 弾力的エージェントプール**
+
+| テーマ | パターン名 | 参考文献 |
+|--------|-----------|---------|
+| Queue-depth scaling | HPA AverageValue metric | Kubernetes HPA https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/ |
+| MAPE-K loop | Monitor–Analyze–Plan–Execute | Thijssen "Autonomic Computing" (MIT Press, 2009) §3 |
+| Scale-down cooldown | Cooldown period | AWS Auto Scaling cooldowns https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-cooldowns.html |
+
+**主要知見:**
+
+1. **Kubernetes HPA の `AverageValue` モデル**: HPA は `queue_depth / running_pods` をメトリクスターゲットと比較してレプリカ数を算出する。本実装はこれを `queue_depth > threshold * idle_agent_count` という条件に単純化。idle_count=0 の cold-start ケースは `max(1, idle_count)` で安全に処理。
+
+2. **Thijssen MAPE-K ループ**: Monitor（queue_depth と idle 数の収集）→ Analyze（閾値比較）→ Plan（scale-up/scale-down の決定）→ Execute（`create_agent()` / `agent.stop()`）の4フェーズが `_scale_loop()` 内で実装されている。Knowledge base は `_autoscaled_ids`・`_queue_empty_since`・設定パラメータ。
+
+3. **AWS クールダウンパターン**: スケールアウト直後の連続起動嵐を防ぐため、AWS はデフォルト300秒のクールダウンを推奨。本実装は `autoscale_cooldown`（デフォルト30秒）をスケールダウン専用に使用。スケールアップはキューが実際に成長している場合にのみトリガーされるため、上方向のクールダウンは不要。
+
+4. **Scale-to-zero**: `autoscale_min=0` のとき、キューが空でクールダウンが経過した場合にすべての autoscaled エージェントを停止できる。これにより、タスクがないときのリソース消費をゼロにできる。
+
+5. **Pre-registered agents の保護**: `_autoscaled_ids` が自分で作ったエージェントのみを追跡するため、YAML で事前定義されたエージェントが誤ってスケールダウンされることはない。
+
+**設計決定:**
+
+- **`AutoScaler` の独立モジュール化**: `autoscaler.py` として分離。Orchestrator は `autoscale_max > 0` のときのみインスタンス化（`autoscale_max=0` = 無効）。
+- **`isolate=False` デフォルト**: autoscaled エージェントはワークスペースを共有するのが自然（バースト処理の典型的ユースケース）。必要なら YAML の `autoscale_agent_tags` や CONTROL で変更可能。
+- **1サイクル1エージェントのスケールダウン**: 一度に複数を停止すると過剰スケールダウンのリスクがある。1サイクルで1エージェントを停止し、次のポーリングで再評価する。
+- **`_queue_empty_since` のリセット**: スケールダウン後にタイマーをリセットすることで、連続スケールダウン間に必ずクールダウン待機期間が挟まる。
+
+**テスト (23テスト, 合計386テスト):**
+- scale-up: 閾値超過時にエージェント作成、`_autoscaled_ids` 追跡
+- scale-up: max到達時に作成しない
+- scale-up: 閾値以下では作成しない
+- scale-down: クールダウン後に idle エージェント停止・unregister
+- scale-down: min を下回らない (respects_min)
+- scale-down: キュー非空時はタイマーリセット・停止しない
+- scale-down: クールダウン中は停止しない
+- REST GET/PUT /orchestrator/autoscaler: 有効・無効状態それぞれ
+- lifecycle: start/stop、status、reconfigure
+- queue_depth(): 空・タスクあり
+
+**デモシナリオ (v0.23.0):**
+- シナリオ: "Burst Load Handling"
+- 0エージェントで起動、AutoScaler (min=0, max=3, threshold=2, cooldown=60s)
+- 6タスクをバースト投入 (各エージェントが fib_{N}.txt を書く)
+- AutoScaler がスケールアップして最大3エージェントを起動
+- 6タスクを3エージェントで並列処理（各エージェント2タスク）
+- クールダウン後にスケールゼロへ
+- デモフォルダ: `~/Demonstration/v0.23.0-autoscaling/`
+
+---
+
 ## 11. 今後の課題
 
 ### 機能
@@ -849,6 +901,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~中~~ ~~キューポーズ/レジューム + タスク優先度ライブ更新~~ | **完了 (v0.19.0)** — `POST /orchestrator/pause|resume`, `GET /orchestrator/status`, `PATCH /tasks/{id}`; 18 テスト (302 合計) |
 | ~~中~~ ~~Rate limiting / バックプレッシャー (Token Bucket)~~ | **完了 (v0.20.0)** — `TokenBucketRateLimiter` + `GET /rate-limit`, `PUT /rate-limit`; `OrchestratorConfig.rate_limit_rps/burst`; `wait_for_token` param; 24 テスト (326 合計) |
 | 中 | `/plan` と `/tdd` の出力を RESULT メッセージとして親に自動送信 |
+| ~~高~~ ~~キュー深度オートスケーリング~~ | **完了 (v0.23.0)** — `AutoScaler` MAPE-Kループ; `GET/PUT /orchestrator/autoscaler`; `OrchestratorConfig.autoscale_*`; 23テスト (386合計) |
 | ~~低~~ ~~エージェントのコンテキスト使用量モニタリング~~ | **完了 (v0.21.0)** — `ContextMonitor` + `GET /agents/{id}/stats`, `GET /context-stats`; `context_warning`/`notes_updated`/`summarize_triggered` STATUS イベント; `context_auto_summarize`; 21 テスト (347 合計) |
 | ~~低~~ ~~ERROR エージェントの手動リセットエンドポイント (`POST /agents/{id}/reset`)~~ | **完了 (v0.13.0)** — `Orchestrator.reset_agent()` + REST `POST /agents/{id}/reset` |
 | ~~低~~ ~~Prometheus メトリクス (`/metrics`)~~ | **完了 (v0.13.0)** — `GET /metrics` (prometheus_client 直接使用; 認証不要) |
@@ -865,6 +918,7 @@ v0.9.0 完了後に実施した調査。以下5テーマを調査エージェン
 | ~~中~~ ~~Rate limit + Graph Coloring best-of-N~~ | **完了 (v0.20.0)** — 3 agents (greedy/backtrack/local), rate_limit_rps=3.0 burst=3, GET/PUT /rate-limit 実証, Graph Coloring 15-node 22-edge K=4 |
 | ~~低~~ ~~Context monitor + TSP best-of-N~~ | **完了 (v0.21.0)** — 3 agents (nearest-neighbor/2-opt/random-restart), GET /context-stats 実証, TSP N=10 cities |
 | ~~高~~ ~~Dynamic Agent Creation — コードレビューパイプライン~~ | **完了 (v0.22.0)** — テンプレート0で起動 → `create_agent()` で generator/reviewer を動的追加 → fibonacci.py 生成 → REVIEW.md 生成; デモフォルダ: `~/Demonstration/v0.22.0-dynamic-agents/` |
+| ~~高~~ ~~Queue-Depth Autoscaling — バースト負荷処理~~ | **完了 (v0.23.0)** — 0エージェントで起動 → AutoScaler (min=0, max=3, threshold=2) が6タスクバーストを検出 → 3エージェントを動的作成 → クールダウン後にスケールゼロ; デモフォルダ: `~/Demonstration/v0.23.0-autoscaling/` |
 
 **AHC best-of-N デモ完了 (v0.15.0)**:
 - 問題: Weighted Knapsack (N=15, C=50) — 最適解 score=154 (DP で検証済み)
