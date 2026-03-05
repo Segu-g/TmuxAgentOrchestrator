@@ -245,9 +245,73 @@ The orchestrator enforces P2P permissions. Your message is silently dropped if t
 | `/send-message` | `/send-message <agent_id> <text>` | Send a PEER_MSG to another agent |
 | `/spawn-subagent` | `/spawn-subagent <template_id>` | Spawn a pre-configured sub-agent; P2P auto-granted |
 | `/list-agents` | `/list-agents` | Show all agents and their IDLE/BUSY/ERROR status |
+| `/plan` | `/plan <description>` | Write a structured `PLAN.md` before beginning implementation |
+| `/tdd` | `/tdd <feature>` | Guide a Red → Green → Refactor TDD cycle |
+| `/progress` | `/progress <summary>` | Report progress to your parent agent in the hierarchy |
+| `/summarize` | `/summarize` | Compress current context state into `NOTES.md` to prevent context rot |
+| `/delegate` | `/delegate <task>` | Break a task into subtasks and spawn sub-agents to work on them |
 
 All commands require `__orchestrator_context__.json` in your cwd.
-Commands that use REST (`/send-message`, `/spawn-subagent`, `/list-agents`) require the orchestrator to have been started with `tmux-orchestrator web`.
+Commands that use REST (`/send-message`, `/spawn-subagent`, `/list-agents`, `/progress`, `/delegate`) require the orchestrator to have been started with `tmux-orchestrator web`.
+
+### Shared Scratchpad
+
+The shared scratchpad is a server-side key/value store for passing data between agents without P2P messaging. It implements the Blackboard pattern — one agent writes results, another reads them.
+
+```bash
+# Write a value
+curl -X PUT {web_base_url}/scratchpad/my-key \
+  -H "X-API-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"value": "result data here"}'
+
+# Read a value
+curl {web_base_url}/scratchpad/my-key -H "X-API-Key: $API_KEY"
+
+# List all entries
+curl {web_base_url}/scratchpad/ -H "X-API-Key: $API_KEY"
+
+# Delete an entry
+curl -X DELETE {web_base_url}/scratchpad/my-key -H "X-API-Key: $API_KEY"
+```
+
+Use the scratchpad for pipeline workflows (agent-a writes an artefact path, agent-b reads it) rather than embedding large payloads in P2P messages.
+
+### Submitting Tasks via REST (Director Pattern)
+
+Director agents and workers with `POST /tasks` access can submit tasks directly. Key fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `prompt` | `str` | Task instruction text |
+| `priority` | `int` | Lower = dispatched first (default `0`) |
+| `reply_to` | `str\|null` | Agent ID that receives the RESULT in its mailbox; triggers `__MSG__:{id}` notification |
+| `target_agent` | `str\|null` | Force dispatch to a specific agent; task waits until that agent is idle |
+| `required_tags` | `list[str]` | Only dispatch to agents whose `tags` include ALL listed tags |
+
+When `reply_to` is set to your `agent_id`, the orchestrator writes the RESULT to your mailbox and types `__MSG__:{id}` into your pane — the same mechanism as P2P. This is the canonical way for a Director to receive worker results without polling.
+
+### Context Monitor Events
+
+The orchestrator's `ContextMonitor` polls each agent's tmux pane and publishes STATUS events on the bus. Director agents that subscribe to the bus can react to these events to proactively rotate or re-brief workers.
+
+| Event | Key payload fields | Meaning |
+|---|---|---|
+| `context_warning` | `agent_id`, `estimated_tokens`, `context_pct`, `context_window_tokens` | Agent pane output exceeds `context_warn_threshold` |
+| `notes_updated` | `agent_id`, `notes_path`, `notes_mtime`, `preview` | Agent's `NOTES.md` was modified (e.g. after `/summarize`) |
+| `summarize_triggered` | `agent_id`, `estimated_tokens`, `context_pct` | `/summarize` was auto-injected into the agent pane |
+
+If you receive a `context_warning` directed at your own `agent_id`, run `/summarize` to compress your context before it degrades your recall. Per-agent stats are available at `GET /agents/{id}/stats`.
+
+### Agent Task History
+
+You can query your own or sibling agents' recent task history for coordination and self-awareness:
+
+```
+GET {web_base_url}/agents/{agent_id}/history?limit=20
+```
+
+Each record contains `task_id`, `prompt`, `started_at`, `finished_at`, `duration_s`, `status` (`"success"` or `"error"`), and `error` (null on success). Results are ordered most-recent-first.
 
 ### Agent Lifecycle Principle
 
@@ -277,7 +341,7 @@ Retrieve it with `/check-inbox` → `/read-message`, then delegate with `/send-m
 The orchestrator detects task completion by polling your pane output. It declares you done when the output **has not changed for 3 consecutive 500 ms polls** and the last line matches one of:
 
 - `❯` — Claude interactive prompt (current default)
-- `$` or `$ ` — shell prompt
+- `$` — shell prompt (any trailing whitespace is tolerated)
 - `>` — bare prompt (older Claude versions)
 - `Human:` — Claude conversation prompt
 
