@@ -161,6 +161,55 @@
         "title": "AutoScalerUpdate",
         "type": "object"
       },
+      "ChangeStrategyRequest": {
+        "description": "Request body for POST /agents/{agent_id}/change-strategy.\n\nAllows an agent to autonomously request a change in execution strategy\nfor its current (or next) task phase.  The orchestrator fulfills the\nrequest by spawning parallel sub-tasks and routing results back to the\nrequesting agent.\n\nAttributes\n----------\npattern:\n    Execution strategy to switch to.  Only ``single``, ``parallel``, and\n    ``competitive`` are supported in v0.49.0.  ``debate`` may be added in\n    a future iteration.\ncount:\n    Number of parallel workers to spawn (``parallel`` / ``competitive``\n    patterns only).  Must be between 1 and 10 inclusive.\ntags:\n    Optional ``required_tags`` list for dispatching the spawned tasks.\ncontext:\n    Prompt context for the spawned tasks.  When provided, the orchestrator\n    immediately submits ``count`` tasks with this context.  When omitted,\n    only the strategy preference is recorded.\nreply_to:\n    Agent ID that collects the results of spawned tasks.  Typically set to\n    the requesting agent's own ID so it can aggregate outcomes.\n\nDesign references:\n- \u00a712\u300c\u30ef\u30fc\u30af\u30d5\u30ed\u30fc\u8a2d\u8a08\u306e\u5c64\u69cb\u9020\u300d\u5c643 \u5b9f\u884c\u65b9\u5f0f\u306e\u81ea\u5f8b\u5207\u308a\u66ff\u3048\n- arXiv:2505.19591 (Evolving Orchestration 2025): dynamic strategy adaptation\n- ALAS arXiv:2505.12501 (2025): orchestrator escalation pattern\n- DESIGN.md \u00a710.16 (v0.49.0)",
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          },
+          "count": {
+            "default": 2,
+            "title": "Count",
+            "type": "integer"
+          },
+          "pattern": {
+            "title": "Pattern",
+            "type": "string"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "title": "ChangeStrategyRequest",
+        "type": "object"
+      },
       "DebateWorkflowSubmit": {
         "description": "Request body for POST /workflows/debate \u2014 3-role multi-round debate workflow.\n\nSubmits an Advocate/Critic/Judge Workflow DAG with structured argumentation:\n\nFor each round 1..max_rounds:\n  - ``advocate_r{n}``: builds or refines the affirmative argument\n  - ``critic_r{n}``: challenges the argument (Devil's Advocate)\nFinal:\n  - ``judge``: synthesizes all rounds and writes ``DECISION.md`` to scratchpad\n\nArtifacts are passed via the shared scratchpad (Blackboard pattern):\n  ``{scratchpad_prefix}_r{n}_advocate`` \u2014 advocate's argument for round n\n  ``{scratchpad_prefix}_r{n}_critic``   \u2014 critic's rebuttal for round n\n  ``{scratchpad_prefix}_decision``      \u2014 judge's final decision\n\nDesign references:\n- Du et al. \"Improving Factuality and Reasoning in Language Models through\n  Multiagent Debate\" ICML 2024 (arXiv:2305.14325): multi-agent debate\n  significantly improves factuality and reasoning.\n- DEBATE: Devil's Advocate-Based Assessment ACL 2024 (arXiv:2405.09935):\n  Commander + Scorer + Critic structure; terminates when critic outputs\n  \"NO ISSUE\" or max iterations reached.\n- ChatEval ICLR 2024 (arXiv:2308.07201): role diversity (different\n  role_descriptions) is the most critical factor in debate quality.\n- DESIGN.md \u00a710.32 (v0.37.0)",
         "properties": {
@@ -1233,6 +1282,58 @@
           }
         },
         "summary": "Stop an agent"
+      }
+    },
+    "/agents/{agent_id}/change-strategy": {
+      "post": {
+        "description": "Allow an agent to autonomously change its execution strategy.\n\nThis endpoint implements \u00a712 \u5c643 \u300c\u5b9f\u884c\u65b9\u5f0f\u306e\u81ea\u5f8b\u5207\u308a\u66ff\u3048\u300d: when an agent\ndetermines that the current ``single`` execution strategy is insufficient\nfor its task, it calls this endpoint to escalate to a ``parallel`` or\n``competitive`` pattern.\n\nBehaviour by ``pattern``:\n\n- **``single``**: No-op; acknowledges the strategy (default, no spawning).\n- **``parallel``**: When ``context`` is provided, submits ``count`` identical\n  tasks that will be dispatched to different agents simultaneously.  Each\n  spawned task has ``reply_to`` set to the requesting agent so that results\n  are delivered back to it.  When ``context`` is omitted, only the strategy\n  preference is recorded (no immediate spawning).\n- **``competitive``**: Same as ``parallel`` but task prompts indicate\n  competition semantics (agents solve the same problem independently; the\n  best result wins).\n\nReturns\n-------\ndict\n    ``{\"status\": \"accepted\", \"agent_id\": ..., \"pattern\": ..., \"count\": ...,\n      \"tags\": ..., \"spawned_task_ids\": [...]}``\n\n    ``spawned_task_ids`` is present (and non-empty) only when ``context``\n    was provided and tasks were actually submitted.\n\nHTTP error codes:\n- 404: agent not found\n- 422: schema validation failure (invalid pattern or count)\n\nDesign references:\n- \u00a712\u300c\u30ef\u30fc\u30af\u30d5\u30ed\u30fc\u8a2d\u8a08\u306e\u5c64\u69cb\u9020\u300d\u5c643 \u5b9f\u884c\u65b9\u5f0f\u306e\u81ea\u5f8b\u5207\u308a\u66ff\u3048\n- arXiv:2505.19591 (Evolving Orchestration 2025): dynamic orchestration\n- ALAS arXiv:2505.12501 (2025): three-layer adaptive execution framework\n- DESIGN.md \u00a710.16 (v0.49.0)",
+        "operationId": "change_agent_strategy_agents__agent_id__change_strategy_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeStrategyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Change Agent Strategy Agents  Agent Id  Change Strategy Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Request an autonomous strategy change for the agent's current phase"
       }
     },
     "/agents/{agent_id}/drain": {

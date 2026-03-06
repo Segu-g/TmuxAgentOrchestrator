@@ -197,6 +197,69 @@ class TaskCompleteBody(BaseModel):
     exit_code: int = 0
 
 
+class ChangeStrategyRequest(BaseModel):
+    """Request body for POST /agents/{agent_id}/change-strategy.
+
+    Allows an agent to autonomously request a change in execution strategy
+    for its current (or next) task phase.  The orchestrator fulfills the
+    request by spawning parallel sub-tasks and routing results back to the
+    requesting agent.
+
+    Attributes
+    ----------
+    pattern:
+        Execution strategy to switch to.  Only ``single``, ``parallel``, and
+        ``competitive`` are supported in v0.49.0.  ``debate`` may be added in
+        a future iteration.
+    count:
+        Number of parallel workers to spawn (``parallel`` / ``competitive``
+        patterns only).  Must be between 1 and 10 inclusive.
+    tags:
+        Optional ``required_tags`` list for dispatching the spawned tasks.
+    context:
+        Prompt context for the spawned tasks.  When provided, the orchestrator
+        immediately submits ``count`` tasks with this context.  When omitted,
+        only the strategy preference is recorded.
+    reply_to:
+        Agent ID that collects the results of spawned tasks.  Typically set to
+        the requesting agent's own ID so it can aggregate outcomes.
+
+    Design references:
+    - §12「ワークフロー設計の層構造」層3 実行方式の自律切り替え
+    - arXiv:2505.19591 (Evolving Orchestration 2025): dynamic strategy adaptation
+    - ALAS arXiv:2505.12501 (2025): orchestrator escalation pattern
+    - DESIGN.md §10.16 (v0.49.0)
+    """
+
+    pattern: str
+    count: int = 2
+    tags: list[str] = []
+    context: str | None = None
+    reply_to: str | None = None
+
+    from pydantic import field_validator
+
+    @field_validator("pattern")
+    @classmethod
+    def pattern_must_be_valid(cls, v: str) -> str:
+        valid = {"single", "parallel", "competitive"}
+        if v not in valid:
+            raise ValueError(
+                f"pattern must be one of {sorted(valid)!r}. "
+                "'debate' strategy is planned for a future release."
+            )
+        return v
+
+    @field_validator("count")
+    @classmethod
+    def count_must_be_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("count must be >= 1")
+        if v > 10:
+            raise ValueError("count must be <= 10 (safety limit)")
+        return v
+
+
 class AutoScalerUpdate(BaseModel):
     """Request body for PUT /orchestrator/autoscaler.
 
@@ -1124,6 +1187,99 @@ def create_app(
         except KeyError:
             raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
         return {"agent_id": agent_id, "reset": True}
+
+    @app.post(
+        "/agents/{agent_id}/change-strategy",
+        summary="Request an autonomous strategy change for the agent's current phase",
+        dependencies=[Depends(auth)],
+    )
+    async def change_agent_strategy(agent_id: str, body: ChangeStrategyRequest) -> dict:
+        """Allow an agent to autonomously change its execution strategy.
+
+        This endpoint implements §12 層3 「実行方式の自律切り替え」: when an agent
+        determines that the current ``single`` execution strategy is insufficient
+        for its task, it calls this endpoint to escalate to a ``parallel`` or
+        ``competitive`` pattern.
+
+        Behaviour by ``pattern``:
+
+        - **``single``**: No-op; acknowledges the strategy (default, no spawning).
+        - **``parallel``**: When ``context`` is provided, submits ``count`` identical
+          tasks that will be dispatched to different agents simultaneously.  Each
+          spawned task has ``reply_to`` set to the requesting agent so that results
+          are delivered back to it.  When ``context`` is omitted, only the strategy
+          preference is recorded (no immediate spawning).
+        - **``competitive``**: Same as ``parallel`` but task prompts indicate
+          competition semantics (agents solve the same problem independently; the
+          best result wins).
+
+        Returns
+        -------
+        dict
+            ``{"status": "accepted", "agent_id": ..., "pattern": ..., "count": ...,
+              "tags": ..., "spawned_task_ids": [...]}``
+
+            ``spawned_task_ids`` is present (and non-empty) only when ``context``
+            was provided and tasks were actually submitted.
+
+        HTTP error codes:
+        - 404: agent not found
+        - 422: schema validation failure (invalid pattern or count)
+
+        Design references:
+        - §12「ワークフロー設計の層構造」層3 実行方式の自律切り替え
+        - arXiv:2505.19591 (Evolving Orchestration 2025): dynamic orchestration
+        - ALAS arXiv:2505.12501 (2025): three-layer adaptive execution framework
+        - DESIGN.md §10.16 (v0.49.0)
+        """
+        agent = orchestrator.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
+
+        spawned_task_ids: list[str] = []
+
+        # When context is provided, immediately spawn the parallel/competitive tasks.
+        if body.context is not None and body.pattern in ("parallel", "competitive"):
+            count = body.count
+            for i in range(count):
+                if body.pattern == "competitive":
+                    slot_prompt = (
+                        f"You are solver #{i + 1} of {count} in a COMPETITIVE phase.\n"
+                        f"Solve the following problem independently.  Write your solution "
+                        f"to the scratchpad and include a numeric score or quality metric.\n\n"
+                        f"## Task\n{body.context}"
+                    )
+                else:
+                    slot_prompt = (
+                        f"You are worker #{i + 1} of {count} in a PARALLEL phase.\n"
+                        f"Complete the following task.  "
+                        f"The requesting agent ({agent_id}) will aggregate all results.\n\n"
+                        f"## Task\n{body.context}"
+                    )
+
+                task = await orchestrator.submit_task(
+                    slot_prompt,
+                    required_tags=body.tags if body.tags else None,
+                    reply_to=body.reply_to,
+                )
+                spawned_task_ids.append(task.id)
+
+            logger.info(
+                "change-strategy: agent=%s pattern=%s count=%d spawned=%s",
+                agent_id, body.pattern, count, spawned_task_ids,
+            )
+
+        response: dict = {
+            "status": "accepted",
+            "agent_id": agent_id,
+            "pattern": body.pattern,
+            "count": body.count,
+            "tags": body.tags,
+        }
+        if spawned_task_ids:
+            response["spawned_task_ids"] = spawned_task_ids
+
+        return response
 
     @app.post(
         "/agents/{agent_id}/task-complete",

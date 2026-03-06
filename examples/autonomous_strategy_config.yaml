@@ -1,0 +1,39 @@
+# Autonomous Strategy Change Demo Configuration
+# ===============================================
+# Three agents for the change-strategy demo (v0.49.0):
+# - agent-solver: coordinator; starts with single strategy,
+#                 then escalates to parallel via /change-strategy
+# - worker-a: parallel worker (receives escalated tasks from agent-solver)
+# - worker-b: parallel worker (receives escalated tasks from agent-solver)
+#
+# Demo pattern: agent-solver requests parallel:2 strategy change →
+#   orchestrator spawns 2 tasks for worker-a and worker-b →
+#   both solve the Fibonacci problem with different strategies →
+#   results appear in agent-solver's mailbox
+
+session_name: strategy-demo
+mailbox_dir: ~/.tmux_orchestrator
+
+agents:
+  - id: agent-solver
+    type: claude_code
+    tags: [solver, coordinator]
+    task_timeout: 900
+
+  - id: worker-a
+    type: claude_code
+    tags: [solver, worker]
+    task_timeout: 900
+
+  - id: worker-b
+    type: claude_code
+    tags: [solver, worker]
+    task_timeout: 900
+
+p2p_permissions:
+  - [agent-solver, worker-a]
+  - [agent-solver, worker-b]
+  - [worker-a, worker-b]
+
+task_timeout: 900
+web_base_url: "http://localhost:8800"

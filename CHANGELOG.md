@@ -6,6 +6,41 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.49.0] — 2026-03-06
+
+### Added
+
+**Autonomous Strategy Change (§12 層3 実行方式の自律切り替え)**
+
+- New `POST /agents/{agent_id}/change-strategy` REST endpoint:
+  - Allows a running agent to request a dynamic execution strategy change for its current task phase.
+  - Accepts `ChangeStrategyRequest` body with fields: `pattern` (`single|parallel|competitive`),
+    `count` (1–10), `tags`, `context`, `reply_to`.
+  - When `context` is provided and `pattern` is `parallel` or `competitive`, immediately submits
+    `count` tasks with descriptive prompts, each with `reply_to` pointing back to the requesting agent.
+  - Returns `{"status": "accepted", "agent_id", "pattern", "count", "tags", "spawned_task_ids?}`.
+  - Returns 404 if agent not found; 422 on schema validation failure.
+  - Design references: arXiv:2505.19591 (Evolving Orchestration), ALAS arXiv:2505.12501 (2025).
+
+- New `ChangeStrategyRequest` Pydantic model with validators:
+  - `pattern`: must be `single`, `parallel`, or `competitive` (`debate` planned for next iteration).
+  - `count`: 1–10 inclusive (safety cap).
+
+- New `.claude/commands/change-strategy.md` slash command:
+  - Syntax: `/change-strategy parallel:<count> [context]` or `/change-strategy competitive:<count> [context]`
+  - Parses `pattern:count` shorthand, reads orchestrator context, calls REST endpoint.
+  - Prints spawned task IDs and reminds agent to check inbox for results.
+
+- OpenAPI schema snapshot regenerated (`tests/fixtures/openapi_schema.json`).
+
+### Tests
+
+- 17 new tests in `tests/test_change_strategy.py`: schema validation, 404 handling, spawning behaviour,
+  authentication, `ChangeStrategyRequest` model validators, and slash command file presence.
+- Total: 1060 tests pass (1043 → 1060, +17).
+
+---
+
 ## [0.48.0] — 2026-03-06
 
 ### Added
