@@ -568,6 +568,8 @@ def create_app(
     api_key: str = "",
     on_startup: Callable[[], Any] | None = None,
     on_shutdown: Callable[[], Any] | None = None,
+    cors_origins: list[str] | None = None,
+    rate_limit: str = "60/minute",
 ) -> FastAPI:
     """Create and wire up the FastAPI application.
 
@@ -585,8 +587,36 @@ def create_app(
         this parameter instead.
     on_shutdown:
         Optional async callable invoked during lifespan shutdown (before hub).
+    cors_origins:
+        List of allowed CORS origins.  When ``None`` (default), defaults to
+        loopback-only: ``["http://localhost", "http://localhost:8000",
+        "http://127.0.0.1", "http://127.0.0.1:8000"]``.
+        Reference: OWASP CORS cheat sheet; DESIGN.md §10.18 (v0.44.0).
+    rate_limit:
+        Global rate limit string for SlowAPI (default ``"60/minute"``).
+        Applied to all ``POST /tasks`` submissions.
+        Reference: SlowAPI docs; DESIGN.md §10.18 (v0.44.0).
     """
+    from fastapi.middleware.cors import CORSMiddleware
+    from slowapi import Limiter, _rate_limit_exceeded_handler
+    from slowapi.errors import RateLimitExceeded
+    from slowapi.util import get_remote_address
+
+    from tmux_orchestrator.security import AuditLogMiddleware
+
     auth = _make_combined_auth(api_key)
+
+    # Rate limiter (SlowAPI / token bucket)
+    # Reference: SlowAPI docs https://slowapi.readthedocs.io/ (2025)
+    _limiter = Limiter(key_func=get_remote_address)
+
+    # Effective CORS origins — loopback-only by default
+    _cors_origins: list[str] = cors_origins if cors_origins is not None else [
+        "http://localhost",
+        "http://localhost:8000",
+        "http://127.0.0.1",
+        "http://127.0.0.1:8000",
+    ]
 
     @asynccontextmanager
     async def _lifespan(application: FastAPI):  # noqa: ARG001
@@ -606,6 +636,23 @@ def create_app(
         version="0.1.0",
         lifespan=_lifespan,
     )
+
+    # ------------------------------------------------------------------
+    # Security middleware (CORS + Audit log)
+    # Reference: DESIGN.md §10.18 (v0.44.0)
+    # ------------------------------------------------------------------
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.add_middleware(AuditLogMiddleware)
+
+    # Rate limiter state + exception handler
+    app.state.limiter = _limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
 
     # ------------------------------------------------------------------
     # Auth endpoints (no auth dependency — public)
@@ -726,9 +773,11 @@ def create_app(
     # ------------------------------------------------------------------
 
     @app.post("/tasks", summary="Submit a new task", dependencies=[Depends(auth)])
-    async def submit_task(body: TaskSubmit) -> dict:
+    @_limiter.limit(rate_limit)
+    async def submit_task(request: Request, body: TaskSubmit) -> dict:  # noqa: ARG001 (request used by SlowAPI)
+        from tmux_orchestrator.security import sanitize_prompt
         task = await orchestrator.submit_task(
-            body.prompt,
+            sanitize_prompt(body.prompt),
             priority=body.priority,
             metadata=body.metadata,
             depends_on=body.depends_on or None,
@@ -3037,6 +3086,31 @@ def create_app(
     async def dead_letter_queue() -> list:
         """Return tasks that could not be dispatched after exhausting retries."""
         return orchestrator.list_dlq()
+
+    # ------------------------------------------------------------------
+    # Security: Audit log endpoint
+    # Reference: DESIGN.md §10.18 (v0.44.0)
+    # ------------------------------------------------------------------
+
+    @app.get("/audit-log", summary="Recent audit log entries", dependencies=[Depends(auth)])
+    async def get_audit_log(limit: int = 100) -> list:
+        """Return the most recent audit log entries (up to *limit*).
+
+        Each entry records a single HTTP request: timestamp, method, path,
+        client_ip, api_key_hint (first 8 chars only), status_code, duration_ms.
+
+        Entries are stored in an in-process ring buffer of at most 1 000
+        entries.  No sensitive data (full API keys, request bodies) is stored.
+
+        Design reference:
+        - Microsoft Multi-Agent Reference Architecture — Security (2025)
+          https://microsoft.github.io/multi-agent-reference-architecture/docs/security/Security.html
+        - DESIGN.md §10.18 (v0.44.0)
+        """
+        from tmux_orchestrator.security import AuditLogMiddleware
+        entries = AuditLogMiddleware.get_log()
+        # Return the most recent *limit* entries (newest last)
+        return [e.to_dict() for e in entries[-limit:]]
 
     # ------------------------------------------------------------------
     # Prometheus metrics (no auth — Prometheus scraper compatibility)

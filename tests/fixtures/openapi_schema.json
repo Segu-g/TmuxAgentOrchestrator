@@ -1448,6 +1448,49 @@
         "summary": "Worktree integrity status for an agent"
       }
     },
+    "/audit-log": {
+      "get": {
+        "description": "Return the most recent audit log entries (up to *limit*).\n\nEach entry records a single HTTP request: timestamp, method, path,\nclient_ip, api_key_hint (first 8 chars only), status_code, duration_ms.\n\nEntries are stored in an in-process ring buffer of at most 1 000\nentries.  No sensitive data (full API keys, request bodies) is stored.\n\nDesign reference:\n- Microsoft Multi-Agent Reference Architecture \u2014 Security (2025)\n  https://microsoft.github.io/multi-agent-reference-architecture/docs/security/Security.html\n- DESIGN.md \u00a710.18 (v0.44.0)",
+        "operationId": "get_audit_log_audit_log_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {},
+                  "title": "Response Get Audit Log Audit Log Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recent audit log entries"
+      }
+    },
     "/context-stats": {
       "get": {
         "description": "Return context window usage statistics for all tracked agents.\n\nSee ``GET /agents/{id}/stats`` for field descriptions.\n\nDesign reference: DESIGN.md \u00a711 (v0.21.0) \u2014 \u30a8\u30fc\u30b8\u30a7\u30f3\u30c8\u306e\u30b3\u30f3\u30c6\u30ad\u30b9\u30c8\u4f7f\u7528\u91cf\u30e2\u30cb\u30bf\u30ea\u30f3\u30b0.",

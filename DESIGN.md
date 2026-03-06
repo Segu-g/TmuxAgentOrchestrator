@@ -2286,6 +2286,168 @@ reviewer     → {prefix}_review  (レビューレポート)
 
 ---
 
+## 10.18 セキュリティ強化 (v0.44.0) — 選定・調査記録
+
+### 選定根拠
+
+**選択: セキュリティ強化 — レートリミット + 監査ログ + タスクプロンプト無害化**
+
+ユーザーが明示的に要求したフィーチャー: 「セキュリティ（Security Hardening）— レートリミット、入力バリデーション、監査ログ、CORS ポリシー強化、プロンプトインジェクション防止」。
+
+§11 バックログ上の優先度分析:
+
+1. **ユーザー直接指示** — 自律ループにおいてユーザー明示指示は §11 優先度テーブルに優先する。
+2. **現状の脆弱性** — 現在の REST API は X-API-Key 認証のみで、DoS 攻撃・ブルートフォース・プロンプトインジェクションに対して脆弱。
+3. **エージェント特有のリスク** — `send_keys` 経由でタスクプロンプトが tmux pane に送られるため、シェルメタキャラクタがエスケープされずにエージェントプロセスに渡る可能性がある。
+4. **監査ログの欠如** — 誰がいつどのエンドポイントを呼んだかの記録がない。セキュリティインシデントの事後分析が不可能。
+
+§11 高優先度アイテムとの比較:
+- **役割別 system_prompt テンプレートライブラリ** — セキュリティ基盤が整ってから実施する方が安全。
+- **チェックポイント永続化** — 大型機能。セキュリティ問題より後でよい。
+- **Stop フック完了検出** — v0.38.0 で既に完了済み。
+
+本フィーチャーの具体的スコープ (優先度順):
+
+1. **レートリミット** (`slowapi` + `limits`) — エンドポイント単位で 60 req/min の制限を設ける。429 Too Many Requests を返す。
+2. **監査ログ** — FastAPI ミドルウェアですべての REST リクエストを構造化ログに記録 (timestamp, method, path, agent_id from header, status_code, duration_ms)。
+3. **タスクプロンプト無害化** — `send_keys` に渡す前にプロンプト内のシェルメタキャラクタ (`\r`, `\n`, null byte 等) を検出・エスケープする `sanitize_prompt()` 関数を実装。
+4. **CORS ポリシー強化** — 現行のワイルドカード CORS を設定可能な許可オリジンリストに置き換える。
+
+**非選択: API キーローテーション / 有効期限**
+既存の API キー機構は v0.35.0 で実装済み。ローテーション機能は別の反復で実施する。
+
+**非選択: WebAuthn**
+WebAuthn は REST API 向けではなく UI 向けの認証。スコープが大きすぎる。
+
+**非選択: ネットワーク分離**
+OS レベルの機能に依存し、ポータビリティが低い。
+
+**脅威モデル (STRIDE):**
+
+| 脅威 | 具体的シナリオ | 対策 |
+|------|----------------|------|
+| S (Spoofing) | API キーなしでリクエスト | 既存 X-API-Key 認証で対処済み |
+| T (Tampering) | 悪意あるタスクプロンプトでシェルインジェクション | `sanitize_prompt()` |
+| R (Repudiation) | 誰がタスクを投入したか分からない | 監査ログ |
+| I (Information Disclosure) | エラーレスポンスに内部情報が含まれる | エラーハンドリング改善 |
+| D (Denial of Service) | 大量リクエストでオーケストレーターをクラッシュさせる | レートリミット |
+| E (Elevation of Privilege) | P2P 許可なしのメッセージ送信 | 既存 P2P パーミッションで対処済み |
+
+### 調査記録 (Step 1 WebSearch, 2026-03-06)
+
+#### Query 1: "LLM agent security prompt injection REST API prevention 2025"
+
+**主要な発見:**
+
+- OWASP Top 10 for LLM Applications 2025 において、プロンプトインジェクションは **#1 クリティカル脆弱性**。本番 AI デプロイメントの 73% に発見される。
+- 攻撃は2種類: (1) Direct injection (ユーザーが直接悪意あるプロンプトを入力)、(2) Indirect injection (ドキュメント・メール・検索結果に隠された命令)。
+- 防御戦略 (OWASP Cheat Sheet): 入力サニタイズ・コンテキスト分離・レートリミット・Zero Trust 統合。
+- OWASP 推奨: 「構造化されたインターフェース/プロンプトテンプレートを使い、自由入力の余地を最小化する。自由入力が必要な場合は、インジェクションに使われる文字をフィルタリング/エンコードする。」
+- arXiv 2506.08837 "Design Patterns for Securing LLM Agents against Prompt Injections" (2025): プロンプトインジェクションへの抵抗力を持つ AI エージェント構築のための原則的なデザインパターンを提案。
+- agentic AI コーディングエディタへのプロンプトインジェクション攻撃 (arXiv:2509.22040v1): 外部開発リソースへの悪意ある命令埋め込みでエージェントが乗っ取られる実証研究。
+
+**タスクプロンプトと tmux send_keys の具体的リスク:**
+- `send-keys` でキーストロークをプログラム的に pane に送信する際、改行文字 (`\n`, `\r`) がそのままコマンド実行になる。
+- shell metacharacter (`; && || $(...)` 等) がプロンプト内にある場合、エージェントがそのまま bash コマンドとして解釈してしまう。
+- Null byte (`\x00`) がターミナルエミュレータの挙動に影響を与える可能性がある。
+
+**出典:**
+- OWASP, "LLM01:2025 Prompt Injection", https://genai.owasp.org/llmrisk/llm01-prompt-injection/ (2025)
+- OWASP, "LLM Prompt Injection Prevention Cheat Sheet", https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html (2025)
+- arXiv, "Design Patterns for Securing LLM Agents against Prompt Injections", https://arxiv.org/abs/2506.08837 (2025)
+- arXiv, "Your AI, My Shell: Demystifying Prompt Injection Attacks on Agentic AI Coding Editors", https://arxiv.org/html/2509.22040v1 (2025)
+- APIsec, "Prompt Injection and LLM API Security Risks", https://www.apisec.ai/blog/prompt-injection-and-llm-api-security-risks-protect-your-ai (2025)
+
+#### Query 2: "FastAPI rate limiting security hardening slowapi 2025"
+
+**主要な発見:**
+
+- **SlowAPI** — Flask-Limiter を Starlette/FastAPI 向けに移植したレートリミットライブラリ。デコレーターベースで直感的に使用できる。
+- 設定パターン:
+  ```python
+  from slowapi import Limiter, _rate_limit_exceeded_handler
+  from slowapi.util import get_remote_address
+  from slowapi.errors import RateLimitExceeded
+
+  limiter = Limiter(key_func=get_remote_address)
+  app.state.limiter = limiter
+  app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+  ```
+- エンドポイントへの適用: `@limiter.limit("60/minute")` デコレーターを使用。`request: Request` パラメータが必須。
+- デコレーターの順序: `@app.get(...)` の **下** に `@limiter.limit(...)` を置く必要がある。
+- 2025年: API の 83% がインターネットを媒介する中、DDoS 攻撃が前年比 45% 増加。
+- token bucket アルゴリズムで実装されており、Redis バックエンドもサポート (本プロジェクトでは in-memory で十分)。
+
+**出典:**
+- SlowAPI GitHub, https://github.com/laurentS/slowapi (2025)
+- SlowAPI Docs, https://slowapi.readthedocs.io/ (2025)
+- ByteScrum, "SlowAPI: Secure Your FastAPI App with Rate Limiting", https://blog.bytescrum.com/slowapi-secure-your-fastapi-app-with-rate-limiting (2025)
+- Medium, "Protecting Your API from Abuse: A Simple Rate Limiting Tutorial with FastAPI", https://medium.com/@ramadnsyh/protecting-your-api-from-abuse-a-simple-rate-limiting-tutorial-with-fastapi-e5929e7b6c0a (2025)
+
+#### Query 3: "multi-agent system security audit logging REST middleware 2025"
+
+**主要な発見:**
+
+- Microsoft Multi-Agent Reference Architecture では、すべてのエージェント呼び出しに対して タイムスタンプ・呼び出し元 ID・入力ハッシュ・出力ハッシュを含む監査ログの記録を推奨している。
+- 監査ログの実装: `BaseHTTPMiddleware` で `AuditMiddleware` を構築し、`/admin/`, `/api/`, `/auth/` エンドポイントを通過するすべてのリクエストを記録する。
+- SOC2 CC6.3 および ISO 27001 準拠のためには、ログの PII マスキングとバージョン管理が必要。
+- IBM mcp-context-forge の監査ログシステム (Issue #535): リクエストトレースと操作ログを分離して保存する。
+- TRiSM (Trust, Risk, and Security Management) フレームワーク for Agentic AI (arXiv:2506.04133v4): エージェントアクション・ツール使用・振る舞いトレースを記録する Trust and Audit モジュールを提案。
+
+**実装指針:**
+- FastAPI ミドルウェア (`BaseHTTPMiddleware`) で全リクエストをインターセプト
+- 記録すべきフィールド: timestamp, method, path, client_ip, agent_id (X-Agent-Id ヘッダー等), status_code, duration_ms, request_size
+- 既存の `logging_config.py` (v0.7.0, `JsonFormatter`) と統合する
+
+**出典:**
+- Microsoft, "Security - Multi-agent Reference Architecture", https://microsoft.github.io/multi-agent-reference-architecture/docs/security/Security.html (2025)
+- Middleware.io, "Audit Logs: A Comprehensive Guide", https://middleware.io/blog/audit-logs/ (2025)
+- arXiv, "TRiSM for Agentic AI: A Review of Trust, Risk, and Security Management in LLM-based Agentic Multi-Agent Systems", https://arxiv.org/html/2506.04133v4 (2025)
+- IBM mcp-context-forge, "SECURITY FEATURE: Audit Logging System", https://github.com/IBM/mcp-context-forge/issues/535 (2025)
+- AppSec Engineer, "Building Secure Multi-Agent AI Architectures for Enterprise SecOps", https://www.appsecengineer.com/blog/building-secure-multi-agent-ai-architectures-for-enterprise-secops (2025)
+
+#### Query 4: "task prompt sanitization shell injection send_keys tmux security 2025"
+
+**主要な発見:**
+
+- tmux `send-keys` へのシェルインジェクションリスク: 攻撃者が `send-keys` を制御できれば、tmux セッション内で任意のコマンドを実行できる。
+- タスクプロンプトに含まれる危険文字: `\n` (改行 → コマンド実行), `\r` (CR → 同上), `\x00` (null byte), `;`, `&&`, `||`, `$(...)`, バッククォート
+- OWASP Cheat Sheet の正規化パイプライン: ホワイトスペース折り畳み・文字繰り返し除去・長さ制限
+- 防御戦略: 完全除去ではなく、危険な制御文字を安全な代替文字に置換 (例: `\n` → ` [NEWLINE] `)
+
+**出典:**
+- Security Boulevard, "Risk of Prompt Injection in LLM-Integrated Apps", https://securityboulevard.com/2025/09/risk-of-prompt-injection-in-llm-integrated-apps/ (2025)
+- Lobsters, "tmux privilege escalation", https://lobste.rs/s/2fqraj/tmux_privilege_escalation
+- HackingArticles, "Linux For Pentester: tmux Privilege Escalation", https://www.hackingarticles.in/linux-for-pentester-tmux-privilege-escalation/
+
+#### 実装方針の決定
+
+調査結果を踏まえ、以下の実装方針を採用する:
+
+1. **レートリミット** (`slowapi` + `limits`):
+   - `Limiter(key_func=get_remote_address)` でクライアント IP ベースのレートリミット
+   - デフォルト制限: `60/minute` (全エンドポイント共通)
+   - タスク投入 (`POST /tasks`): より厳しい `30/minute` (DoS に最も影響大)
+   - 429 レスポンスに `Retry-After` ヘッダーを含める
+
+2. **監査ログ** (`AuditLogMiddleware`):
+   - `BaseHTTPMiddleware` サブクラスとして実装
+   - 既存の `JsonFormatter` / `structlog` パイプラインに統合
+   - 記録フィールド: timestamp, method, path, client_ip, api_key_hash (first 8 chars), status_code, duration_ms
+   - `GET /audit-log` エンドポイントで直近 N 件を取得可能にする
+
+3. **タスクプロンプト無害化** (`sanitize_prompt()`):
+   - 危険な制御文字を除去・置換: `\x00` (null byte 削除), `\r` (削除), `\n` → スペース
+   - 最大長制限: 16384 文字 (設定可能)
+   - ログに警告イベントを出力 (サニタイズ発生時)
+
+4. **CORS ポリシー強化**:
+   - `OrchestratorConfig` に `cors_origins: list[str]` フィールドを追加
+   - デフォルト: `["http://localhost:*"]` (ループバックのみ許可)
+   - `CORSMiddleware` の `allow_origins` を設定値から読む
+
+---
+
 ## 11. 今後の課題
 
 > 以下のバックログは、完了済み項目（旧 §11 テーブルの全 ~~完了~~ エントリ、§10.N 実装履歴）を除去し、

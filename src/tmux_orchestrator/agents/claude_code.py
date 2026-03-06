@@ -599,9 +599,11 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
     async def _dispatch_task(self, task: Task) -> None:
         if self.pane is None:
             raise RuntimeError(f"Agent {self.id} has no pane")
+        from tmux_orchestrator.security import sanitize_prompt
+        safe_prompt = sanitize_prompt(task.prompt)
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
-            None, self._tmux.send_keys, self.pane, task.prompt
+            None, self._tmux.send_keys, self.pane, safe_prompt
         )
         # Poll until output settles and looks like a prompt
         await self._wait_for_completion(task)

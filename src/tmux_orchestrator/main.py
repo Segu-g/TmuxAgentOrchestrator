@@ -126,6 +126,7 @@ def web(
         api_key=api_key,
         on_startup=orchestrator.start,
         on_shutdown=_shutdown,
+        cors_origins=orchestrator.config.cors_origins,
     )
 
     display_host = "localhost" if host in ("0.0.0.0", "") else host

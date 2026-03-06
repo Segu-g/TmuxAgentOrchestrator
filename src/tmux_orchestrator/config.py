@@ -158,6 +158,17 @@ class OrchestratorConfig:
     # Empty string = no authentication required.
     # Reference: RFC 7235 HTTP Authentication; DESIGN.md §10.29 (v0.34.0)
     api_key: str = ""
+    # --- CORS policy ---
+    # cors_origins: list of allowed origins for CORSMiddleware.
+    # Default is loopback-only (localhost / 127.0.0.1) to prevent cross-site
+    # requests from arbitrary web pages.
+    # Reference: OWASP CORS cheat sheet; DESIGN.md §10.18 (v0.44.0)
+    cors_origins: list[str] = field(default_factory=lambda: [
+        "http://localhost",
+        "http://localhost:8000",
+        "http://127.0.0.1",
+        "http://127.0.0.1:8000",
+    ])
 
 
 def load_config(path: str | Path) -> OrchestratorConfig:
@@ -218,4 +229,10 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         webhook_timeout=data.get("webhook_timeout", 5.0),
         default_task_ttl=data.get("default_task_ttl"),
         ttl_reaper_poll=data.get("ttl_reaper_poll", 1.0),
+        cors_origins=data.get("cors_origins", [
+            "http://localhost",
+            "http://localhost:8000",
+            "http://127.0.0.1",
+            "http://127.0.0.1:8000",
+        ]),
     )

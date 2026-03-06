@@ -6,6 +6,48 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.44.0] — 2026-03-06
+
+### Added
+
+**Security Hardening — Rate Limiting, Audit Logging, Prompt Sanitization, CORS Hardening**
+
+- New module `src/tmux_orchestrator/security.py`:
+  - `sanitize_prompt(prompt, max_length=16384)`: strips null bytes, carriage returns; converts newlines
+    to spaces; truncates to `max_length`. Prevents shell injection via `send_keys`.
+  - `AuditLogEntry` dataclass: structured HTTP audit record (timestamp, method, path, client_ip,
+    api_key_hint [first 8 chars only], status_code, duration_ms).
+  - `AuditLogMiddleware` (Starlette `BaseHTTPMiddleware`): records every HTTP request to an in-process
+    ring buffer of 1 000 entries. Class methods `get_log()` / `clear_log()` for introspection/testing.
+- New REST endpoint `GET /audit-log` (auth-required): returns up to 100 recent audit log entries.
+- `POST /tasks` now applies SlowAPI rate limiting (default 60 req/min). Excess requests get 429.
+- `create_app()` adds `fastapi.middleware.cors.CORSMiddleware` with configurable `cors_origins`
+  (defaults to loopback-only). `AuditLogMiddleware` added to all apps.
+- `OrchestratorConfig.cors_origins` field (default: localhost + 127.0.0.1 on ports 80 and 8000).
+  Loaded from YAML `cors_origins:` list.
+- `ClaudeCodeAgent._dispatch_task()` now calls `sanitize_prompt()` before `send_keys`.
+- New dependencies: `slowapi>=0.1.9`, `limits>=3.6`.
+- 32 new unit tests in `tests/test_security.py` (914 total).
+
+### Security
+
+Threat model (STRIDE) addressed:
+
+| Threat | Attack | Mitigation |
+|--------|--------|------------|
+| Tampering | Shell metachar injection via task prompt | `sanitize_prompt()` in `_dispatch_task` |
+| Repudiation | No request audit trail | `AuditLogMiddleware` + `GET /audit-log` |
+| Denial of Service | Flood POST /tasks with requests | SlowAPI 60 req/min rate limit |
+| Information Disclosure | CORS wildcard allows cross-site reads | CORSMiddleware loopback-only default |
+
+References:
+- OWASP, "LLM01:2025 Prompt Injection", https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+- SlowAPI docs, https://slowapi.readthedocs.io/
+- Microsoft Multi-Agent Reference Architecture — Security, https://microsoft.github.io/multi-agent-reference-architecture/docs/security/Security.html
+- arXiv:2506.04133v4 "TRiSM for Agentic AI" (2025)
+
+---
+
 ## [0.43.0] — 2026-03-06
 
 ### Added
