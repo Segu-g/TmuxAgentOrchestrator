@@ -111,6 +111,13 @@ class ClaudeCodeAgent(Agent):
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
+        # Inject API key into the tmux session environment BEFORE creating the
+        # pane.  tmux set-environment only propagates to panes created after the
+        # call, so if we set it after new_pane() the shell that claude runs in
+        # will not inherit the variable and the Stop hook headers cannot expand
+        # $TMUX_ORCHESTRATOR_API_KEY → HTTP 401.
+        if self._api_key:
+            await loop.run_in_executor(None, self._set_session_env_api_key)
         if self._parent_pane is not None:
             # Sub-agent: split the parent's window to stay in the same tmux window
             pane = await loop.run_in_executor(
@@ -123,13 +130,8 @@ class ClaudeCodeAgent(Agent):
         cwd = await self._setup_worktree()
         if cwd is not None:
             await loop.run_in_executor(None, self._write_context_file, cwd)
-            # Write API key to a separate 0o600 file (not in __orchestrator_context__.json).
-            # Also inject as tmux session environment variable so panes can inherit it.
             if self._api_key:
                 await loop.run_in_executor(None, self._write_api_key_file, cwd)
-                await loop.run_in_executor(
-                    None, self._set_session_env_api_key
-                )
             # Only write agent-specific CLAUDE.md in isolated worktrees.
             # Non-isolated agents share an existing directory that may already have
             # a project-level CLAUDE.md — overwriting it would destroy project context.
