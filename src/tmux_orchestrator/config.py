@@ -169,6 +169,18 @@ class OrchestratorConfig:
         "http://127.0.0.1",
         "http://127.0.0.1:8000",
     ])
+    # --- Checkpoint persistence (SQLite-backed fault-tolerant restart) ---
+    # checkpoint_enabled: when True, task queue and workflow state are saved
+    #   to a SQLite database after each enqueue/dequeue operation.
+    # checkpoint_db: path to the SQLite checkpoint database file.
+    #   Supports ~ expansion.  Defaults to ~/.tmux_orchestrator/checkpoint.db
+    # References:
+    #   LangGraph checkpointer + AsyncSqliteSaver (LangChain docs 2025)
+    #   Apache Flink Checkpoints vs Savepoints (Flink stable docs)
+    #   Chandy-Lamport distributed snapshots (1985)
+    #   DESIGN.md §10.12 (v0.45.0)
+    checkpoint_enabled: bool = False
+    checkpoint_db: str = "~/.tmux_orchestrator/checkpoint.db"
 
 
 def load_config(path: str | Path) -> OrchestratorConfig:
@@ -235,4 +247,6 @@ def load_config(path: str | Path) -> OrchestratorConfig:
             "http://127.0.0.1",
             "http://127.0.0.1:8000",
         ]),
+        checkpoint_enabled=data.get("checkpoint_enabled", False),
+        checkpoint_db=data.get("checkpoint_db", "~/.tmux_orchestrator/checkpoint.db"),
     )

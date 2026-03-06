@@ -2448,6 +2448,74 @@ OS レベルの機能に依存し、ポータビリティが低い。
 
 ---
 
+## 10.12 v0.45.0 — チェックポイント永続化による中断再開 (2026-03-06)
+
+### 選択理由
+
+**選択: チェックポイント永続化 (`CheckpointStore` SQLite)**
+
+§11 バックログにおいて「チェックポイント永続化による中断再開」は高優先度に分類されており、
+`ResultStore` (v0.24.0 JSONL) が既存の追記基盤として存在することから実装コストが低い。
+v0.44.0 のデモ (build-log.md) では、プロセス再起動でキュー・ワークフロー状態が消滅する問題が
+実際に確認された (30秒以上の長時間タスクを送信中に Ctrl-C すると全状態が失われる)。
+これはユーザーにとって直接的な痛点であり、最優先で解消すべき。
+
+LangGraph の checkpointer + PostgresSaver パターン、および Apache Flink の
+state backend アーキテクチャが先行事例として存在する。SQLite は依存関係を増やさずに
+永続化を実現できる最もシンプルな選択肢。
+
+**選択しなかったもの**:
+- `ProcessPort` 抽象インターフェース: 有用だが内部リファクタリングであり、ユーザー向け価値が低い
+- OpenTelemetry: 外部依存 (opentelemetry-sdk) が増えるため、次のイテレーションで実施
+- 役割別 system_prompt テンプレートライブラリ: ユーザー価値は高いが、永続化のほうが安定性向上に直結
+
+### 調査 (Step 1 — WebSearch)
+
+#### 参考文献
+
+1. **LangChain "Persistence — LangGraph"** (2025)
+   https://docs.langchain.com/oss/python/langgraph/persistence
+   LangGraph はチェックポインターをグラフコンパイル時にバインドし、スーパーステップごとに状態スナップショットを保存する。`thread_id` で名前空間化されるため、複数の実行を独立して追跡できる。フォールトトレランス: 任意のノードが失敗した場合、最後の成功ステップから再開できる。SQLite (`AsyncSqliteSaver`) はローカル/実験用途として推奨。
+
+2. **langgraph-checkpoint-sqlite PyPI** (2025)
+   https://pypi.org/project/langgraph-checkpoint-sqlite/
+   `AsyncSqliteSaver` の実装: `aiosqlite` を使用した非同期 SQLite チェックポインター。テーブル構造: `checkpoints(thread_id, checkpoint_id, parent_checkpoint_id, type, checkpoint, metadata)`。Python async context manager パターンで接続を管理。
+
+3. **Apache Flink "Checkpoints vs Savepoints"** (stable docs)
+   https://nightlies.apache.org/flink/flink-docs-stable/docs/ops/state/checkpoints_vs_savepoints/
+   Flink の知見: チェックポイントは自動・軽量 (高速回復用)、セーブポイントはユーザー主導・耐久性重視 (バージョンアップ・移行用)。Chandy-Lamport 分散スナップショットアルゴリズムを採用。「再起動後に状態が論理的に同一である」ことが設計原則。
+
+4. **"Simple LangGraph Implementation with Memory AsyncSqliteSaver — FastAPI"** Medium (2025)
+   https://medium.com/@devwithll/simple-langgraph-implementation-with-memory-asyncsqlitesaver-checkpointer-fastapi-54f4e4879a2e
+   FastAPI の lifespan 内で `AsyncSqliteSaver` を初期化し、アプリケーションライフタイム全体で再利用するパターン。`async with SqliteSaver.from_conn_string(":memory:") as saver` パターン。
+
+5. **"Mastering LangGraph Checkpointing: Best Practices for 2025"** SparkCo (2025)
+   https://sparkco.ai/blog/mastering-langgraph-checkpointing-best-practices-for-2025
+   ベストプラクティス: スレッドごとに一意のチェックポイント ID を割り当てること。状態スキーマのバージョン管理 (スキーマ変更時の後方互換性)。定期的なチェックポイントガベージコレクション。
+
+#### 設計決定
+
+TmuxAgentOrchestrator の `CheckpointStore` は以下を実装する:
+
+```
+SQLite テーブル (3つ):
+1. task_checkpoints:   キュー内タスクのスナップショット (id, priority, prompt, depends_on, ...)
+2. workflow_checkpoints: ワークフロー状態スナップショット (workflow_id, state_json, updated_at)
+3. orchestrator_meta:  プロセスメタデータ (session_name, version, created_at, last_checkpoint_at)
+```
+
+`--resume` フラグ時の動作:
+1. `CheckpointStore.load_pending_tasks()` → `List[Task]` を返す
+2. `CheckpointStore.load_workflows()` → `Dict[str, WorkflowState]` を返す
+3. `Orchestrator.start(resume=True)` → ロードされたタスク/ワークフローをキューに再投入
+
+チェックポイントタイミング:
+- タスクキューへの `put_nowait()` 呼び出し後 (非同期で書き込み)
+- タスク完了/失敗時 (エントリ削除)
+- ワークフロー状態変化時 (upsert)
+
+---
+
 ## 11. 今後の課題
 
 > 以下のバックログは、完了済み項目（旧 §11 テーブルの全 ~~完了~~ エントリ、§10.N 実装履歴）を除去し、

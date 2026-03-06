@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tmux-orchestrator"
-version = "0.44.0"
+version = "0.45.0"
 description = "Orchestrate AI agents (Claude Code and custom) inside tmux panes"
 requires-python = ">=3.11"
 dependencies = [

@@ -84,6 +84,9 @@ class _MockOrchestrator:
         from tmux_orchestrator.group_manager import GroupManager
         return GroupManager()
 
+    def get_checkpoint_store(self):
+        return None
+
 
 @pytest.fixture
 def fastapi_app():

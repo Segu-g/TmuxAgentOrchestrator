@@ -97,6 +97,10 @@ def web(
     ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
     json_logs: Annotated[bool, typer.Option("--json-logs", help="Emit structured JSON logs")] = False,
+    resume: Annotated[
+        bool,
+        typer.Option("--resume", help="Resume from last checkpoint (requires checkpoint_enabled in config)"),
+    ] = False,
 ) -> None:
     """Launch the FastAPI web server (REST + WebSocket + browser UI)."""
     _setup_logging(verbose, json_logs=json_logs)
@@ -111,6 +115,9 @@ def web(
     patch_api_key(orchestrator, api_key)
     hub = WebSocketHub(bus=bus)
 
+    async def _startup() -> None:
+        await orchestrator.start(resume=resume)
+
     async def _shutdown() -> None:
         await orchestrator.stop()
         tmux.stop_watcher()
@@ -124,7 +131,7 @@ def web(
         orchestrator=orchestrator,
         hub=hub,
         api_key=api_key,
-        on_startup=orchestrator.start,
+        on_startup=_startup,
         on_shutdown=_shutdown,
         cors_origins=orchestrator.config.cors_origins,
     )

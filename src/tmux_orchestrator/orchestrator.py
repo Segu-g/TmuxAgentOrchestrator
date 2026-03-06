@@ -23,6 +23,7 @@ from tmux_orchestrator.webhook_manager import WebhookManager
 if TYPE_CHECKING:
     from tmux_orchestrator.config import AgentConfig, OrchestratorConfig
     from tmux_orchestrator.tmux_interface import TmuxInterface
+    from tmux_orchestrator.workflow_manager import WorkflowRun
     from tmux_orchestrator.worktree import WorktreeManager
 
 logger = logging.getLogger(__name__)
@@ -197,6 +198,22 @@ class Orchestrator:
         # Reference: GitHub Webhooks; Stripe Webhooks; RFC 2104 HMAC;
         # Zalando RESTful API Guidelines §webhook. DESIGN.md §10.25 (v0.30.0)
         self._webhook_manager = WebhookManager(timeout=config.webhook_timeout)
+        # Checkpoint store — SQLite-backed fault-tolerant persistence.
+        # Saves task queue and workflow state after each mutation so that an
+        # unclean shutdown can be recovered with --resume.
+        # Reference: LangGraph checkpointer pattern (LangChain docs 2025);
+        # Apache Flink Checkpoints (Flink stable docs);
+        # Chandy-Lamport distributed snapshots (1985).
+        # DESIGN.md §10.12 (v0.45.0)
+        if config.checkpoint_enabled:
+            from tmux_orchestrator.checkpoint_store import CheckpointStore
+            self._checkpoint_store: "CheckpointStore | None" = CheckpointStore(
+                db_path=config.checkpoint_db,
+            )
+            self._checkpoint_store.initialize()
+            self._checkpoint_store.save_meta("session_name", config.session_name)
+        else:
+            self._checkpoint_store = None
         # Named agent group manager — logical pools for targeted task dispatch.
         # Groups allow tasks to target a named pool instead of individual agent IDs or tags.
         # References:
@@ -233,13 +250,30 @@ class Orchestrator:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def start(self) -> None:
-        """Start all registered agents and the dispatch / routing loops."""
+    async def start(self, *, resume: bool = False) -> None:
+        """Start all registered agents and the dispatch / routing loops.
+
+        Parameters
+        ----------
+        resume:
+            When ``True`` and ``checkpoint_enabled`` is set in config, reload
+            persisted task queue and workflow state from the checkpoint store
+            before starting the dispatch loop.  Tasks are re-enqueued in their
+            original priority order.  This allows recovery from an unclean
+            shutdown without losing queued work.
+
+            Reference: LangGraph checkpointer resume pattern (LangChain 2025);
+            Apache Flink savepoint restore (Flink stable docs).
+            DESIGN.md §10.12 (v0.45.0).
+        """
         self._bus_queue = await self.bus.subscribe(
             "__orchestrator__", broadcast=True
         )
         for agent in self.registry.all_agents().values():
             await agent.start()
+        # Resume from checkpoint if requested and store is available.
+        if resume and self._checkpoint_store is not None:
+            await self._resume_from_checkpoint()
         self._dispatch_task = asyncio.create_task(
             supervised_task(self._dispatch_loop, "orchestrator-dispatch",
                             on_permanent_failure=self._on_internal_failure),
@@ -270,6 +304,55 @@ class Orchestrator:
             name="orchestrator-ttl-reaper",
         )
         logger.info("Orchestrator started with %d agents", len(self.registry.all_agents()))
+
+    async def _resume_from_checkpoint(self) -> None:
+        """Reload persisted tasks and workflows from the checkpoint store.
+
+        Called by start(resume=True) before the dispatch loop starts.
+        Tasks are re-enqueued in priority order.  Waiting tasks are restored
+        to _waiting_tasks with their dependency chains.  Workflows are
+        re-registered with the WorkflowManager.
+
+        Reference: DESIGN.md §10.12 (v0.45.0).
+        """
+        assert self._checkpoint_store is not None
+        # Restore queued tasks
+        pending = self._checkpoint_store.load_pending_tasks()
+        for task in pending:
+            self._task_seq += 1
+            self._task_priorities[task.id] = task.priority
+            await self._task_queue.put((task.priority, self._task_seq, task))
+            logger.info(
+                "Checkpoint restore: re-enqueued task %s (priority=%d)", task.id, task.priority
+            )
+
+        # Restore waiting (dependency-blocked) tasks
+        waiting = self._checkpoint_store.load_waiting_tasks()
+        for task in waiting:
+            self._task_priorities[task.id] = task.priority
+            self._waiting_tasks[task.id] = task
+            for dep in task.depends_on:
+                if dep not in self._completed_tasks:
+                    self._task_dependents.setdefault(dep, []).append(task.id)
+            logger.info(
+                "Checkpoint restore: re-loaded waiting task %s", task.id
+            )
+
+        # Restore workflows
+        workflows = self._checkpoint_store.load_workflows()
+        for run in workflows.values():
+            self._workflow_manager._runs[run.id] = run
+            for tid in run.task_ids:
+                self._workflow_manager._task_to_workflow[tid] = run.id
+            logger.info(
+                "Checkpoint restore: re-loaded workflow %s (%s)", run.id, run.name
+            )
+
+        if pending or waiting or workflows:
+            logger.info(
+                "Checkpoint resume complete: %d queued, %d waiting, %d workflows",
+                len(pending), len(waiting), len(workflows),
+            )
 
     async def stop(self) -> None:
         """Stop dispatch, routing, watchdog, context monitor, and all agents."""
@@ -539,6 +622,9 @@ class Orchestrator:
             # All deps already done — enqueue immediately
             self._task_seq += 1
             await self._task_queue.put((priority, self._task_seq, task))
+            # Checkpoint: persist task to SQLite for fault-tolerant recovery.
+            if self._checkpoint_store is not None:
+                self._checkpoint_store.save_task(task=task, queue_priority=priority)
             await self.bus.publish(Message(
                 type=MessageType.STATUS,
                 from_id="__orchestrator__",
@@ -559,6 +645,9 @@ class Orchestrator:
             self._waiting_tasks[task.id] = task
             for dep in unmet_deps:
                 self._task_dependents.setdefault(dep, []).append(task.id)
+            # Checkpoint: persist waiting task so it survives process restart.
+            if self._checkpoint_store is not None:
+                self._checkpoint_store.save_waiting_task(task=task)
             await self.bus.publish(Message(
                 type=MessageType.STATUS,
                 from_id="__orchestrator__",
@@ -1413,8 +1502,18 @@ class Orchestrator:
                 self.registry.record_result(msg.from_id, error=bool(error))
                 if not error and task_id:
                     self._completed_tasks.add(task_id)
+                    # Checkpoint: remove completed task so it isn't re-queued on resume.
+                    if self._checkpoint_store is not None:
+                        self._checkpoint_store.remove_task(task_id=task_id)
                     wf_status_before = self._workflow_manager.get_workflow_status_for_task(task_id)
                     self._workflow_manager.on_task_complete(task_id)
+                    # Checkpoint: update workflow state after task completes.
+                    if self._checkpoint_store is not None:
+                        wf_id = self._workflow_manager.get_workflow_id_for_task(task_id)
+                        if wf_id and wf_id in self._workflow_manager._runs:
+                            self._checkpoint_store.save_workflow(
+                                run=self._workflow_manager._runs[wf_id]
+                            )
                     # Clean up active task tracking on success.
                     self._active_tasks.pop(task_id, None)
                     # Webhook: task_complete event
@@ -1496,6 +1595,9 @@ class Orchestrator:
                         # GNU Make prerequisite failure propagation.
                         # DESIGN.md §10.24 (v0.29.0)
                         self._failed_tasks.add(task_id)
+                        # Checkpoint: remove failed task from persistence.
+                        if self._checkpoint_store is not None:
+                            self._checkpoint_store.remove_task(task_id=task_id)
                         await self._on_dep_failed(task_id)
                         # Webhook: task_failed event
                         asyncio.create_task(
@@ -2071,6 +2173,23 @@ class Orchestrator:
         Design reference: DESIGN.md §10.20 (v0.25.0).
         """
         return self._workflow_manager
+
+    def checkpoint_workflow(self, run: "WorkflowRun") -> None:
+        """Persist a workflow run snapshot to the checkpoint store (if enabled).
+
+        This is a thin helper for callers (e.g. web/app.py) that submit
+        workflows via ``get_workflow_manager().submit()`` and want the run
+        state to survive a process restart.  It is a no-op when
+        ``checkpoint_enabled`` is False.
+
+        Reference: DESIGN.md §10.12 (v0.45.0).
+        """
+        if self._checkpoint_store is not None:
+            self._checkpoint_store.save_workflow(run=run)
+
+    def get_checkpoint_store(self):
+        """Return the CheckpointStore instance, or None if not enabled."""
+        return self._checkpoint_store
 
     def get_group_manager(self) -> GroupManager:
         """Return the GroupManager instance.

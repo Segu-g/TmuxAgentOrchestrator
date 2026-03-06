@@ -6,6 +6,38 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.45.0] — 2026-03-06
+
+### Added
+
+**Checkpoint Persistence — SQLite-backed Fault-Tolerant Process Restart**
+
+- New module `src/tmux_orchestrator/checkpoint_store.py`:
+  - `CheckpointStore` class: SQLite-backed persistence for task queue and workflow state.
+  - Tables: `task_checkpoints`, `waiting_checkpoints`, `workflow_checkpoints`, `orchestrator_meta`.
+  - WAL (Write-Ahead Logging) mode for concurrent read/write.
+  - Methods: `save_task()`, `remove_task()`, `load_pending_tasks()`, `save_waiting_task()`,
+    `remove_waiting_task()`, `load_waiting_tasks()`, `save_workflow()`, `remove_workflow()`,
+    `load_workflows()`, `save_meta()`, `load_meta()`, `clear_all()`.
+  - Thread-safe: `threading.Lock` serialises all writes.
+- `OrchestratorConfig` new fields: `checkpoint_enabled: bool = False`,
+  `checkpoint_db: str = "~/.tmux_orchestrator/checkpoint.db"`.
+- `Orchestrator`:
+  - Creates `CheckpointStore` on init when `checkpoint_enabled=True`.
+  - `start(resume=True)` reloads persisted tasks and workflows from checkpoint store.
+  - `_resume_from_checkpoint()`: re-enqueues pending tasks, restores waiting tasks and workflows.
+  - `submit_task()`: calls `save_task()` / `save_waiting_task()` after enqueue/hold.
+  - `_route_loop()`: calls `remove_task()` on task completion or failure.
+  - `checkpoint_workflow(run)` / `get_checkpoint_store()` public accessors.
+- `main.py` `web` command: new `--resume` flag; passes `resume=True` to `orchestrator.start()`.
+- New REST endpoints:
+  - `GET /checkpoint/status`: pending/waiting/workflow counts; `{"enabled": false}` when disabled.
+  - `POST /checkpoint/clear`: wipe all checkpoint data (irreversible).
+- 35 new tests: `tests/test_checkpoint_store.py` (25) + `tests/test_checkpoint_integration.py` (10).
+- 949 tests total.
+
+---
+
 ## [0.44.0] — 2026-03-06
 
 ### Added

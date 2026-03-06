@@ -1491,6 +1491,48 @@
         "summary": "Recent audit log entries"
       }
     },
+    "/checkpoint/clear": {
+      "post": {
+        "description": "Wipe all checkpoint data (tasks, workflows, meta).\n\nUse this to reset the checkpoint state when starting fresh after a\nresume, or to discard stale checkpoints from a previous session.\n\nWarning: this is irreversible.  All pending/waiting task snapshots\nand workflow state will be deleted from the SQLite database.\n\nReference: DESIGN.md \u00a710.12 (v0.45.0).",
+        "operationId": "clear_checkpoint_checkpoint_clear_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Clear Checkpoint Checkpoint Clear Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Clear all checkpoint data"
+      }
+    },
+    "/checkpoint/status": {
+      "get": {
+        "description": "Return the current state of the checkpoint store.\n\nWhen ``checkpoint_enabled: true`` is set in the YAML config, this\nendpoint reports how many tasks and workflows are currently persisted\nin the SQLite checkpoint database.  This can be used to verify that\ncheckpoints are being written and to diagnose resume issues.\n\nReturns ``{\"enabled\": false}`` when checkpointing is disabled.\n\nReference: LangGraph checkpointer pattern (LangChain 2025);\n           DESIGN.md \u00a710.12 (v0.45.0).",
+        "operationId": "get_checkpoint_status_checkpoint_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Checkpoint Status Checkpoint Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Checkpoint store status"
+      }
+    },
     "/context-stats": {
       "get": {
         "description": "Return context window usage statistics for all tracked agents.\n\nSee ``GET /agents/{id}/stats`` for field descriptions.\n\nDesign reference: DESIGN.md \u00a711 (v0.21.0) \u2014 \u30a8\u30fc\u30b8\u30a7\u30f3\u30c8\u306e\u30b3\u30f3\u30c6\u30ad\u30b9\u30c8\u4f7f\u7528\u91cf\u30e2\u30cb\u30bf\u30ea\u30f3\u30b0.",

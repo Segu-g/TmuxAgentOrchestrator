@@ -3113,6 +3113,59 @@ def create_app(
         return [e.to_dict() for e in entries[-limit:]]
 
     # ------------------------------------------------------------------
+    # Checkpoint status (DESIGN.md §10.12 v0.45.0)
+    # ------------------------------------------------------------------
+
+    @app.get("/checkpoint/status", summary="Checkpoint store status", dependencies=[Depends(auth)])
+    async def get_checkpoint_status() -> dict:
+        """Return the current state of the checkpoint store.
+
+        When ``checkpoint_enabled: true`` is set in the YAML config, this
+        endpoint reports how many tasks and workflows are currently persisted
+        in the SQLite checkpoint database.  This can be used to verify that
+        checkpoints are being written and to diagnose resume issues.
+
+        Returns ``{"enabled": false}`` when checkpointing is disabled.
+
+        Reference: LangGraph checkpointer pattern (LangChain 2025);
+                   DESIGN.md §10.12 (v0.45.0).
+        """
+        store = orchestrator.get_checkpoint_store()
+        if store is None:
+            return {"enabled": False}
+        pending_tasks = store.load_pending_tasks()
+        waiting_tasks = store.load_waiting_tasks()
+        workflows = store.load_workflows()
+        session_name = store.load_meta("session_name")
+        return {
+            "enabled": True,
+            "pending_tasks": len(pending_tasks),
+            "waiting_tasks": len(waiting_tasks),
+            "workflows": len(workflows),
+            "session_name": session_name,
+            "pending_task_ids": [t.id for t in pending_tasks],
+            "workflow_ids": list(workflows.keys()),
+        }
+
+    @app.post("/checkpoint/clear", summary="Clear all checkpoint data", dependencies=[Depends(auth)])
+    async def clear_checkpoint() -> dict:
+        """Wipe all checkpoint data (tasks, workflows, meta).
+
+        Use this to reset the checkpoint state when starting fresh after a
+        resume, or to discard stale checkpoints from a previous session.
+
+        Warning: this is irreversible.  All pending/waiting task snapshots
+        and workflow state will be deleted from the SQLite database.
+
+        Reference: DESIGN.md §10.12 (v0.45.0).
+        """
+        store = orchestrator.get_checkpoint_store()
+        if store is None:
+            raise HTTPException(status_code=400, detail="Checkpointing is not enabled")
+        store.clear_all()
+        return {"cleared": True}
+
+    # ------------------------------------------------------------------
     # Prometheus metrics (no auth — Prometheus scraper compatibility)
     # ------------------------------------------------------------------
 
