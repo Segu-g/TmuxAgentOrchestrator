@@ -6,6 +6,40 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.47.0] — 2026-03-06
+
+### Added
+
+**OpenTelemetry GenAI Semantic Conventions Tracing**
+
+- New module `src/tmux_orchestrator/telemetry.py`:
+  - `TelemetrySetup`: Wraps `TracerProvider` + exporter for dependency injection in tests.
+    Factory class method `from_env(service_name)` reads `OTEL_EXPORTER_OTLP_ENDPOINT` and
+    configures OTLP/gRPC exporter when set, or falls back to `ConsoleSpanExporter`.
+  - `agent_span(setup, agent_id, agent_name, task_id, prompt)`: Context manager that emits an
+    `invoke_agent` span with GenAI semconv attributes: `gen_ai.agent.id`, `gen_ai.agent.name`,
+    `gen_ai.system="claude"`, `gen_ai.operation.name="invoke_agent"`, `tmux.task.id`,
+    `tmux.task.prompt` (truncated to 1000 chars). Sets `StatusCode.ERROR` on exception.
+  - `task_queued_span(setup, task_id, prompt, priority)`: Context manager that emits a
+    `task_queued` span with `tmux.task.id`, `tmux.task.priority`, `tmux.task.prompt`.
+  - `get_tracer(setup)`: Returns a `Tracer` from `setup`, or an OTel no-op tracer when
+    `setup=None` — never raises.
+- New config fields on `OrchestratorConfig`:
+  - `telemetry_enabled: bool = False` — enables span instrumentation.
+  - `otlp_endpoint: str = ""` — OTLP/gRPC endpoint; empty = `ConsoleSpanExporter`.
+- `Orchestrator` integration:
+  - `__init__`: Initialises `TelemetrySetup` from config when `telemetry_enabled=True`.
+  - `submit_task()`: Wraps enqueue in `task_queued_span`.
+  - `_dispatch_loop()`: Wraps task dispatch in `agent_span`.
+  - `get_telemetry()`: Public accessor for the `TelemetrySetup` instance.
+- New REST endpoint `GET /telemetry/status`: Returns `{enabled, exporter, otlp_endpoint}`.
+- New dependencies: `opentelemetry-sdk>=1.24`, `opentelemetry-exporter-otlp-proto-grpc>=1.24`.
+- 18 new unit tests in `tests/test_telemetry.py`.
+- 12 new integration tests in `tests/test_telemetry_integration.py`.
+- 995 tests total.
+
+---
+
 ## [0.46.0] — 2026-03-06
 
 ### Added

@@ -3147,6 +3147,30 @@ def create_app(
             "workflow_ids": list(workflows.keys()),
         }
 
+    @app.get("/telemetry/status", summary="OpenTelemetry status", dependencies=[Depends(auth)])
+    async def get_telemetry_status() -> dict:
+        """Return the current telemetry configuration.
+
+        When ``telemetry_enabled: true`` is set in the YAML config, this endpoint
+        reports whether an OTLP exporter is configured or whether the fallback
+        ConsoleSpanExporter is active.
+
+        Returns ``{"enabled": false}`` when telemetry is disabled.
+
+        Reference: OTel GenAI Semantic Conventions
+                   https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-agent-spans/
+                   DESIGN.md §10.14 (v0.47.0).
+        """
+        telemetry = orchestrator.get_telemetry()
+        if telemetry is None:
+            return {"enabled": False}
+        otlp_endpoint = orchestrator.config.otlp_endpoint
+        return {
+            "enabled": True,
+            "otlp_endpoint": otlp_endpoint or None,
+            "exporter": "otlp" if otlp_endpoint else "console",
+        }
+
     @app.post("/checkpoint/clear", summary="Clear all checkpoint data", dependencies=[Depends(auth)])
     async def clear_checkpoint() -> dict:
         """Wipe all checkpoint data (tasks, workflows, meta).

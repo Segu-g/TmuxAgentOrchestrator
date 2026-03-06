@@ -214,6 +214,27 @@ class Orchestrator:
             self._checkpoint_store.save_meta("session_name", config.session_name)
         else:
             self._checkpoint_store = None
+        # OpenTelemetry tracing — GenAI Semantic Conventions.
+        # When telemetry_enabled=True, agent invocations and task-queued events
+        # are wrapped in OTel spans with gen_ai.* attributes so that trace data
+        # can be sent to Jaeger, Datadog, or any OTLP-compatible backend.
+        # Reference: OTel GenAI Semantic Conventions
+        #   https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-agent-spans/
+        # DESIGN.md §10.14 (v0.47.0)
+        if config.telemetry_enabled:
+            import os
+            from tmux_orchestrator.telemetry import TelemetrySetup
+            _prev = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+            if config.otlp_endpoint and not _prev:
+                os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = config.otlp_endpoint
+            self._telemetry: "TelemetrySetup | None" = TelemetrySetup.from_env(
+                service_name="tmux_orchestrator"
+            )
+            if config.otlp_endpoint and not _prev:
+                # Restore env so we don't permanently pollute the process environment
+                del os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"]
+        else:
+            self._telemetry = None
         # Named agent group manager — logical pools for targeted task dispatch.
         # Groups allow tasks to target a named pool instead of individual agent IDs or tags.
         # References:
@@ -625,6 +646,16 @@ class Orchestrator:
             # Checkpoint: persist task to SQLite for fault-tolerant recovery.
             if self._checkpoint_store is not None:
                 self._checkpoint_store.save_task(task=task, queue_priority=priority)
+            # OTel span: record task_queued event with GenAI semconv attributes.
+            if self._telemetry is not None:
+                from tmux_orchestrator.telemetry import task_queued_span
+                with task_queued_span(
+                    setup=self._telemetry,
+                    task_id=task.id,
+                    prompt=prompt,
+                    priority=priority,
+                ):
+                    pass  # span captures submission metadata; work happens in _dispatch_loop
             await self.bus.publish(Message(
                 type=MessageType.STATUS,
                 from_id="__orchestrator__",
@@ -1182,6 +1213,17 @@ class Orchestrator:
             self._task_started_prompt[task.id] = task.prompt
             # Track the Task object for potential retry on failure.
             self._active_tasks[task.id] = task
+            # OTel span: record agent invocation with GenAI semconv attributes.
+            if self._telemetry is not None:
+                from tmux_orchestrator.telemetry import agent_span
+                with agent_span(
+                    setup=self._telemetry,
+                    agent_id=agent.id,
+                    agent_name=getattr(agent, "name", agent.id),
+                    task_id=task.id,
+                    prompt=task.prompt,
+                ):
+                    pass  # span closes here; task execution is async in agent run loop
             await agent.send_task(task)
             self._task_queue.task_done()
             # Yield so the agent's _run_loop can dequeue and set status=BUSY
@@ -2190,6 +2232,10 @@ class Orchestrator:
     def get_checkpoint_store(self):
         """Return the CheckpointStore instance, or None if not enabled."""
         return self._checkpoint_store
+
+    def get_telemetry(self):
+        """Return the TelemetrySetup instance, or None if not enabled."""
+        return self._telemetry
 
     def get_group_manager(self) -> GroupManager:
         """Return the GroupManager instance.

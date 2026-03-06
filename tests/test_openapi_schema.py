@@ -87,6 +87,16 @@ class _MockOrchestrator:
     def get_checkpoint_store(self):
         return None
 
+    def get_telemetry(self):
+        return None
+
+    @property
+    def config(self):
+        from unittest.mock import MagicMock
+        cfg = MagicMock()
+        cfg.otlp_endpoint = ""
+        return cfg
+
 
 @pytest.fixture
 def fastapi_app():

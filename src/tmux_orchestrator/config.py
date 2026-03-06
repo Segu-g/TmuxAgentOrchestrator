@@ -181,6 +181,18 @@ class OrchestratorConfig:
     #   DESIGN.md §10.12 (v0.45.0)
     checkpoint_enabled: bool = False
     checkpoint_db: str = "~/.tmux_orchestrator/checkpoint.db"
+    # --- OpenTelemetry tracing (GenAI Semantic Conventions) ---
+    # telemetry_enabled: when True, the orchestrator creates OTel spans for
+    #   agent invocations and task-queued events using the GenAI semconv.
+    # otlp_endpoint: OTLP/gRPC endpoint for span export (e.g. "http://localhost:4317").
+    #   Empty string = ConsoleSpanExporter (stdout JSON).
+    #   Also overridden by OTEL_EXPORTER_OTLP_ENDPOINT environment variable.
+    # References:
+    #   OTel GenAI Semantic Conventions https://opentelemetry.io/docs/specs/semconv/gen-ai/
+    #   opentelemetry-python SDK https://opentelemetry-python.readthedocs.io/
+    #   DESIGN.md §10.14 (v0.47.0)
+    telemetry_enabled: bool = False
+    otlp_endpoint: str = ""
 
 
 def load_config(path: str | Path) -> OrchestratorConfig:
@@ -249,4 +261,6 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         ]),
         checkpoint_enabled=data.get("checkpoint_enabled", False),
         checkpoint_db=data.get("checkpoint_db", "~/.tmux_orchestrator/checkpoint.db"),
+        telemetry_enabled=data.get("telemetry_enabled", False),
+        otlp_endpoint=data.get("otlp_endpoint", ""),
     )

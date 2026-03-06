@@ -2684,6 +2684,27 @@
         "summary": "Cancel a pending task"
       }
     },
+    "/telemetry/status": {
+      "get": {
+        "description": "Return the current telemetry configuration.\n\nWhen ``telemetry_enabled: true`` is set in the YAML config, this endpoint\nreports whether an OTLP exporter is configured or whether the fallback\nConsoleSpanExporter is active.\n\nReturns ``{\"enabled\": false}`` when telemetry is disabled.\n\nReference: OTel GenAI Semantic Conventions\n           https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-agent-spans/\n           DESIGN.md \u00a710.14 (v0.47.0).",
+        "operationId": "get_telemetry_status_telemetry_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Telemetry Status Telemetry Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "OpenTelemetry status"
+      }
+    },
     "/webhooks": {
       "get": {
         "description": "Return all registered webhooks with delivery statistics.\n\nEach entry contains:\n- ``id``: webhook UUID\n- ``url``: target URL\n- ``events``: subscribed event names\n- ``created_at``: Unix timestamp of registration\n- ``delivery_count``: total delivery attempts\n- ``failure_count``: total failed attempts\n\nDesign reference: DESIGN.md \u00a710.25 (v0.30.0).",
