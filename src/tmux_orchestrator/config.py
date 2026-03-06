@@ -193,6 +193,21 @@ class OrchestratorConfig:
     #   DESIGN.md §10.14 (v0.47.0)
     telemetry_enabled: bool = False
     otlp_endpoint: str = ""
+    # --- Worktree root override ---
+    # repo_root: when set, the WorktreeManager uses this path (rather than Path.cwd())
+    #   as the base for git worktree operations.  Useful when the server is launched
+    #   from a directory that is not the target git repository (e.g. demo scripts that
+    #   run from ~/Demonstration/vX.Y.Z/).  Must point to a directory that contains
+    #   (or is an ancestor of) a .git directory.
+    #
+    #   In YAML: ``repo_root: /home/user/Projects/MyRepo``
+    #   Programmatically: OrchestratorConfig(repo_root=Path("/home/user/Projects/MyRepo"))
+    #
+    #   When None (default), the factory falls back to Path.cwd() — preserving the
+    #   pre-v1.0.0 behaviour for callers that launch the server from the repo root.
+    #
+    # Reference: DESIGN.md §10.17 (v1.0.0 — worktree cwd bug fix)
+    repo_root: "Path | None" = None
 
 
 def load_config(path: str | Path) -> OrchestratorConfig:
@@ -263,4 +278,5 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         checkpoint_db=data.get("checkpoint_db", "~/.tmux_orchestrator/checkpoint.db"),
         telemetry_enabled=data.get("telemetry_enabled", False),
         otlp_endpoint=data.get("otlp_endpoint", ""),
+        repo_root=Path(data["repo_root"]).expanduser().resolve() if data.get("repo_root") else None,
     )

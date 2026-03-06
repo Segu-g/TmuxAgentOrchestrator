@@ -146,3 +146,117 @@ def test_patch_web_url_skips_non_claude_agents(tmp_path):
     # Should not raise or touch the mock's _web_base_url
     patch_web_url(orch, "localhost", 8000)
     assert not hasattr(agent, "_web_base_url") or agent._web_base_url != "http://localhost:8000"
+
+
+# ---------------------------------------------------------------------------
+# repo_root config field (v1.0.0 worktree cwd bug fix)
+# ---------------------------------------------------------------------------
+
+
+def test_build_system_uses_config_repo_root(tmp_path):
+    """When OrchestratorConfig.repo_root is set (via YAML), WorktreeManager
+    is initialised with that path instead of Path.cwd().
+
+    This prevents the 'cwd=PROJECT_ROOT' demo bug where worktrees were
+    accidentally created inside the orchestrator's own repo when a demo script
+    launched the server from the project root.
+    """
+    # Create a fake git repo under tmp_path to give WorktreeManager a valid root.
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    (repo / ".git").mkdir()
+
+    cfg_content = f"""\
+session_name: test-repo-root
+mailbox_dir: /tmp/orch-test-mailbox
+repo_root: {repo}
+agents: []
+"""
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text(cfg_content)
+
+    captured_roots: list = []
+
+    class _CapturingWM:
+        def __init__(self, root):
+            captured_roots.append(Path(root).resolve())
+
+        @staticmethod
+        def find_repo_root(start):
+            return repo.resolve()
+
+        def _ensure_gitignore(self):
+            pass
+
+    with (
+        patch("tmux_orchestrator.factory.TmuxInterface") as MockTmux,
+        patch("tmux_orchestrator.factory.WorktreeManager", new=_CapturingWM),
+    ):
+        MockTmux.return_value = MagicMock()
+        build_system(cfg_file)
+
+    assert len(captured_roots) == 1, "WorktreeManager should be instantiated once"
+    assert captured_roots[0] == repo.resolve(), (
+        f"WorktreeManager should use config.repo_root={repo.resolve()!r}, "
+        f"got {captured_roots[0]!r}"
+    )
+
+
+def test_build_system_config_path_parent_used_when_no_repo_root(tmp_path):
+    """When repo_root is not set and the config file sits inside a git repo,
+    config_path.parent is used as the WorktreeManager base — not Path.cwd().
+
+    This is the 'good heuristic' path: if the YAML is committed inside the
+    target repo the config's directory is always a valid git repo ancestor.
+    """
+    # Create git repo at tmp_path level
+    (tmp_path / ".git").mkdir()
+
+    cfg_file = tmp_path / "config.yaml"
+    cfg_file.write_text("session_name: s\nagents: []\n")
+
+    captured_roots: list = []
+
+    class _CapturingWM:
+        def __init__(self, root):
+            captured_roots.append(Path(root).resolve())
+
+        @staticmethod
+        def find_repo_root(start):
+            return tmp_path.resolve()
+
+        def _ensure_gitignore(self):
+            pass
+
+    with (
+        patch("tmux_orchestrator.factory.TmuxInterface") as MockTmux,
+        patch("tmux_orchestrator.factory.WorktreeManager", new=_CapturingWM),
+    ):
+        MockTmux.return_value = MagicMock()
+        build_system(cfg_file)
+
+    assert len(captured_roots) == 1
+    # Should use config_path.parent (tmp_path) rather than cwd
+    assert captured_roots[0] == tmp_path.resolve()
+
+
+def test_load_config_repo_root_parsed(tmp_path):
+    """repo_root in YAML is parsed into an absolute Path."""
+    from tmux_orchestrator.config import load_config
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"repo_root: {tmp_path}\nagents: []\n")
+
+    config = load_config(cfg)
+    assert config.repo_root == tmp_path.resolve()
+
+
+def test_load_config_repo_root_defaults_to_none(tmp_path):
+    """When repo_root is absent from YAML, config.repo_root is None."""
+    from tmux_orchestrator.config import load_config
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("agents: []\n")
+
+    config = load_config(cfg)
+    assert config.repo_root is None

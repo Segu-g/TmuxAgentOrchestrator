@@ -88,9 +88,26 @@ def build_system(
     )
     mailbox = Mailbox(root_dir=config.mailbox_dir, session_name=config.session_name)
 
+    # Determine the base directory for git worktree operations.
+    # Priority:
+    #   1. config.repo_root — explicit override (resolves the "cwd=PROJECT_ROOT" demo bug
+    #      where launching from a non-repo directory caused worktrees to land in the wrong repo).
+    #   2. config_path.parent — directory containing the YAML config file (good heuristic: the
+    #      config is typically committed inside the target repo, so its parent is a .git ancestor).
+    #   3. Path.cwd() — legacy fallback for callers that don't set repo_root and launch from
+    #      inside the target repo (pre-v1.0.0 behaviour; preserved for backwards compatibility).
+    #
+    # Reference: DESIGN.md §10.17 (v1.0.0 — worktree cwd bug fix)
     cwd = Path.cwd()
+    wm_base: Path
+    if config.repo_root is not None:
+        wm_base = config.repo_root
+    elif WorktreeManager.find_repo_root(config_path.parent) is not None:
+        wm_base = config_path.parent
+    else:
+        wm_base = cwd
     try:
-        wm: WorktreeManager | None = WorktreeManager(cwd)
+        wm: WorktreeManager | None = WorktreeManager(wm_base)
     except RuntimeError:
         logger.warning("Not inside a git repository; worktree isolation disabled")
         wm = None

@@ -3001,6 +3001,89 @@ v0.48.0 で汎用宣言的ワークフロー API と Phase 一級市民化が完
 
 ---
 
+## 10.17 v1.0.0 — 安定化・リリース検証 (2026-03-06)
+
+### 選定理由
+
+v0.49.0 でエージェント自律実行方式変更（§12 層3）が完了し、主要な機能層がすべて揃った。
+次のステップは新機能実装ではなく、**既知バグの修正と全体的な品質検証による v1.0.0 リリース**。
+
+**選択したもの**:
+- `repo_root` cwd バグ修正 — デモの `cwd=PROJECT_ROOT` がオーケストレーターリポジトリに worktree を汚染する問題
+- 全1060件テスト実行・確認
+- OpenAPI スナップショット最新化
+- DESIGN.md §10.17 調査記録追加
+- v1.0.0 リリース (pyproject.toml バージョン更新・CHANGELOG・git tag)
+
+**選択しなかったもの**:
+- 新機能（`POST /workflows/delphi`、エージェントドリフト検出等）— 品質ゲートを先に通過する
+- §11 バックログの実装 — v1.0.0 はリリース品質確保が目的
+
+### Step 1: 事前調査 (WebSearch)
+
+#### 1.1 ソフトウェアリリースチェックリスト v1.0 品質ゲート基準
+
+**Sources**:
+- [Software Release Checklist For Smooth Deployments (Cortex, 2024)](https://www.cortex.io/post/software-release-checklist) — プロダクション準備スコアリング（コード品質・セキュリティ・ドキュメント・標準チェック）
+- [The Essential Release Checklist 2026 (Apwide)](https://www.apwide.com/the-essential-release-checklist/) — フェーズ別チェックリスト
+- [Software Quality Gates: What They Are & Why They Matter (testRigor)](https://testrigor.com/blog/software-quality-gates/) — Pass/Warning/Fail の3ステータスゲート
+
+**知見**:
+- 品質ゲートは「通過/警告/失敗」の3状態で評価する。v1.0.0 は全テスト通過 (Pass) を必須とする。
+- リリース前チェックリストには機能テスト・互換性テスト・セキュリティテスト・パフォーマンステストを含める。
+- 本プロジェクトでの適用: 1064 件のテストが全通過、OpenAPI スナップショット一致、worktree 汚染なし。
+
+#### 1.2 主要リリース前の回帰テスト戦略
+
+**Sources**:
+- [Regression Testing: A Guide for QA Teams (TestRail)](https://www.testrail.com/blog/regression-testing/) — Full-suite execution は主要リリース・アーキテクチャ変更時に必須
+- [Understanding Regression Testing: Strategy, Automation & Best Practices (DEV Community)](https://dev.to/dmitrybaraishuk/understanding-regression-testing-strategy-automation-best-practices-14mk) — 高優先度サブセットは全コミット・フルスイートは主要リリース前
+- [What to Include in a Regression Test Plan (BrowserStack)](https://www.browserstack.com/guide/regression-test-plan) — テストケースにメタデータ（優先度・コンポーネント・最終実行日）を付加
+
+**知見**:
+- v1.0.0 では「全スイート実行」が適切（アーキテクチャ変更 + 全機能層完成）。
+- テスト結果: 1064 passed, 3 warnings in 38.10s — 全通過確認。
+
+#### 1.3 マルチエージェントフレームワークのリリース安定性基準
+
+**Sources**:
+- [Agentic AI Frameworks: Complete Enterprise Guide (SpaceO, 2026)](https://www.spaceo.ai/blog/agentic-ai-frameworks/) — フレームワーク評価: 機能完全性・プロダクション準備・ガバナンス・DX
+- [Introducing Agent Readiness (Factory.ai)](https://factory.ai/news/agent-readiness) — 8技術柱: 状態永続化・観測可能性・エラー処理が生産グレード自律動作の最低要件
+- [AI Agent Frameworks: A Guide to Evaluating Agentic Platforms (TechTarget)](https://www.techtarget.com/searchenterpriseai/feature/AI-agent-frameworks-A-guide-to-evaluating-agentic-platforms) — 機能完全性・長期安定性のエコシステム成熟度
+
+**知見**:
+- 生産グレードに必要な要素: 状態永続化 (v0.45.0 ✓)・観測可能性/OTel (v0.47.0 ✓)・エラー処理/サーキットブレーカー (v0.10.0 ✓)・セキュリティ (v0.44.0 ✓)
+- OpenAI Swarm が「非生産グレード」とされた理由（状態永続化・観測可能性・エラー処理の欠如）を本プロジェクトはすべて解決済み。
+
+### Step 2: 発見したバグと対応
+
+#### バグ1: worktree cwd バグ
+
+**症状**: デモの `demo.py` が `cwd=PROJECT_ROOT` でサーバーを起動すると `WorktreeManager(Path.cwd())` がオーケストレーターの TmuxAgentOrchestrator リポジトリに worktree を作成してしまう。
+
+**根本原因**: `factory.py` 行91 `cwd = Path.cwd()` で `WorktreeManager` を初期化しており、`Path.cwd()` はサーバー起動時の作業ディレクトリに依存していた。
+
+**修正内容**:
+1. `OrchestratorConfig.repo_root: Path | None = None` フィールドを追加 (YAML: `repo_root: /path/to/repo`)
+2. `config.py` の `load_config()` で `repo_root` を解析・絶対パス変換
+3. `factory.py` の `build_system()` で優先順位付きの wm_base 解決ロジックを追加:
+   - 優先1: `config.repo_root` — 明示オーバーライド
+   - 優先2: `config_path.parent` — YAML ファイルが git リポジトリ内に存在する場合
+   - 優先3: `Path.cwd()` — レガシーフォールバック（後方互換性維持）
+4. テスト4件追加: `test_build_system_uses_config_repo_root`・`test_build_system_config_path_parent_used_when_no_repo_root`・`test_load_config_repo_root_parsed`・`test_load_config_repo_root_defaults_to_none`
+
+**結果**: 1064 passed (旧 1060 + 新 4件)
+
+#### バグ2: .worktrees/ の残留汚染
+
+確認結果: `/home/segument/Projects/TmuxAgentOrchestrator/.worktrees/` は空（残留なし）。
+
+#### バグ3: OpenAPI スナップショットの陳腐化
+
+`UPDATE_SNAPSHOTS=1 uv run pytest tests/test_openapi_schema.py` を実行して最新化済み。
+
+---
+
 ## 11. 今後の課題
 
 > バックログは §12「ワークフロー設計の層構造」の5層モデルに基づいて再整理されている。

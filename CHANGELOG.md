@@ -6,6 +6,97 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.0.0] — 2026-03-06
+
+### Summary
+
+First stable release. Fixes the **worktree cwd bug** introduced when demo scripts launched the
+server with `cwd=PROJECT_ROOT`, causing agent worktrees to be created inside the orchestrator's
+own repository instead of the demo's working directory. All 1064 tests pass.
+
+### Added
+
+- `OrchestratorConfig.repo_root: Path | None` field — explicit override for the git repository
+  root used by `WorktreeManager`. Settable via YAML (`repo_root: /path/to/repo`) or
+  programmatically. When set, worktrees are always created under `{repo_root}/.worktrees/`
+  regardless of `Path.cwd()` at server launch time. (DESIGN.md §10.17)
+
+### Fixed
+
+- **worktree cwd bug**: `factory.build_system()` now resolves the `WorktreeManager` base path
+  using a priority chain:
+  1. `config.repo_root` (explicit override — new)
+  2. `config_path.parent` (config file's directory, a reliable git-repo ancestor when the YAML is
+     committed inside the target repo — new)
+  3. `Path.cwd()` (legacy fallback, preserved for backwards compatibility)
+
+  Previously, only `Path.cwd()` was used, so launching from a directory that contained a `.git`
+  higher up the tree (e.g. the orchestrator project root) caused worktrees to land there.
+
+### Changed
+
+- `load_config()` parses the new `repo_root` YAML field and resolves it to an absolute path.
+
+### Tests
+
+- 4 new tests in `tests/test_factory.py` covering `repo_root` config parsing and factory
+  worktree base path resolution.
+- Total: **1064 tests passing**.
+
+### Major Features (cumulative, since v0.1.0)
+
+| Version | Feature |
+|---------|---------|
+| v0.2.0 | Async pub/sub Bus, Orchestrator task queue, TUI + Web UI |
+| v0.5.0 | AgentRegistry (DDD Aggregate) |
+| v0.6.0 | SystemFactory / build_system() |
+| v0.7.0 | Structured JSON logging + trace_id |
+| v0.8.0 | Workflow builder (topological sort) |
+| v0.9.0 | Bounded task queue, stop() awaits tasks |
+| v0.10.0 | supervised_task(), watchdog, idempotency, BusStateMachine |
+| v0.11.0 | context_files auto-copy, GET /agents/tree |
+| v0.12.0 | Error recovery SSE, agent reset |
+| v0.13.0 | Real ClaudeCodeAgent integration |
+| v0.14.0 | Result routing (reply_to) |
+| v0.15.0 | AHC Best-of-N demo (3 real agents) |
+| v0.16.0 | Peer review pipeline, P2P messaging |
+| v0.17.0 | Director-workers hierarchical pattern |
+| v0.18.0 | Capability tags (required_tags dispatch) |
+| v0.19.0 | Pause/resume, priority queue |
+| v0.20.0 | Rate limiting (token bucket) |
+| v0.21.0 | Context monitor (token-count polling) |
+| v0.22.0 | Dynamic agent spawning at runtime |
+| v0.23.0 | Queue-depth autoscaling (MAPE-K) |
+| v0.24.0 | Task result persistence (JSONL Event Sourcing) |
+| v0.25.0 | Workflow DAG (POST /workflows) |
+| v0.26.0 | Task retry with exponential backoff |
+| v0.27.0 | Task cancellation |
+| v0.28.0 | Agent drain (graceful shutdown) |
+| v0.29.0 | Task dependencies (depends_on) |
+| v0.30.0 | Webhook notifications |
+| v0.31.0 | Named agent groups |
+| v0.32.0 | Priority inheritance |
+| v0.33.0 | Task TTL (time-to-live expiry) |
+| v0.34.0 | /notify slash command |
+| v0.35.0 | API key security |
+| v0.36.0 | POST /workflows/tdd |
+| v0.37.0 | POST /workflows/debate (advocate/critic/judge) |
+| v0.38.0 | Stop hook completion detection |
+| v0.39.0 | Role template library (system_prompt_file YAML) |
+| v0.40.0 | POST /workflows/adr (Architecture Decision Record) |
+| v0.41.0 | Codified Context (context_spec_files glob) |
+| v0.42.0 | POST /workflows/fulldev (5-agent full dev lifecycle) |
+| v0.43.0 | Worktree integrity checker |
+| v0.44.0 | Security hardening (rate limiting, audit log, CORS, prompt sanitization) |
+| v0.45.0 | SQLite checkpoint persistence |
+| v0.46.0 | ProcessPort abstraction (Clean Architecture) |
+| v0.47.0 | OpenTelemetry GenAI Semantic Conventions tracing |
+| v0.48.0 | Generic declarative workflow API (phases=) + Phase first-class citizens |
+| v0.49.0 | Autonomous strategy change (POST /agents/{id}/change-strategy) |
+| v1.0.0  | Worktree cwd bug fix (repo_root field), 1064 tests passing |
+
+---
+
 ## [0.49.0] — 2026-03-06
 
 ### Added
