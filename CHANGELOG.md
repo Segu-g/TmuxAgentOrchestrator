@@ -6,6 +6,35 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.39.0] — 2026-03-06
+
+### Added
+
+**Role-based system_prompt template library + `system_prompt_file:` YAML field**
+
+- `AgentConfig.system_prompt_file: str | None` — new YAML field; relative paths are
+  resolved from the config file's directory; absolute paths are used as-is.
+- `factory._resolve_system_prompt(agent_cfg, config_path)` — resolves effective system
+  prompt with priority: explicit `system_prompt` > `system_prompt_file` > None.
+  Raises `FileNotFoundError` if the specified file does not exist.
+- 4 new role template files in `.claude/prompts/roles/`:
+  - `tester.md` — TDD-focused test design agent with sycophancy suppression
+  - `implementer.md` — implementation agent, respects spec and test constraints
+  - `reviewer.md` — code reviewer with structured BLOCKING/NON-BLOCKING/SUGGESTION format
+  - `spec-writer.md` — specification writer with acceptance criteria and glossary format
+- All 7 role templates (including existing advocate/critic/judge) now available.
+- Each new template includes: role definition, prohibited behaviours, completion
+  criteria, workflow guidance, and sycophancy suppression instruction
+  (CONSENSAGENT ACL 2025 — Pitre et al.).
+- 29 new unit tests in `tests/test_system_prompt_file.py`.
+
+### References
+
+- ChatEval ICLR 2024 (arXiv:2308.07201): role diversity is the critical factor
+- CONSENSAGENT ACL 2025 (Pitre, Ramakrishnan, Wang): sycophancy suppression
+
+---
+
 ## [0.38.0] — 2026-03-06
 
 ### Added

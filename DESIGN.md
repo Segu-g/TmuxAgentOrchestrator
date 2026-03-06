@@ -1863,6 +1863,64 @@ Stop Hook の具体的な HTTP 設定例:
 
 ---
 
+## 10.13 役割別 system_prompt テンプレートライブラリ + `system_prompt_file:` フィールド (v0.39.0) — 選定・調査記録
+
+### 選定根拠
+
+**選択: 役割別 system_prompt テンプレートライブラリ + `system_prompt_file:` YAML フィールド**
+
+§11 高優先度項目の中で本項目を選んだ理由:
+1. **直接ユーザー向け新機能**: エージェント設定の簡略化と役割特化プロンプトの標準化は、すべての後続ワークフロー（ADR, debate, delphi, redblue, socratic）の品質を底上げする基盤。
+2. **研究的裏付けが最も強い**: ChatEval ICLR 2024 が「役割の多様性が討論品質を決定する最重要因子」と実証済み。
+3. **実装コストが低い**: `AgentConfig` に1フィールドを追加し、`.claude/prompts/roles/` にMarkdownファイルを配置するだけ。既存の `context_files` 機構とも相補的。
+4. **後続 ADR ワークフローの前提条件**: `system_prompt_file: roles/proposer.md` を YAML で参照できないと、ADR ワークフローの実装が煩雑になる。
+
+**非選択: `POST /workflows/adr`**
+ADR ワークフローはロールテンプレートライブラリが揃ってから実装する方が品質が高い。依存関係の順序として本項目が先。
+
+**非選択: Codified Context インフラ**
+有用だが `context_files` (v0.11.0) の自然な拡張であり、ロールテンプレートよりもユーザー向け即効性が低い。
+
+**非選択: チェックポイント永続化**
+SQLite 追加は実装コストが高く、現在のプロジェクトフォーカスではない。
+
+### WebSearch 調査結果
+
+**Query 1**: "role-based system prompts multi-agent LLM orchestration best practices 2025"
+- SE-ML "Engineering LLM-Based Agentic Systems" (2025) — https://se-ml.github.io/blog/2025/agentic/: Role-Based Cooperation は16のMASデザインパターンの中で最も頻繁に使われる。Manual plan definitions でヒューマンが役割・プロンプトテンプレートを定義することがモデル挙動の制約に有効。
+- Clarifai "Agentic Prompt Engineering" — https://www.clarifai.com/blog/agentic-prompt-engineering: system/user/assistant/tool ロール構造に加え、agentic 設定では planner/executor/reviewer ロールが推奨される。
+- OpenAI Agents SDK (2025) — https://openai.github.io/openai-agents-python/multi_agent/: エージェントごとに役割特化した instructions を与えることが orchestration の基本。
+- arXiv:2511.08475 "Designing LLM-based Multi-Agent Systems for Software Engineering Tasks": 役割の明確な分離と反復フィードバックを持つシステムが最高性能を示す。
+
+**Query 2**: "ChatEval role diversity multi-agent debate quality ICLR 2024"
+- Chan et al. "ChatEval: Towards Better LLM-based Evaluators through Multi-Agent Debate", ICLR 2024, arXiv:2308.07201 — https://arxiv.org/abs/2308.07201: **「diverse role prompts (異なるペルソナ) はマルチエージェント討論において必須。同一ロール説明を使うと性能劣化する」**。One-by-one 通信戦略が同期放送型より効果的。
+
+**Query 3**: "sycophancy suppression prompt engineering multi-agent AI agent role adherence 2025"
+- Giskard "Sycophancy in LLMs" — https://www.giskard.ai/knowledge/when-your-ai-agent-tells-you-what-you-want-to-hear-understanding-sycophancy-in-llms: 迎合（sycophancy）は RLHF 訓練の副産物。エージェントが相互の回答に同調しがちになり討論が機能しなくなる。
+- Anthropic "Effective Context Engineering for AI Agents" (2025-09-29) — https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents: エージェントのシステムプロンプトは「最小限の情報で期待される挙動を完全に記述する」ことを目標にする。
+
+**Query 4**: "CONSENSAGENT ACL 2025 multi-agent consensus sycophancy suppression prompt"
+- Pitre, Ramakrishnan, Wang "CONSENSAGENT: Towards Efficient and Effective Consensus in Multi-Agent LLM Interactions Through Sycophancy Mitigation", ACL Findings 2025 — https://aclanthology.org/2025.findings-acl.1141/: **迎合抑制プロンプトを動的に注入することで、精度向上と効率改善（討論ラウンド数削減）を同時に達成。6ベンチマーク・3モデルで SOTA。** 「エージェントが他エージェントの答えを見て迎合的に同意する」挙動を明示的に禁止する指示がシステムプロンプトに必要。
+
+**主要設計決定:**
+
+1. `.claude/prompts/roles/` に以下の7種類のMarkdownテンプレートを提供:
+   - `tester.md` — テスト設計者・TDD サイクル担当
+   - `implementer.md` — 実装担当・コード生成
+   - `reviewer.md` — コードレビュー・品質チェック
+   - `spec-writer.md` — 仕様文書作成
+   - `judge.md` — 最終判定（debate/delphi 用）
+   - `advocate.md` — 提案側（debate 用）
+   - `critic.md` — 批評側（debate 用）
+
+2. `AgentConfig.system_prompt_file: str | None` — YAML でロールテンプレートファイルへのパスを指定。`factory.py` の `build_system()` がファイルを読み込み、`AgentConfig.system_prompt` に設定する。`system_prompt_file` と `system_prompt` が両方指定された場合は `system_prompt` が優先。
+
+3. 迎合抑制指示（CONSENSAGENT 準拠）を各テンプレートに含める: 「他エージェントの意見に単純同意しない・前の回答を参照しても自分の判断を保持する」。
+
+4. 各テンプレートに「役割・禁止事項・完了条件・/plan /tdd の使い方」を記述した標準フォーマットを使用。
+
+---
+
 ## 11. 今後の課題
 
 > 以下のバックログは、完了済み項目（旧 §11 テーブルの全 ~~完了~~ エントリ、§10.N 実装履歴）を除去し、

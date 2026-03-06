@@ -26,6 +26,12 @@ class AgentConfig:
     command: str | None = None  # custom command (defaults to claude CLI)
     # --- Context engineering fields ---
     system_prompt: str | None = None  # injected into agent's CLAUDE.md at startup
+    # system_prompt_file: path to a Markdown role template file (relative to
+    # config file directory or absolute).  Content is read at build_system() time
+    # and used as system_prompt when system_prompt is not explicitly set.
+    # Reference: ChatEval ICLR 2024 (arXiv:2308.07201) — role diversity critical.
+    # Reference: CONSENSAGENT ACL 2025 — sycophancy suppression via role prompts.
+    system_prompt_file: str | None = None
     context_files: list[str] = field(default_factory=list)  # paths (relative to cwd) to pre-load
     # --- Capability tags for smart dispatch ---
     # Tasks with required_tags are only dispatched to agents whose tags include
@@ -161,6 +167,7 @@ def load_config(path: str | Path) -> OrchestratorConfig:
             task_timeout=a.get("task_timeout"),
             command=a.get("command"),
             system_prompt=a.get("system_prompt"),
+            system_prompt_file=a.get("system_prompt_file"),
             context_files=a.get("context_files", []),
             tags=a.get("tags", []),
             groups=a.get("groups", []),

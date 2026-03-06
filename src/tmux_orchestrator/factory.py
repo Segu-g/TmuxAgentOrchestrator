@@ -27,6 +27,34 @@ from tmux_orchestrator.worktree import WorktreeManager
 logger = logging.getLogger(__name__)
 
 
+def _resolve_system_prompt(agent_cfg, config_path: Path) -> str | None:
+    """Resolve the effective system prompt for an agent.
+
+    Priority:
+    1. ``agent_cfg.system_prompt`` — explicit inline prompt wins.
+    2. ``agent_cfg.system_prompt_file`` — read content from file.
+    3. ``None`` — no system prompt.
+
+    Relative paths in ``system_prompt_file`` are resolved from the directory
+    containing *config_path*.
+
+    Raises FileNotFoundError if the file does not exist.
+    """
+    if agent_cfg.system_prompt is not None:
+        return agent_cfg.system_prompt
+    if agent_cfg.system_prompt_file is not None:
+        sp_path = Path(agent_cfg.system_prompt_file)
+        if not sp_path.is_absolute():
+            sp_path = config_path.parent / sp_path
+        if not sp_path.exists():
+            raise FileNotFoundError(
+                f"system_prompt_file not found: {sp_path!r} "
+                f"(specified in agent '{agent_cfg.id}')"
+            )
+        return sp_path.read_text()
+    return None
+
+
 def build_system(
     config_path: Path,
     *,
@@ -90,7 +118,7 @@ def build_system(
                 role=agent_cfg.role,
                 command=agent_cfg.command
                 or "env -u CLAUDECODE claude --dangerously-skip-permissions",
-                system_prompt=agent_cfg.system_prompt,
+                system_prompt=_resolve_system_prompt(agent_cfg, config_path),
                 context_files=agent_cfg.context_files,
                 context_files_root=cwd if agent_cfg.context_files else None,
                 tags=agent_cfg.tags,
