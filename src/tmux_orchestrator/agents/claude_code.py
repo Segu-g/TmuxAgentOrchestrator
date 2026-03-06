@@ -672,6 +672,17 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
                 settle = 0
                 prev = text
             if settle >= _SETTLE_CYCLES and _looks_done(text):
+                # Reaching here means the Stop hook did NOT fire before polling
+                # detected completion — the hook is either misconfigured, the
+                # web server is unreachable, or the API key is wrong.
+                # Emit a warning so operators know the hook is not working.
+                logger.warning(
+                    "Agent %s: task %s completed via polling fallback — "
+                    "Stop hook did not fire (check web_base_url, API key, "
+                    "and .claude/settings.local.json in the worktree)",
+                    self.id,
+                    task.id,
+                )
                 await self.handle_output(text)
                 return
 
