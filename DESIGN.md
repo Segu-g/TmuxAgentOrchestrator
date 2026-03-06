@@ -16,7 +16,9 @@
 7. [エージェントワークフローとスキル](#7-エージェントワークフローとスキル)
 8. [参考文献](#8-参考文献)
 9. [実装履歴](#9-実装履歴)
-10. [今後の課題](#10-今後の課題)
+10. [調査記録](#10-調査記録-2026-03-05)
+11. [今後の課題](#11-今後の課題)
+12. [ワークフロー設計の層構造（概念モデル）](#12-ワークフロー設計の層構造概念モデル)
 
 ---
 
@@ -2586,16 +2588,246 @@ class ProcessPort(Protocol):
 
 ---
 
+## 10.14 v0.47.0 — OpenTelemetry GenAI Semantic Conventions 準拠トレース出力 (2026-03-06)
+
+### 選択理由
+
+**選択: OpenTelemetry GenAI Semantic Conventions トレース出力**
+
+v0.46.0 の ProcessPort 抽象化が完了した。次は §11 バックログの
+「OpenTelemetry GenAI Semantic Conventions 準拠トレース出力」を選択する。
+選択理由:
+1. **業界標準への準拠**: OpenTelemetry が AI エージェント可観測性の業界標準として収斂しており、
+   `gen_ai.*` 属性の採用が Datadog, Jaeger 等のバックエンドとの統合に直結する。
+2. **既存基盤の活用**: v0.7.0 で導入した `trace_id` ベースの構造化ログ (`logging_config.py`) が
+   既に存在しており、OTel スパンとの統合コストが低い。
+3. **運用価値**: マルチエージェント実行のボトルネック特定・エラー追跡に直接役立つ。
+
+**選択しなかったもの**:
+- 役割別 system_prompt テンプレートライブラリ: ユーザー向け価値は高いが今回は見送り
+- エージェントドリフト検出: ロールテンプレートが先に必要
+
+### 調査 (Step 1 — WebSearch)
+
+#### 参考文献
+
+1. **"Semantic Conventions for GenAI agent and framework spans"** OpenTelemetry docs
+   https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-agent-spans/
+   `gen_ai.operation.name = "invoke_agent"` または `"create_agent"` が推奨。
+   属性: `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.agent.description`, `gen_ai.agent.version`。
+   Span kind: INTERNAL (同一プロセス内エージェント呼び出し) または CLIENT (別プロセス)。
+
+2. **"Semantic conventions for generative AI systems"** OpenTelemetry docs
+   https://opentelemetry.io/docs/specs/semconv/gen-ai/
+   `gen_ai.system` 属性 (例: `"claude"`)、`gen_ai.request.model`、`gen_ai.usage.input_tokens`、
+   `gen_ai.usage.output_tokens` がコアの GenAI スパン属性。
+
+3. **"OpenTelemetry for Generative AI"** OpenTelemetry Blog (2024)
+   https://opentelemetry.io/blog/2024/otel-generative-ai/
+   instrumentation-genai プロジェクトが Python OpenAI クライアントのトレース収集を自動化。
+   `gen_ai.request.model`、トークンカウント、tool calls を span attributes として記録。
+
+4. **"OpenTelemetry OTLP Exporters"** opentelemetry-python docs
+   https://opentelemetry-python.readthedocs.io/en/latest/exporter/otlp/otlp.html
+   `BatchSpanProcessor` + `OTLPSpanExporter` が本番用途の標準パターン。
+   `OTEL_EXPORTER_OTLP_ENDPOINT` 環境変数で設定可能。未設定時は `ConsoleSpanExporter` にフォールバック。
+
+5. **"opentelemetry.sdk.trace"** Python docs
+   https://opentelemetry-python.readthedocs.io/en/latest/sdk/trace.html
+   `TracerProvider` + `tracer = provider.get_tracer("tmux_orchestrator")` パターン。
+   `with tracer.start_as_current_span("invoke_agent")` でコンテキストマネージャー形式のスパン作成。
+
+#### 設計決定
+
+`src/tmux_orchestrator/telemetry.py` を新規作成:
+- `setup_tracing(service_name, otlp_endpoint)`: TracerProvider を初期化
+- `get_tracer()`: モジュールレベルの Tracer を返す
+- `agent_span(agent_id, task_id, prompt)`: `invoke_agent` スパンを `gen_ai.*` 属性付きで作成
+- `OTEL_EXPORTER_OTLP_ENDPOINT` 未設定時は `ConsoleSpanExporter` + JSON ログに出力
+
+エージェントライフサイクルへの統合:
+- `submit_task()`: `task_queued` スパン
+- `_dispatch_loop()`: `invoke_agent` スパン (タスク開始〜完了)
+- `_route_loop()`: タスク完了/失敗時にスパンを close
+
+新規依存: `opentelemetry-sdk>=1.24`, `opentelemetry-exporter-otlp-proto-grpc>=1.24` (オプション)
+
+---
+
+## 12. ワークフロー設計の層構造（概念モデル）
+
+> このセクションはユーザーとの議論（2026-03-06）から生まれた設計思想の整理です。
+> 現在の実装はこのモデルの下位層（層4・5）から段階的に構築されており、
+> 上位層（層1・2）は今後の実装目標です。
+
+---
+
+### 設計思想
+
+フレームワークの機能は「**ワークフロー本体**」と「**ツール・マネジメント**」に明確に分離できる。
+ワークフロー本体はさらに「フェーズ設計」「フェーズ管理」「実行方式」「コンテキスト伝達」の4層に分解される。
+
+---
+
+### 5層モデル
+
+#### 層1：ワークフロー設計（フェーズを決める）
+
+「何フェーズで何をするか」を決める。
+
+- **宣言的モード**: ユーザーが YAML/JSON で事前に指定する
+- **自律モード**: Planner ロールのエージェントが自律的にフェーズを設計する
+
+エージェントが設計する場合、タスクの複雑さ・依存関係・リスクを評価して
+フェーズ構成を動的に決定する。これは現行の Director パターンの発展形。
+
+#### 層2：フェーズ管理
+
+フェーズを一級市民として追跡・管理する仕組み。
+
+- フェーズの生成・遷移（進行中→完了→次フェーズ解放）・失敗のハンドリング
+- **現状の実装**: `depends_on` + Task の組み合わせでフェーズを暗黙的に表現している。
+  明示的な `Phase` 概念は存在しない。これが今後の中心的な抽象化課題。
+
+#### 層3：ステージの実行方式
+
+各フェーズを**どう動かすか**。ユーザーが指定しない場合はエージェントが自律判断する。
+
+| 方式 | 説明 | 現在の実装 |
+|------|------|-----------|
+| `single` | 単一エージェントが担当 | デフォルト |
+| `parallel` | 複数エージェントが同一フェーズを並列実行 | `target_group` + agent groups |
+| `competitive` | N エージェントが同問題に取り組み、最良解を選択 | Best-of-N（手動評価） |
+| `debate` | Advocate/Critic/Judge 構成で合議 | `POST /workflows/debate` |
+| `delphi` | 複数専門家ペルソナが多ラウンド合意形成 | 予定 |
+
+**自律切り替え**: 担当エージェントがフェーズの複雑さを判断し、
+単独では困難と判断した場合に実行方式を変更できる仕組みが必要（将来実装）。
+
+#### 層4：コンテキスト伝達
+
+フェーズ間で成果物・情報をどう受け渡すか。
+
+| 手段 | 用途 |
+|------|------|
+| Scratchpad (Blackboard) | フェーズ成果物の非同期共有（主要手段） |
+| `context_files` | 静的ファイルのワークツリーへのコピー |
+| `context_spec_files` | glob パターンで仕様書を自動配布 |
+| `system_prompt_file` | ロールテンプレートを CLAUDE.md に注入 |
+| `reply_to` | タスク完了時に結果を別エージェントへ直接配送 |
+
+#### 層5：ツール・マネジメント（直交する別概念）
+
+ワークフロー定義とは独立して動作する横断的機能。
+
+| カテゴリ | 機能 |
+|----------|------|
+| **通信** | P2P メッセージング、mailbox、Bus pub/sub |
+| **ライフサイクル** | retry、TTL、watchdog、circuit breaker、drain、idempotency |
+| **観測** | ContextMonitor、audit log、worktree integrity、agent stats |
+| **セキュリティ** | rate limit、prompt sanitization、API key 認証、CORS |
+
+---
+
+### 2つの制御モード
+
+```
+宣言的モード（ユーザー指定）
+  POST /workflows
+  {
+    "phases": [
+      { "name": "design",     "pattern": "debate"     },
+      { "name": "implement",  "pattern": "parallel:3" },
+      { "name": "review",     "pattern": "single"     }
+    ]
+  }
+
+自律モード（エージェント自律）
+  → Planner エージェントがフェーズを設計
+  → 各フェーズ担当エージェントが実行方式を自律判断
+  → 未指定フィールドのデフォルト: single
+```
+
+---
+
+### 現状と今後の目標
+
+| 層 | 現状 | 今後 |
+|----|------|------|
+| 層1 ワークフロー設計 | ハードコードされたテンプレート群 | Planner エージェントによる自律設計・汎用宣言API |
+| 層2 フェーズ管理 | `depends_on` + Task で暗黙表現 | Phase 一級市民 + フェーズ状態 API |
+| 層3 実行方式 | テンプレートに固定（/workflows/debate 等） | フェーズごとに動的指定・エージェント自律変更 |
+| 層4 コンテキスト伝達 | Scratchpad + context_files 等、充実 | 維持・改善 |
+| 層5 ツール・マネジメント | セキュリティ・観測・通信、充実 | 維持・改善 |
+
+---
+
 ## 11. 今後の課題
 
-> 以下のバックログは、完了済み項目（旧 §11 テーブルの全 ~~完了~~ エントリ、§10.N 実装履歴）を除去し、
-> 4 リサーチエージェントの調査結果（multi-LLM orchestration / clean arch / 形式手法 /
-> コンテキストエンジニアリング / 討論・合意形成）を重複排除・統合した単一バックログである。
+> バックログは §12「ワークフロー設計の層構造」の5層モデルに基づいて再整理されている。
+> 各項目がどの層に属するかを明示することで、実装の依存関係と優先度の根拠を明確にする。
 >
 > 優先度基準:
 > - **高** — 直接ユーザー向け新機能 + 強い研究的裏付け + 明確な実装パス + 既存機能を活用
 > - **中** — 有用だがさらなる設計が必要、または高優先度アイテムに依存
 > - **低** — あると良い、複雑、または価値が不確実
+
+---
+
+### 層1・2：ワークフロー設計 × フェーズ管理（最重要・未着手）
+
+| 優先度 | 課題 | 層 |
+|--------|------|----|
+| **高** | **汎用宣言的ワークフロー API** — `POST /workflows` にフェーズ×実行方式を自由に組み合わせられるスキーマを追加。`/workflows/tdd`・`/workflows/debate` 等の固定テンプレートをこのスキーマの設定値として表現できるようにする | 層1 |
+| **高** | **Phase 一級市民化** — 現在 `depends_on` + Task で暗黙表現しているフェーズを明示的な `Phase` オブジェクトとして管理する。フェーズ単位での状態追跡・失敗ハンドリング・再開を可能にする | 層2 |
+| **高** | **Planner エージェントロール** — タスク記述からフェーズ構成を自律設計する `planner.md` ロールテンプレートを追加。`/delegate` コマンドの上位互換として、フェーズ設計→サブエージェント割り当てのフローを公式化 | 層1 |
+
+---
+
+### 層3：ステージの実行方式（追加・自律化）
+
+| 優先度 | 課題 | 層 |
+|--------|------|----|
+| **高** | **エージェント自律による実行方式変更** — 担当エージェントが `/change-strategy parallel:3` のようなコマンドでフェーズの実行方式を動的変更できる仕組みを実装。未指定時のデフォルトは `single` | 層3 |
+| 中 | **`POST /workflows/delphi`** — 3–5 名の専門家ペルソナが多ラウンド合意形成。各ラウンド `delphi_round_{n}.md`、最終 `consensus.md` | 層3 |
+| 中 | **`POST /workflows/redblue`** — blue-team（実装）→ red-team（攻撃者視点）→ arbiter（リスク評価）の対抗評価 | 層3 |
+| 中 | **`/deliberate <question>` スラッシュコマンド** — エージェントが自発的に2エージェント討論を起動し `DELIBERATION.md` を生成 | 層3 |
+
+---
+
+### 層4：コンテキスト伝達（改善）
+
+| 優先度 | 課題 | 層 |
+|--------|------|----|
+| 中 | **コンテキスト4戦略ガイド** — 書き込み・選択・圧縮・分離の4戦略チートシートを CLAUDE.md に追記 | 層4 |
+| 中 | **MIRIX 型エピソード記憶ストア** — タスク完了ごとに `{task_id, summary, outcome, lessons}` を JSONL に記録し、次タスク開始時に直近N件を system prompt に付加 | 層4 |
+| 中 | **スライディングウィンドウ + 重要度スコアによるコンテキスト圧縮** — TF-IDF 類似度でスコア下位 40% を削除する `/summarize` の上位互換 | 層4 |
+
+---
+
+### 層5：ツール・マネジメント（アーキテクチャ品質）
+
+| 優先度 | 課題 | 層 |
+|--------|------|----|
+| **高** | **チェックポイント永続化による中断再開** — SQLite による状態永続化、`--resume` フラグ（v0.45.0 実装中） | 層5 |
+| **高** | **`ProcessPort` 抽象インターフェース抽出** — `ClaudeCodeAgent` の libtmux 直接依存を排除（v0.46.0 予定） | 層5 |
+| **高** | **OpenTelemetry GenAI Semantic Conventions** — `gen_ai.*` 属性 + OTLP エクスポーター（v0.47.0 予定） | 層5 |
+| **高** | **エージェントドリフト検出 (Agent Stability Index)** — 役割逸脱を検出し `agent_drift_warning` イベントを発行 | 層5 |
+| 中 | **`UseCaseInteractor` 層の抽出** — FastAPI ハンドラーから業務ロジックを分離 | 層5 |
+| 中 | **エージェント状態機械の Hypothesis ステートフルテスト** — `AgentStatus` 遷移シーケンスの自動生成テスト | 層5 |
+| 低 | **構造化デバッグ: トレースリプレイ CLI** — `ResultStore` JSONL から過去実行を再現 | 層5 |
+
+---
+
+### ワークフローテンプレート・ドキュメント整備
+
+| 優先度 | 課題 |
+|--------|------|
+| 中 | **`examples/workflows/` YAML テンプレートライブラリ** — 各ワークフローを自己完結 YAML として収録 |
+| 中 | **`POST /workflows/clean-arch`** — 4レイヤー分解ワークフロー（domain/usecase/adapter/framework） |
+| 中 | **`POST /workflows/pair`** — Navigator + Driver ペアプログラミング |
+| 中 | **`POST /workflows/socratic`** — questioner + responder + synthesizer ソクラテス的対話 |
+| 低 | **`DECISION.md` 標準フォーマット** — 全ワークフロー共通の出力フォーマット策定 |
 
 ---
 
