@@ -76,6 +76,10 @@ class TmuxInterface:
                 )
             existing.kill()
         self._session = self._server.new_session(session_name=self.session_name)
+        # Disable assume-paste-time so long prompts are never treated as
+        # bracket-paste by tmux (the default of 1ms causes Claude CLI to show
+        # "[Pasted text #N]" and swallow the subsequent Enter keypress).
+        self._session.set_option("assume-paste-time", "0")
         return self._session
 
     def kill_session(self) -> None:
@@ -123,17 +127,15 @@ class TmuxInterface:
     def send_keys(self, pane: libtmux.Pane, text: str, enter: bool = True) -> None:
         """Send *text* to *pane*, optionally followed by Enter.
 
-        Multi-line text triggers Claude CLI's paste-preview mode, which
-        absorbs the trailing newline that ``send_keys(enter=True)`` appends.
-        We therefore send Enter as a *separate* keypress after a brief pause.
+        Long or multi-line text can trigger Claude CLI's paste-preview mode,
+        which absorbs the trailing newline that ``send_keys(enter=True)``
+        appends.  We therefore always send Enter as a *separate* keypress
+        after a brief pause to let any paste-preview settle.
         """
-        if "\n" in text:
-            pane.send_keys(text, enter=False)
-            if enter:
-                time.sleep(0.15)  # let paste-preview settle
-                pane.send_keys("", enter=True)
-        else:
-            pane.send_keys(text, enter=enter)
+        pane.send_keys(text, enter=False)
+        if enter:
+            time.sleep(0.15)  # let paste-preview settle before Enter
+            pane.send_keys("", enter=True)
 
     def capture_pane(self, pane: libtmux.Pane) -> str:
         """Return the current visible text of *pane*."""

@@ -34,7 +34,7 @@ _DONE_PATTERNS = [
     re.compile(r"❯\s*$", re.MULTILINE),               # claude interactive prompt "❯"
     re.compile(r"(?<!\S)>\s*$", re.MULTILINE),         # bare ">" prompt (older versions)
     re.compile(r"Human:\s*$", re.MULTILINE),           # Human: prompt
-    re.compile(r"\$\s*$", re.MULTILINE),               # shell prompt fallback
+    re.compile(r"(?m)^\$\s*$"),                        # shell prompt (whole line only)
 ]
 
 _POLL_INTERVAL = 0.5  # seconds between output checks
@@ -679,4 +679,8 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
 
 
 def _looks_done(text: str) -> bool:
+    # Pasted text preview — Claude CLI is waiting for the user to confirm;
+    # the task has not been executed yet so we must NOT declare completion.
+    if "[Pasted text #" in text:
+        return False
     return any(p.search(text) for p in _DONE_PATTERNS)

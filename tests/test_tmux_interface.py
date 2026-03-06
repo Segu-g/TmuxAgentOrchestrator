@@ -93,8 +93,9 @@ def test_watch_and_unwatch_pane(mock_server_cls):
         assert "%42" not in iface._watched
 
 
+@patch("tmux_orchestrator.tmux_interface.time.sleep")
 @patch("tmux_orchestrator.tmux_interface.libtmux.Server")
-def test_send_keys_delegates(mock_server_cls):
+def test_send_keys_delegates(mock_server_cls, mock_sleep):
     mock_server = MagicMock()
     mock_server_cls.return_value = mock_server
 
@@ -102,7 +103,11 @@ def test_send_keys_delegates(mock_server_cls):
     iface = TmuxInterface(session_name="s")
     iface.send_keys(mock_pane, "echo hello")
 
-    mock_pane.send_keys.assert_called_once_with("echo hello", enter=True)
+    # Enter is always sent as a separate keypress after a delay
+    calls = mock_pane.send_keys.call_args_list
+    assert calls[0] == call("echo hello", enter=False)
+    assert calls[1] == call("", enter=True)
+    mock_sleep.assert_called_once()
 
 
 @patch("tmux_orchestrator.tmux_interface.time.sleep")
