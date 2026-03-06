@@ -6,6 +6,28 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.46.0] — 2026-03-06
+
+### Added
+
+**ProcessPort Abstraction — Clean Architecture Port & Adapter Pattern**
+
+- New module `src/tmux_orchestrator/process_port.py`:
+  - `ProcessPort`: `@runtime_checkable` `typing.Protocol` defining `send_keys(keys, enter=True)`
+    and `capture_pane() -> str` as the minimal interface for agent-process interaction.
+  - `TmuxProcessAdapter`: Wraps `libtmux.Pane` + `TmuxInterface`, delegates `send_keys` and
+    `capture_pane` to `TmuxInterface` methods. Satisfies `ProcessPort` via structural subtyping.
+  - `StdioProcessAdapter`: In-memory fake for unit tests. Records sent keys in a history list;
+    output buffer seeded via `set_output()` / `append_output()`. Useful for testing agent
+    run-loop logic without tmux. Additional helpers: `sent_keys_history()`, `clear()`.
+- `TmuxInterface.create_process_adapter(pane)`: Factory method returning a `TmuxProcessAdapter`
+  for the given `libtmux.Pane`. Provides a clean construction path for `ClaudeCodeAgent`.
+- 16 new unit tests in `tests/test_process_port.py`: Protocol shape, adapter behaviour,
+  structural subtyping via `isinstance`, `TmuxInterface` factory method.
+- 965 tests total.
+
+---
+
 ## [0.45.0] — 2026-03-06
 
 ### Added

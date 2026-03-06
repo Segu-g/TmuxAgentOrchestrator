@@ -139,6 +139,29 @@ class TmuxInterface:
         """Return the current visible text of *pane*."""
         return "\n".join(pane.capture_pane())
 
+    def create_process_adapter(self, pane: libtmux.Pane) -> "TmuxProcessAdapter":
+        """Create a ``TmuxProcessAdapter`` wrapping *pane*.
+
+        Factory method for constructing a :class:`ProcessPort`-compatible
+        adapter from an existing tmux pane.  Use this to decouple
+        ``ClaudeCodeAgent`` from ``libtmux.Pane`` for unit-testability.
+
+        Parameters
+        ----------
+        pane:
+            The ``libtmux.Pane`` returned by ``new_pane()`` or
+            ``new_subpane()``.
+
+        Returns
+        -------
+        TmuxProcessAdapter
+            A :class:`ProcessPort`-compatible adapter backed by *pane*.
+
+        Reference: DESIGN.md §10.13 (v0.46.0).
+        """
+        from tmux_orchestrator.process_port import TmuxProcessAdapter  # noqa: PLC0415
+        return TmuxProcessAdapter(pane=pane, tmux=self)
+
     # ------------------------------------------------------------------
     # Background watcher
     # ------------------------------------------------------------------

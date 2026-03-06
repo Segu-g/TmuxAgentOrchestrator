@@ -2516,6 +2516,76 @@ SQLite テーブル (3つ):
 
 ---
 
+## 10.13 v0.46.0 — ProcessPort 抽象インターフェースの抽出 (2026-03-06)
+
+### 選択理由
+
+**選択: ProcessPort protocol + TmuxProcessAdapter + StdioProcessAdapter**
+
+v0.45.0 のチェックポイント永続化が完了した。次は §11 バックログの「`ProcessPort` 抽象インターフェース」を選択する。
+選択理由:
+1. **ユニットテスト可能性**: 現状 `ClaudeCodeAgent` が `libtmux.Pane` に直接依存しているため、tmux
+   なし環境でのユニットテストが不可能 (`HeadlessAgent` は既存の別クラス)。
+2. **依存方向の整理**: Martin "Clean Architecture" のポート&アダプターパターン適用により、
+   ビジネスロジックが実装詳細 (libtmux) に依存しない構造になる。
+3. **StdioProcessAdapter**: テスト用に subprocess 経由でコマンドを実行するアダプターを提供することで、
+   `ClaudeCodeAgent` のコア run loop をリアルなプロセスなしでテスト可能になる。
+
+**選択しなかったもの**:
+- OpenTelemetry: 価値は高いが外部依存増加 + 設定複雑度のため次イテレーションへ
+- 役割別 system_prompt テンプレートライブラリ: ドキュメント系変更のため今回は見送り
+
+### 調査 (Step 1 — WebSearch)
+
+#### 参考文献
+
+1. **PEP 544 – Protocols: Structural subtyping (static duck typing)**
+   https://peps.python.org/pep-0544/
+   Python 3.8 で導入された `typing.Protocol` により、明示的な継承なしに構造的サブタイピングが可能。
+   クラスが「ポート」に一致するメソッドとシグネチャを持てば、`isinstance` チェックなしに型安全に扱える。
+   `@runtime_checkable` を付加することで `isinstance()` による実行時チェックも可能。
+
+2. **"Hexagonal Architecture: Ports and Adapters in Python"** SoftwarePatternLexicon (2025)
+   https://softwarepatternslexicon.com/python/architectural-patterns/hexagonal-architecture-ports-and-adapters/
+   依存方向の逆転: コア (AgentBase) はポート (ProcessPort Protocol) のみに依存し、アダプター
+   (TmuxProcessAdapter, StdioProcessAdapter) がポートを実装する。テスト時はモックアダプターを差し込める。
+
+3. **"Abstract Base Classes and Protocols: What Are They? When To Use Them?"** jellis18 (2022)
+   https://jellis18.github.io/post/2022-01-11-abc-vs-protocol/
+   Protocol vs ABC の比較: Protocol は構造的サブタイピング (duck typing)、ABC はランタイム強制。
+   今回は Protocol を採用 — `ClaudeCodeAgent` に既存の継承ツリーを変更させずに型チェックが通る。
+
+4. **"Hexagonal Architecture Design: Python Ports and Adapters for Modularity 2026"** johal.in (2026)
+   https://johal.in/hexagonal-architecture-design-python-ports-and-adapters-for-modularity-2026/
+   「Python の asyncio と async ポートを統合することで IoT / AI エージェントパイプラインにも適用可能」
+   今回は `ProcessPort` の主要メソッドを同期 (send_keys, capture_pane) + 非同期 (start, stop) に分割する。
+
+5. **Martin "Clean Architecture" (2017) Ch.22** ポート&アダプターパターン
+   アーキテクチャ境界: 内側の Use Case / Domain が外側の detail (tmux/subprocess) に依存しない。
+   依存方向は常に内側へ。今回は `ClaudeCodeAgent` (Use Case) → `ProcessPort` (Port)
+   → `TmuxProcessAdapter` / `StdioProcessAdapter` (Adapter) の構造を作る。
+
+#### 設計決定
+
+```python
+# src/tmux_orchestrator/process_port.py
+
+@runtime_checkable
+class ProcessPort(Protocol):
+    """Abstraction over the pane/process that an agent interacts with."""
+
+    def send_keys(self, keys: str, enter: bool = True) -> None: ...
+    def capture_pane(self) -> str: ...
+    def is_ready(self) -> bool: ...
+```
+
+- `TmuxProcessAdapter(pane: libtmux.Pane)` — 現行の実装をラップ
+- `StdioProcessAdapter()` — テスト用: list にキーを蓄積、capture_pane は蓄積内容を返す
+- `ClaudeCodeAgent` の `_pane` フィールドを `ProcessPort | None` に型付け
+- `_wait_for_ready()`, `_send_task()`, `_poll_completion()` が `ProcessPort` メソッドのみを呼ぶ
+
+---
+
 ## 11. 今後の課題
 
 > 以下のバックログは、完了済み項目（旧 §11 テーブルの全 ~~完了~~ エントリ、§10.N 実装履歴）を除去し、
