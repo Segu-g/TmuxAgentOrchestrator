@@ -6,6 +6,35 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.38.0] — 2026-03-06
+
+### Added
+
+**Stop hook completion detection — deterministic task-complete via Claude Code hooks**
+
+- `ClaudeCodeAgent._write_stop_hook_settings(cwd)`: writes `.claude/settings.local.json`
+  into the agent worktree at startup with a Stop hook HTTP handler pointing to
+  `POST /agents/{agent_id}/task-complete`.
+- `POST /agents/{agent_id}/task-complete` FastAPI endpoint: receives the Stop hook
+  callback, calls `agent.handle_output(output)` to publish a RESULT on the bus and
+  transition the agent to IDLE. Requires `X-API-Key` authentication. Returns 409 if
+  the agent is not BUSY, 404 if unknown.
+- `TaskCompleteBody` Pydantic schema for the optional request body (`output`, `exit_code`).
+- 13 new tests (739 → 752 total).
+
+### Design
+
+The Stop hook fires deterministically when Claude Code finishes a turn (not on
+user interrupts). HTTP hooks (`type: "http"`) are non-blocking on failure — if the
+orchestrator web server is down, Claude continues normally and the polling fallback
+`_wait_for_completion` catches completion instead. Settings are written to
+`.claude/settings.local.json` (gitignored by Claude Code conventions) so they do
+not pollute the repository.
+
+Reference: Claude Code Hooks Reference https://code.claude.com/docs/en/hooks (2025)
+
+---
+
 ## [0.37.0] — 2026-03-06
 
 ### Added

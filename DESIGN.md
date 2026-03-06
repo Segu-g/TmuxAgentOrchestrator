@@ -1775,7 +1775,91 @@ v0.36.0 デモのタイムアウト問題も `task_timeout: 900` に変更する
 
 ### Step 1 — 調査記録 (WebSearch 結果)
 
-*WebSearch 実行後に記録する*
+#### Query 1: "Claude Code hooks stop hook HTTP settings.json 2025"
+
+**出典**: Anthropic — Claude Code Hooks Reference
+URL: https://code.claude.com/docs/en/hooks
+取得日: 2026-03-06
+
+**主要知見**:
+- `Stop` フックは「Claude がターンを終えて応答を完了した時点」に発火する。ユーザー割り込みによる停止では発火しない。
+- `Stop` フックは **matcher をサポートしない**（`UserPromptSubmit` / `Stop` / `TeammateIdle` / `WorktreeCreate` 等は matcher 無視）。
+- HTTP フック (`type: "http"`) は、JSON ペイロードを POST ボディとして指定 URL に送信する。レスポンスボディは command フックと同じ JSON 出力フォーマットで解釈される。
+- non-2xx レスポンス・接続失敗・タイムアウトはいずれも **non-blocking エラー**として扱われる（実行は継続）。Stop フックを block するには 2xx レスポンスに `{"decision": "block", "reason": "..."}` を返す。
+- `Stop` フック固有の入力フィールド:
+  ```json
+  {
+    "session_id": "abc123",
+    "transcript_path": "~/.claude/projects/.../<id>.jsonl",
+    "cwd": "/path/to/cwd",
+    "permission_mode": "default",
+    "hook_event_name": "Stop",
+    "stop_hook_active": true,
+    "last_assistant_message": "I've completed..."
+  }
+  ```
+  - `stop_hook_active`: すでに Stop フックにより継続中のとき `true`。無限ループ防止のために確認すること。
+  - `last_assistant_message`: 最後の応答テキスト。トランスクリプトファイルを解析せずに取得可能。
+- HTTP フック固有のフィールド:
+  | フィールド | 必須 | 説明 |
+  |---|---|---|
+  | `url` | yes | POST 先 URL |
+  | `headers` | no | 追加 HTTP ヘッダー（環境変数補間 `$VAR` を使用可） |
+  | `allowedEnvVars` | no | ヘッダー値に補間できる環境変数名リスト |
+  | `timeout` | no | デフォルト: command=600s, prompt=30s, agent=60s |
+- 設定ファイルのスコープ:
+  | 場所 | スコープ |
+  |---|---|
+  | `~/.claude/settings.json` | 全プロジェクト |
+  | `.claude/settings.json` | 単一プロジェクト（コミット可） |
+  | `.claude/settings.local.json` | 単一プロジェクト（gitignore、コミット不可） |
+
+#### Query 2: "claude code settings.json hooks stop event completion detection"
+
+**出典**: Anthropic — Claude Code Hooks Reference (同上)
+追加知見:
+- Stop フックは `Stop` と `SubagentStop` の2種類。エージェント内 (subagent) では `Stop` フックが自動的に `SubagentStop` に変換される。
+- `stop_hook_active` を確認してフックが再帰的に発火し続けることを防ぐ — 本フレームワークの用途では、フックは「タスク完了を通知するだけ」で継続を要求しないため、`decision` フィールドは省略 (allow) で良い。
+- HTTP フックのエラー（non-2xx, timeout, 接続失敗）はすべて non-blocking — これはフックサーバーが落ちていても Claude の動作を止めない設計として重要。`_poll_completion` フォールバックの必要性を裏付ける。
+
+#### Query 3: "claude code completion hook REST endpoint HTTP type integration patterns agent orchestration"
+
+**出典**: disler/claude-code-hooks-multi-agent-observability (GitHub)
+URL: https://github.com/disler/claude-code-hooks-multi-agent-observability
+取得日: 2026-03-06
+
+**主要知見**:
+- Stop フック → REST エンドポイントパターンは、複数エージェントのリアルタイム監視に実用実績がある。
+- HTTP フックはエージェントごとに異なる URL を設定できるため、`agent_id` を URL パスパラメータに含めることで特定エージェントのイベントをルーティングできる。
+
+**出典**: Anthropic — Claude Code Hooks Reference (同上)
+Stop Hook の具体的な HTTP 設定例:
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://localhost:{port}/agents/{agent_id}/task-complete",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+#### 設計上の決定事項
+
+1. **設定ファイルの場所**: `.claude/settings.local.json` (worktree 内) — gitignored、コミットされない。エージェント起動時に `_write_stop_hook_settings()` で生成する。
+2. **HTTP フックのタイムアウト**: 5秒 — FastAPI サーバーがローカルで動作している前提で十分。`Stop` フックは non-blocking のため、タイムアウトしても Claude の動作には影響しない。
+3. **フォールバック維持**: HTTP フックが失敗した場合（サーバー未起動・ポート不明など）に備えて `_poll_completion` を並行実行し、フックが先に発火したときはポーリングをキャンセルする。
+4. **ポートの取得**: `AgentConfig` に `web_port: int | None` フィールドを追加し、`ClaudeCodeAgent` が hooks URL を構築する際に使用する。`web_port` が `None` の場合は hooks 設定を書かない（`_poll_completion` のみ使用）。
+5. **エンドポイント認証**: `X-API-Key` ヘッダー + `allowedEnvVars` で環境変数から読み込む（`TMUX_ORCHESTRATOR_API_KEY` 環境変数を使用）。
 
 ---
 

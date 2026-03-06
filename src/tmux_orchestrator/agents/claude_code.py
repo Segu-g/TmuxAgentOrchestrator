@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -129,6 +130,7 @@ class ClaudeCodeAgent(Agent):
                 await loop.run_in_executor(None, self._write_agent_claude_md, cwd)
             await loop.run_in_executor(None, self._write_notes_template, cwd)
             await loop.run_in_executor(None, self._copy_context_files, cwd)
+            await loop.run_in_executor(None, self._write_stop_hook_settings, cwd)
         launch = (
             f"cd {shlex.quote(str(cwd))} && {self._command}" if cwd else self._command
         )
@@ -392,6 +394,54 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest)
             logger.debug("Agent %s: copied context file %s → %s", self.id, src, dest)
+
+    def _write_stop_hook_settings(self, cwd: Path) -> None:
+        """Write ``.claude/settings.local.json`` with a Stop hook HTTP handler.
+
+        The Stop hook fires when Claude finishes responding and sends an HTTP
+        POST to ``POST /agents/{agent_id}/task-complete`` on the orchestrator
+        web server.  This provides deterministic completion detection instead
+        of the 500 ms polling + regex fallback.
+
+        The file is placed in ``.claude/settings.local.json`` (gitignored by
+        Claude Code conventions) so it does not pollute the repository and is
+        cleaned up with the worktree on agent stop.
+
+        If ``web_base_url`` is empty (web server not started), the method is
+        a no-op and completion falls back to ``_wait_for_completion`` polling.
+
+        Reference:
+        - Claude Code Hooks Reference https://code.claude.com/docs/en/hooks (2025)
+        - DESIGN.md §10.12 (v0.38.0)
+        """
+        if not self._web_base_url:
+            return
+
+        url = f"{self._web_base_url}/agents/{self.id}/task-complete"
+        settings = {
+            "hooks": {
+                "Stop": [
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            {
+                                "type": "http",
+                                "url": url,
+                                "timeout": 5,
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        claude_dir = cwd / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        settings_path = claude_dir / "settings.local.json"
+        settings_path.write_text(json.dumps(settings, indent=2))
+        logger.debug(
+            "Agent %s wrote Stop hook settings to %s (url=%s)",
+            self.id, settings_path, url,
+        )
 
     def _write_notes_template(self, cwd: Path) -> None:
         """Write an initial NOTES.md template for structured note-taking."""

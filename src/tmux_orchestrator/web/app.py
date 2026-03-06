@@ -183,6 +183,20 @@ class WebhookCreate(BaseModel):
     secret: str | None = None
 
 
+class TaskCompleteBody(BaseModel):
+    """Optional request body for POST /agents/{agent_id}/task-complete.
+
+    Sent by the Claude Code Stop hook when the agent finishes a turn.
+
+    Design reference:
+    - Claude Code Hooks Reference https://code.claude.com/docs/en/hooks (2025)
+    - DESIGN.md §10.12 (v0.38.0)
+    """
+
+    output: str = ""
+    exit_code: int = 0
+
+
 class AutoScalerUpdate(BaseModel):
     """Request body for PUT /orchestrator/autoscaler.
 
@@ -873,6 +887,66 @@ def create_app(
         except KeyError:
             raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
         return {"agent_id": agent_id, "reset": True}
+
+    @app.post(
+        "/agents/{agent_id}/task-complete",
+        summary="Signal that an agent's current task is complete (called by Stop hook)",
+        dependencies=[Depends(auth)],
+    )
+    async def agent_task_complete(agent_id: str, request: Request) -> dict:
+        """Receive task-complete notification from Claude Code's Stop hook.
+
+        This endpoint is called by the ``Stop`` hook configured in
+        ``.claude/settings.local.json`` when Claude finishes responding.  It
+        provides deterministic completion detection as an alternative to the
+        500 ms output-polling fallback.
+
+        Request body (optional JSON):
+        ``{"output": "...", "exit_code": 0}``
+
+        The ``output`` field is passed to :meth:`~Agent.handle_output` which
+        publishes a RESULT message on the bus and transitions the agent to IDLE.
+
+        Returns:
+        ``{"status": "ok"}``
+
+        HTTP error codes:
+        - 404: agent not found
+        - 409: agent is not in BUSY state (no active task to complete)
+
+        Design references:
+        - Claude Code Hooks Reference https://code.claude.com/docs/en/hooks (2025)
+        - DESIGN.md §10.12 (v0.38.0)
+        """
+        from tmux_orchestrator.agents.base import AgentStatus
+
+        agent = orchestrator.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
+        if agent.status != AgentStatus.BUSY:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Agent {agent_id!r} is not BUSY (status={agent.status.value!r}); "
+                    "cannot complete a task that is not in progress"
+                ),
+            )
+
+        # Parse optional body
+        output = ""
+        try:
+            body = await request.json()
+            output = body.get("output", "") or ""
+        except Exception:  # noqa: BLE001
+            pass  # body is optional; empty output is fine
+
+        await agent.handle_output(output)
+        logger.info(
+            "Agent %s task-complete received via Stop hook (task_id=%s)",
+            agent_id,
+            agent._current_task.id if agent._current_task else "unknown",
+        )
+        return {"status": "ok"}
 
     @app.post(
         "/agents/{agent_id}/drain",

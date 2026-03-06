@@ -1245,6 +1245,48 @@
         "summary": "Per-agent context usage stats"
       }
     },
+    "/agents/{agent_id}/task-complete": {
+      "post": {
+        "description": "Receive task-complete notification from Claude Code's Stop hook.\n\nThis endpoint is called by the ``Stop`` hook configured in\n``.claude/settings.local.json`` when Claude finishes responding.  It\nprovides deterministic completion detection as an alternative to the\n500 ms output-polling fallback.\n\nRequest body (optional JSON):\n``{\"output\": \"...\", \"exit_code\": 0}``\n\nThe ``output`` field is passed to :meth:`~Agent.handle_output` which\npublishes a RESULT message on the bus and transitions the agent to IDLE.\n\nReturns:\n``{\"status\": \"ok\"}``\n\nHTTP error codes:\n- 404: agent not found\n- 409: agent is not in BUSY state (no active task to complete)\n\nDesign references:\n- Claude Code Hooks Reference https://code.claude.com/docs/en/hooks (2025)\n- DESIGN.md \u00a710.12 (v0.38.0)",
+        "operationId": "agent_task_complete_agents__agent_id__task_complete_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Agent Task Complete Agents  Agent Id  Task Complete Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Signal that an agent's current task is complete (called by Stop hook)"
+      }
+    },
     "/context-stats": {
       "get": {
         "description": "Return context window usage statistics for all tracked agents.\n\nSee ``GET /agents/{id}/stats`` for field descriptions.\n\nDesign reference: DESIGN.md \u00a711 (v0.21.0) \u2014 \u30a8\u30fc\u30b8\u30a7\u30f3\u30c8\u306e\u30b3\u30f3\u30c6\u30ad\u30b9\u30c8\u4f7f\u7528\u91cf\u30e2\u30cb\u30bf\u30ea\u30f3\u30b0.",
