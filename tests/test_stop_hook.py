@@ -191,6 +191,42 @@ def test_write_stop_hook_settings_skipped_when_no_web_base_url(tmp_path: Path) -
     )
 
 
+def test_write_stop_hook_settings_has_api_key_header(tmp_path: Path) -> None:
+    """HTTP hook must include X-Api-Key header with $TMUX_ORCHESTRATOR_API_KEY."""
+    bus = make_bus()
+    tmux = make_tmux_mock()
+    agent = ClaudeCodeAgent(
+        agent_id="worker-1",
+        bus=bus,
+        tmux=tmux,
+        web_base_url="http://localhost:8000",
+    )
+    agent._write_stop_hook_settings(tmp_path)
+
+    data = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
+    handler = data["hooks"]["Stop"][0]["hooks"][0]
+    assert "headers" in handler
+    assert handler["headers"].get("X-Api-Key") == "$TMUX_ORCHESTRATOR_API_KEY"
+
+
+def test_write_stop_hook_settings_has_allowed_env_vars(tmp_path: Path) -> None:
+    """HTTP hook must declare allowedEnvVars so Claude Code expands $VAR in headers."""
+    bus = make_bus()
+    tmux = make_tmux_mock()
+    agent = ClaudeCodeAgent(
+        agent_id="worker-1",
+        bus=bus,
+        tmux=tmux,
+        web_base_url="http://localhost:8000",
+    )
+    agent._write_stop_hook_settings(tmp_path)
+
+    data = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
+    handler = data["hooks"]["Stop"][0]["hooks"][0]
+    assert "allowedEnvVars" in handler
+    assert "TMUX_ORCHESTRATOR_API_KEY" in handler["allowedEnvVars"]
+
+
 # ---------------------------------------------------------------------------
 # Tests for POST /agents/{agent_id}/task-complete endpoint
 # ---------------------------------------------------------------------------
@@ -432,3 +468,122 @@ async def test_start_writes_stop_hook_settings(tmp_path: Path) -> None:
     assert "hook-agent" in handler["url"]
 
     await agent.stop()
+
+
+# ---------------------------------------------------------------------------
+# stop_hook_active and last_assistant_message handling
+# ---------------------------------------------------------------------------
+
+
+async def test_task_complete_skips_when_stop_hook_active(
+    client, mock_orchestrator
+) -> None:
+    """stop_hook_active=true means Claude is mid-continuation — must not mark done."""
+    from tmux_orchestrator.agents.base import AgentStatus
+
+    mock_agent = MagicMock()
+    mock_agent.status = AgentStatus.BUSY
+    mock_agent._current_task = MagicMock(id="task-x")
+    mock_agent.id = "worker-active"
+    mock_agent.bus = mock_orchestrator.bus
+    mock_agent.handle_output = AsyncMock()
+    mock_orchestrator._agents["worker-active"] = mock_agent
+
+    resp = await client.post(
+        "/agents/worker-active/task-complete",
+        headers={"X-API-Key": _API_KEY},
+        json={"stop_hook_active": True, "last_assistant_message": "still going..."},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "skipped"
+    mock_agent.handle_output.assert_not_awaited()
+
+
+async def test_task_complete_uses_last_assistant_message(
+    client, mock_orchestrator
+) -> None:
+    """last_assistant_message must be preferred over 'output' field."""
+    from tmux_orchestrator.agents.base import AgentStatus
+
+    mock_agent = MagicMock()
+    mock_agent.status = AgentStatus.BUSY
+    mock_agent._current_task = MagicMock(id="task-y")
+    mock_agent.id = "worker-msg"
+    mock_agent.bus = mock_orchestrator.bus
+    mock_agent.handle_output = AsyncMock()
+    mock_orchestrator._agents["worker-msg"] = mock_agent
+
+    resp = await client.post(
+        "/agents/worker-msg/task-complete",
+        headers={"X-API-Key": _API_KEY},
+        json={
+            "stop_hook_active": False,
+            "last_assistant_message": "Here is the result.",
+            "output": "should be ignored",
+        },
+    )
+    assert resp.status_code == 200
+    mock_agent.handle_output.assert_awaited_once_with("Here is the result.")
+
+
+async def test_task_complete_falls_back_to_output_field(
+    client, mock_orchestrator
+) -> None:
+    """When last_assistant_message is absent, 'output' field must be used."""
+    from tmux_orchestrator.agents.base import AgentStatus
+
+    mock_agent = MagicMock()
+    mock_agent.status = AgentStatus.BUSY
+    mock_agent._current_task = MagicMock(id="task-z")
+    mock_agent.id = "worker-fallback"
+    mock_agent.bus = mock_orchestrator.bus
+    mock_agent.handle_output = AsyncMock()
+    mock_orchestrator._agents["worker-fallback"] = mock_agent
+
+    resp = await client.post(
+        "/agents/worker-fallback/task-complete",
+        headers={"X-API-Key": _API_KEY},
+        json={"output": "fallback output"},
+    )
+    assert resp.status_code == 200
+    mock_agent.handle_output.assert_awaited_once_with("fallback output")
+
+
+# ---------------------------------------------------------------------------
+# _wait_for_completion: early return when Stop hook clears _current_task
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_wait_for_completion_returns_if_task_cleared() -> None:
+    """_wait_for_completion must return immediately if Stop hook already handled the task."""
+    bus = make_bus()
+    tmux = make_tmux_mock()
+    # Return a stable pane output that looks like a done prompt
+    tmux.capture_pane = MagicMock(return_value="❯ ")
+
+    agent = ClaudeCodeAgent(
+        agent_id="worker-wfc",
+        bus=bus,
+        tmux=tmux,
+        web_base_url="http://localhost:8000",
+    )
+    agent.pane = MagicMock()
+
+    from tmux_orchestrator.agents.base import Task
+
+    task = Task(id="t-cleared", prompt="do something")
+    agent._current_task = task
+
+    # Simulate Stop hook firing: clear _current_task before polling loop runs
+    async def clear_task_after_delay():
+        await asyncio.sleep(0.05)
+        agent._current_task = None  # Stop hook called _set_idle()
+
+    asyncio.create_task(clear_task_after_delay())
+
+    # _wait_for_completion should exit quickly once _current_task is None
+    await asyncio.wait_for(agent._wait_for_completion(task), timeout=3.0)
+    # handle_output must NOT have been called (Stop hook handled it)
+    # (no assertion needed beyond the function returning without error)
