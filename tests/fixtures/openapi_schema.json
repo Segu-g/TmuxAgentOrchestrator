@@ -1406,6 +1406,48 @@
         "summary": "Signal that an agent's current task is complete (called by Stop hook)"
       }
     },
+    "/agents/{agent_id}/worktree-status": {
+      "get": {
+        "description": "Return the git worktree integrity status for *agent_id*.\n\nChecks performed:\n- Path existence (worktree directory must exist on disk)\n- ``index.lock`` presence (indicates a crashed git process)\n- HEAD resolution (``git rev-parse HEAD`` must succeed)\n- Branch name (expected ``worktree/{agent_id}``)\n- Dirty state (uncommitted changes via ``git status --porcelain``)\n- Object-store integrity (``git fsck --no-dangling``)\n\nFields returned:\n- ``agent_id``: the agent identifier\n- ``path``: absolute path to the worktree, or null for shared agents\n- ``is_valid``: True iff the worktree is structurally sound\n- ``is_dirty``: True iff uncommitted changes are present\n- ``is_locked``: True iff a stale ``index.lock`` is present\n- ``head_sha``: 40-character SHA of HEAD, or null\n- ``branch``: current branch name, or null\n- ``errors``: list of diagnostic messages from fsck / git commands\n- ``checked_at``: ISO 8601 timestamp of when the check ran\n\nReturns 404 if the agent is not registered with the orchestrator.\n\nDesign references:\n- git-fsck(1): https://git-scm.com/docs/git-fsck\n- GitLab \"Repository checks\": https://docs.gitlab.com/ee/administration/repository_checks.html\n- DESIGN.md \u00a710.17 (v0.43.0)",
+        "operationId": "agent_worktree_status_agents__agent_id__worktree_status_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Agent Worktree Status Agents  Agent Id  Worktree Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Worktree integrity status for an agent"
+      }
+    },
     "/context-stats": {
       "get": {
         "description": "Return context window usage statistics for all tracked agents.\n\nSee ``GET /agents/{id}/stats`` for field descriptions.\n\nDesign reference: DESIGN.md \u00a711 (v0.21.0) \u2014 \u30a8\u30fc\u30b8\u30a7\u30f3\u30c8\u306e\u30b3\u30f3\u30c6\u30ad\u30b9\u30c8\u4f7f\u7528\u91cf\u30e2\u30cb\u30bf\u30ea\u30f3\u30b0.",

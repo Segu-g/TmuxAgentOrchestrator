@@ -1196,6 +1196,74 @@ def create_app(
         return history
 
     # ------------------------------------------------------------------
+    # Worktree integrity (v0.43.0)
+    # ------------------------------------------------------------------
+
+    @app.get(
+        "/agents/{agent_id}/worktree-status",
+        summary="Worktree integrity status for an agent",
+        dependencies=[Depends(auth)],
+    )
+    async def agent_worktree_status(agent_id: str) -> dict:
+        """Return the git worktree integrity status for *agent_id*.
+
+        Checks performed:
+        - Path existence (worktree directory must exist on disk)
+        - ``index.lock`` presence (indicates a crashed git process)
+        - HEAD resolution (``git rev-parse HEAD`` must succeed)
+        - Branch name (expected ``worktree/{agent_id}``)
+        - Dirty state (uncommitted changes via ``git status --porcelain``)
+        - Object-store integrity (``git fsck --no-dangling``)
+
+        Fields returned:
+        - ``agent_id``: the agent identifier
+        - ``path``: absolute path to the worktree, or null for shared agents
+        - ``is_valid``: True iff the worktree is structurally sound
+        - ``is_dirty``: True iff uncommitted changes are present
+        - ``is_locked``: True iff a stale ``index.lock`` is present
+        - ``head_sha``: 40-character SHA of HEAD, or null
+        - ``branch``: current branch name, or null
+        - ``errors``: list of diagnostic messages from fsck / git commands
+        - ``checked_at``: ISO 8601 timestamp of when the check ran
+
+        Returns 404 if the agent is not registered with the orchestrator.
+
+        Design references:
+        - git-fsck(1): https://git-scm.com/docs/git-fsck
+        - GitLab "Repository checks": https://docs.gitlab.com/ee/administration/repository_checks.html
+        - DESIGN.md §10.17 (v0.43.0)
+        """
+        from tmux_orchestrator.worktree_integrity import WorktreeIntegrityChecker
+
+        agent = orchestrator.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
+
+        # Resolve the worktree path for this agent.
+        wm = getattr(orchestrator, "_worktree_manager", None)
+        worktree_path = None
+        if wm is not None:
+            worktree_path = wm.worktree_path(agent_id)
+
+        # Determine repo root for git commands
+        repo_root = getattr(orchestrator, "_repo_root", None)
+        if repo_root is None and wm is not None:
+            repo_root = getattr(wm, "_repo_root", None)
+
+        if worktree_path is None:
+            # Agent uses isolate=False (shared repo) — return a stub status.
+            from tmux_orchestrator.worktree_integrity import WorktreeStatus
+            status = WorktreeStatus(agent_id=agent_id, path=None)
+            return status.to_dict()
+
+        if repo_root is None:
+            repo_root = worktree_path  # fallback: use worktree itself as cwd
+
+        checker = WorktreeIntegrityChecker(repo_root=repo_root)
+        status = await checker.check_path(agent_id, worktree_path)
+        return status.to_dict()
+
+    # ------------------------------------------------------------------
     # Task result persistence (Event Sourcing / CQRS read side)
     # ------------------------------------------------------------------
 

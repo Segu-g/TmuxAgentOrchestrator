@@ -2145,6 +2145,147 @@ reviewer     → {prefix}_review  (レビューレポート)
 
 ---
 
+## 10.17 リポジトリ整合性 (v0.43.0) — 選定・調査記録
+
+### 選定根拠
+
+**選択: `WorktreeIntegrityChecker` — エージェントワークツリーの整合性検証と REST 可視化**
+
+ユーザーが明示的に要求したフィーチャー: 「リポジトリ整合性 — エージェントが使用するワークツリー・デモリポジトリが破損・汚染されていないことを保証する」。
+
+§11 バックログ上の優先度分析:
+1. **ユーザー直接指示** — 自律ループにおいてユーザー明示指示は §11 優先度テーブルに優先する。
+2. **`ProcessPort` 抽象化** — §11 高優先度にあるが、今回のリポジトリ整合性とは独立しており、整合性チェックはより即効性が高い。
+3. **チェックポイント永続化** — SQLite 実装コストが高く、今回のスコープより大きい。
+
+本フィーチャーの具体的スコープ:
+
+- **ワークツリー整合性検査** (`WorktreeIntegrityChecker`) — タスクディスパッチ前にエージェントのワークツリーが有効な git リポジトリであるか、HEAD が解決可能か、インデックスがロックされていないか、オブジェクトストアが破損していないか (`git fsck --no-dangling`) を検証する。
+- **ダーティ検出** — エージェント停止後にワークツリーに未コミット変更が残っていた場合、`dirty_worktree` イベントを bus に発行する。
+- **REST エンドポイント** — `GET /agents/{agent_id}/worktree-status` で各エージェントのワークツリー整合性レポート（is_valid, is_dirty, errors, branch, head_sha）を返す。
+- **ディスパッチフック** — Orchestrator のタスクディスパッチループで整合性チェックを実行し、破損ワークツリーへのタスク投入を防ぐ。
+
+**非選択: OpenTelemetry GenAI Semantic Conventions**
+トレーシング基盤の変更は大きく、今回の整合性チェックとは独立した反復で実施すべき。
+
+**非選択: エージェントドリフト検出 (Agent Stability Index)**
+ロールテンプレートライブラリが完全に安定してから実装する方が効果的。
+
+### 「リポジトリ整合性」の定義
+
+本プロジェクトにおける「リポジトリ整合性」とは以下を指す:
+
+1. **構造的整合性**: ワークツリーが有効な git オブジェクトストアを持ち、`git fsck` が致命的エラーを報告しない。
+2. **HEAD 整合性**: `HEAD` が解決可能なコミット SHA を指しており、detached HEAD や無効な参照でない。
+3. **インデックス整合性**: `.git/index.lock` が残存していない（プロセスクラッシュ後の典型的残骸）。
+4. **ワークツリー清潔性**: エージェント完了後に未コミット変更 (`git status --porcelain`) が残存していない。
+5. **ブランチ整合性**: 期待するブランチ名 (`worktree/{agent_id}`) に一致する。
+
+これらのチェックは `git worktree list --porcelain` + 各種 `git` サブコマンドで実装可能。
+
+### 調査記録 (Step 1 WebSearch, 2026-03-06)
+
+#### Query 1: "git worktree integrity validation corrupted detection recovery"
+
+**主要な発見:**
+
+- `git fsck` — オブジェクトストアの SHA-1 整合性と到達可能性を検証するコマンド。CI パイプラインに統合可能。
+- `git worktree repair` — ワークツリーの管理ファイルが外部要因（リポジトリ移動など）で壊れた場合に接続を再確立する。
+- `git worktree prune` — 手動削除されたリンク済みワークツリーのステールな管理レコードを削除する。
+- ワークツリーが削除された場合、git は管理レコードを残す（ステールな状態）。`prune` で削除できる。
+- `.git/index.lock` — プロセスクラッシュ後に残留する典型的なロックファイル。存在する場合はワークツリーが破損状態。
+
+**出典:**
+- Git SCM Documentation, "git-fsck", https://git-scm.com/docs/git-fsck (2025)
+- Git SCM Documentation, "git-worktree", https://git-scm.com/docs/git-worktree (2025)
+- Git Cookbook, "Repairing and recovering broken git repositories", https://git.seveas.net/repairing-and-recovering-broken-git-repositories.html
+- Git Tower Help, "Repairing Worktrees", https://www.git-tower.com/help/guides/worktrees/repair/windows
+
+#### Query 2: "git repository consistency checks CI pipeline fsck index lock"
+
+**主要な発見:**
+
+- GitLab は Gitaly で受信 packfile に対して `git fsck` を自動実行し、問題のあるコミットを含む push を拒否する。
+- `.git/config.lock` や `refs/heads/*.lock` などのロックファイルが残存すると整合性の問題になる。
+- GitLab の "Repository checks" 機能は `git fsck` を定期的に実行し、エラーが見つかった場合に管理者に警告する。
+- `git fsck --no-dangling` — dangling オブジェクト（到達不能だが孤立でない）の報告を抑制し、エラーのみに集中できる。
+
+**出典:**
+- GitLab Docs, "Repository consistency checks", https://docs.gitlab.com/administration/gitaly/consistency_checks/ (2025)
+- GitLab Docs, "Repository checks", https://docs.gitlab.com/ee/administration/repository_checks.html (2025)
+- Git SCM Documentation, "git-fsck", https://git-scm.com/docs/git-fsck (kernel.org)
+- GitScripts, "Mastering Git Fsck: Your Guide to Repository Integrity", https://gitscripts.com/git-fsck
+
+#### Query 3: "multi-agent git isolation worktree integrity safety concurrent"
+
+**主要な発見:**
+
+- Git ワークツリーはエージェント間のファイル競合を防ぐ標準パターンとして業界に定着。
+- ワークツリー分離なしで複数エージェントが同一リポジトリ上で動作する場合、ブランチ切り替えと並行書き込みによる `git lock` エラーが発生する。
+- ccswarm (GitHub: nwiizo/ccswarm) — tmux + Claude Code + git worktree 分離によるマルチエージェントオーケストレーションの実装例。
+- Claude Code 公式に git worktree サポートが追加され、並列エージェント実行の標準パターンになっている。
+- Uzi ツール — tmux でエージェントごとに分離された git ワークツリーをオーケストレーション。
+
+**出典:**
+- SuperGok, "Claude Code Git Worktree Support for Parallel Agents", https://supergok.com/claude-code-git-worktree-support/ (2025)
+- Nick Mitchinson, "Using Git Worktrees for Multi-Feature Development with AI Agents", https://www.nrmitchi.com/2025/10/using-git-worktrees-for-multi-feature-development-with-ai-agents/ (2025-10)
+- GitHub nwiizo/ccswarm, "Multi-agent orchestration system using Claude Code with Git worktree isolation", https://github.com/nwiizo/ccswarm
+- Medium, "Git Worktrees: The Secret Weapon for Running Multiple AI Coding Agents in Parallel", https://medium.com/@mabd.dev/git-worktrees-the-secret-weapon-for-running-multiple-ai-coding-agents-in-parallel-e9046451eb96
+- Agent Factory, "Worktrees: Parallel Agent Isolation", https://agentfactory.panaversity.org/docs/General-Agents-Foundations/general-agents/worktrees
+
+#### Query 4: "git worktree list porcelain prune stale worktree repair"
+
+**`git worktree list --porcelain` 出力フォーマット:**
+
+各ワークツリーのレコードは空行で区切られ、以下のフィールドを持つ:
+- `worktree <path>` — ワークツリーパス
+- `HEAD <sha>` — 現在のコミット SHA
+- `branch <ref>` — 現在のブランチ参照 (e.g., `refs/heads/worktree/agent-1`)
+- `bare` — bare リポジトリの場合のみ存在 (boolean flag)
+- `detached` — detached HEAD の場合のみ存在
+- `locked [reason]` — ロックされている場合
+- `prunable [reason]` — プルーン可能な場合
+
+このフォーマットは git バージョンに依存しない安定した出力であり、スクリプトからのパースに適している。
+
+**出典:**
+- Git SCM Documentation, "git-worktree list --porcelain", https://git-scm.com/docs/git-worktree (2025)
+- Debian Manpages, "git-worktree(1)", https://manpages.debian.org/testing/git-man/git-worktree.1.en.html
+
+#### 実装方針の決定
+
+調査結果を踏まえ、以下の実装方針を採用する:
+
+1. **`WorktreeIntegrityChecker`** — 単一責任のチェッカークラス:
+   - `git worktree list --porcelain` でワークツリーメタデータを取得
+   - `.git/index.lock` の存在でロック状態を検出
+   - `git fsck --no-dangling --no-progress` でオブジェクトストア整合性を検査
+   - `git status --porcelain` で未コミット変更を検出
+   - `git rev-parse HEAD` で HEAD 解決可能性を確認
+
+2. **非同期実行**: すべての git コマンドは `asyncio.create_subprocess_exec` で非同期に実行し、ディスパッチループをブロックしない。
+
+3. **結果スキーマ** (`WorktreeStatus`):
+   ```
+   {
+     "agent_id": str,
+     "path": str | None,
+     "is_valid": bool,       # 構造的整合性
+     "is_dirty": bool,       # 未コミット変更あり
+     "is_locked": bool,      # index.lock 存在
+     "head_sha": str | None, # HEAD SHA
+     "branch": str | None,   # ブランチ名
+     "errors": list[str],    # fsck/repair エラーメッセージ
+     "checked_at": str       # ISO 8601 タイムスタンプ
+   }
+   ```
+
+4. **ディスパッチフック**: `Orchestrator._try_dispatch` でタスクを送る前に整合性チェックを実行。破損ワークツリーのエージェントには `is_valid=False` 時にタスクを送らず、`integrity_check_failed` バスイベントを発行する。
+
+5. **REST エンドポイント**: `GET /agents/{agent_id}/worktree-status` → `WorktreeStatus` JSON。
+
+---
+
 ## 11. 今後の課題
 
 > 以下のバックログは、完了済み項目（旧 §11 テーブルの全 ~~完了~~ エントリ、§10.N 実装履歴）を除去し、

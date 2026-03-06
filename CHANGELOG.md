@@ -6,6 +6,40 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.43.0] — 2026-03-06
+
+### Added
+
+**Repository Integrity — `WorktreeIntegrityChecker` + `GET /agents/{id}/worktree-status`**
+
+- New module `src/tmux_orchestrator/worktree_integrity.py`:
+  - `WorktreeStatus` dataclass: agent_id, path, is_valid, is_dirty, is_locked, head_sha, branch, errors, checked_at.
+  - `WorktreeIntegrityChecker`: validates per-agent git worktree health using async git subprocesses.
+  - Checks performed: path existence, `index.lock` stale-lock detection (linked worktree gitdir resolution),
+    HEAD resolution via `git rev-parse HEAD`, branch name via `--abbrev-ref`, dirty detection via
+    `git status --porcelain`, and structural fsck via `git fsck --no-dangling --no-progress`.
+  - `check_agent(agent_id, path)` — single-agent check; returns None for isolate=False agents.
+  - `check_all(agent_paths)` — concurrent multi-agent check via `asyncio.gather`.
+  - `check_and_publish_dirty(agent_id, path)` — publishes `dirty_worktree` bus event when uncommitted
+    changes are detected after an agent stops.
+  - `check_and_publish_integrity(agent_id, path)` — publishes `integrity_check_failed` bus event when
+    the worktree is structurally invalid (for use as a pre-dispatch hook).
+- New REST endpoint `GET /agents/{agent_id}/worktree-status` — returns a `WorktreeStatus` JSON object
+  for the agent's git worktree.  Returns 404 for unknown agents; returns `{path: null}` for shared
+  (isolate=False) agents.
+- 18 new unit tests in `tests/test_worktree_integrity.py` (882 total).
+- OpenAPI schema snapshot updated.
+
+### Technical Notes
+
+- `index.lock` resolution correctly handles linked worktrees where `.git` is a file (gitdir pointer)
+  rather than a directory.  The checker parses the `gitdir: <path>` pointer to find the actual git
+  metadata directory before looking for the lock file.
+- All git operations run via `asyncio.create_subprocess_exec` (non-blocking).
+- Design reference: DESIGN.md §10.17 (v0.43.0).
+
+---
+
 ## [0.42.0] — 2026-03-06
 
 ### Added
