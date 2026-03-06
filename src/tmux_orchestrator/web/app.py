@@ -404,6 +404,56 @@ class AdrWorkflowSubmit(BaseModel):
         return v
 
 
+class FulldevWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/fulldev — Full Software Development Lifecycle.
+
+    Submits a 5-agent sequential pipeline DAG:
+
+      1. ``spec-writer``: writes feature requirements specification (SPEC.md) and
+         stores it in ``{scratchpad_prefix}_spec``.
+      2. ``architect``: reads spec, writes ADR/design document (DESIGN.md) and
+         stores it in ``{scratchpad_prefix}_design``.
+      3. ``tdd-test-writer``: reads spec + design, writes failing pytest tests and
+         stores them in ``{scratchpad_prefix}_tests``.
+      4. ``tdd-implementer``: reads spec + tests, writes implementation that makes
+         tests pass, stores it in ``{scratchpad_prefix}_impl``.
+      5. ``reviewer``: reads all artifacts, writes code review to
+         ``{scratchpad_prefix}_review``.
+
+    All handoffs use the shared scratchpad (Blackboard pattern). Each task
+    ``depends_on`` the previous task, forming a linear pipeline.
+
+    Design references:
+    - MetaGPT arXiv:2308.00352 (2023/2024): PM → Architect → Engineer SOP pipeline.
+    - AgentMesh arXiv:2507.19902 (2025): Planner → Coder → Debugger → Reviewer.
+    - arXiv:2508.00083 "Survey on Code Generation with LLM-based Agents" (2025):
+      Pipeline-based labor division + Blackboard model for inter-agent handoff.
+    - arXiv:2505.16339 "Rethinking Code Review Workflows" (2025): LLM code review
+      integrated into automated pipelines.
+    - DESIGN.md §10.16 (v0.42.0)
+    """
+
+    feature: str
+    language: str = "python"
+    # Optional per-role required_tags for agent capability routing
+    spec_writer_tags: list[str] = []
+    architect_tags: list[str] = []
+    test_writer_tags: list[str] = []
+    implementer_tags: list[str] = []
+    reviewer_tags: list[str] = []
+    # When set, the reviewer RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    from pydantic import field_validator
+
+    @field_validator("feature")
+    @classmethod
+    def feature_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("feature must not be empty")
+        return v
+
+
 # ---------------------------------------------------------------------------
 # Module-level auth state
 # ---------------------------------------------------------------------------
@@ -1920,6 +1970,327 @@ def create_app(
             "proposer": proposer_task.id,
             "reviewer": reviewer_task.id,
             "synthesizer": synthesizer_task.id,
+        }
+
+        all_task_ids = list(task_ids_map.values())
+        run = wm.submit(name=wf_name, task_ids=all_task_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids_map,
+            "scratchpad_prefix": scratchpad_prefix,
+        }
+
+    @app.post(
+        "/workflows/fulldev",
+        summary="Submit a 5-agent Full Software Development Lifecycle workflow",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_fulldev_workflow(body: FulldevWorkflowSubmit) -> dict:
+        """Submit a 5-agent Full Software Development Lifecycle Workflow DAG.
+
+        Pipeline (each step depends_on the previous):
+
+        1. **spec-writer**: writes a precise feature specification (SPEC.md) with
+           functional requirements and acceptance criteria; stores it to scratchpad.
+        2. **architect**: reads the spec, writes an architecture/design document
+           (DESIGN.md or ADR) with component breakdown and interface definitions;
+           stores it to scratchpad.
+        3. **tdd-test-writer** (RED): reads spec + design, writes failing pytest
+           tests that codify acceptance criteria; stores test file path to scratchpad.
+        4. **tdd-implementer** (GREEN): reads spec + test file path, writes the
+           minimal implementation that makes all tests pass; stores impl path.
+        5. **reviewer**: reads spec, tests, and implementation; writes a structured
+           code review (REVIEW.md) categorising blocking/non-blocking issues.
+
+        All artifacts are passed via the shared scratchpad (Blackboard pattern).
+        Scratchpad keys use underscores (not slashes) as namespace separator.
+
+        Returns:
+        - ``workflow_id``: workflow run UUID for status polling
+        - ``name``: human-readable name (``fulldev/<feature>``)
+        - ``task_ids``: dict with keys ``spec_writer``, ``architect``,
+          ``test_writer``, ``implementer``, ``reviewer`` mapping to global task IDs
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+          (e.g. ``fulldev_{run_id[:8]}``)
+
+        Design references:
+        - MetaGPT arXiv:2308.00352 (2023/2024): PM → Architect → Engineer SOP pipeline.
+        - AgentMesh arXiv:2507.19902 (2025): Planner → Coder → Debugger → Reviewer.
+        - arXiv:2508.00083 "Survey on Code Generation with LLM-based Agents" (2025).
+        - arXiv:2505.16339 "Rethinking Code Review Workflows" (2025).
+        - DESIGN.md §10.16 (v0.42.0)
+        """
+        import uuid as _uuid  # noqa: PLC0415
+
+        lang = body.language
+        feature_slug = body.feature.replace(" ", "_")
+
+        wm = orchestrator.get_workflow_manager()
+        wf_name = f"fulldev/{body.feature}"
+
+        pre_run_id = str(_uuid.uuid4())
+        scratchpad_prefix = f"fulldev_{pre_run_id[:8]}"
+
+        # Scratchpad keys (underscores only — no slashes)
+        spec_key = f"{scratchpad_prefix}_spec"
+        design_key = f"{scratchpad_prefix}_design"
+        tests_key = f"{scratchpad_prefix}_tests"
+        impl_key = f"{scratchpad_prefix}_impl"
+        review_key = f"{scratchpad_prefix}_review"
+
+        # Shared bash snippet for reading context + API key
+        _ctx_snippet = (
+            "WEB_BASE_URL=$(python3 -c \""
+            "import json; d=json.load(open('__orchestrator_context__.json')); "
+            "print(d['web_base_url'])\")\n"
+            "   API_KEY=$(cat __orchestrator_api_key__ 2>/dev/null || "
+            "echo \"$TMUX_ORCHESTRATOR_API_KEY\")"
+        )
+
+        def _write_snippet(key: str, var: str = "CONTENT") -> str:
+            return (
+                f"   curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     -H 'Content-Type: application/json' \\\n"
+                f"     -d '{{\"value\": \"'${var}'\"}}'  "
+            )
+
+        def _read_snippet(key: str, varname: str) -> str:
+            return (
+                f"   {varname}=$(curl -s -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"value\"])')\n"
+            )
+
+        # ---------------------------------------------------------------
+        # 1. SPEC-WRITER prompt
+        # ---------------------------------------------------------------
+        spec_writer_prompt = (
+            f"You are the SPEC-WRITER agent in a Full Software Development Lifecycle workflow.\n"
+            f"\n"
+            f"**Feature to specify:** {body.feature}\n"
+            f"**Language:** {lang}\n"
+            f"\n"
+            f"Your task:\n"
+            f"1. Write a precise, unambiguous specification for '{body.feature}'.\n"
+            f"   Use this format:\n"
+            f"   ```markdown\n"
+            f"   # Specification: {body.feature}\n"
+            f"   ## Context\n"
+            f"   ## Functional Requirements\n"
+            f"   1. <FR-1> ...\n"
+            f"   ## Acceptance Criteria\n"
+            f"   - AC-1: Given ... when ... then ...\n"
+            f"   ## Out of Scope\n"
+            f"   ## Glossary\n"
+            f"   ```\n"
+            f"2. Save the specification to `SPEC.md` in your working directory.\n"
+            f"3. Store the SPEC.md contents in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            f"   CONTENT=$(cat SPEC.md)\n"
+            + _write_snippet(spec_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Focus on WHAT the system must do, not HOW to implement it.\n"
+            f"Be precise: every requirement must be verifiable. Max 400 words."
+        )
+
+        # ---------------------------------------------------------------
+        # 2. ARCHITECT prompt
+        # ---------------------------------------------------------------
+        architect_prompt = (
+            f"You are the ARCHITECT agent in a Full Software Development Lifecycle workflow.\n"
+            f"\n"
+            f"**Feature:** {body.feature}\n"
+            f"**Language:** {lang}\n"
+            f"\n"
+            f"Your task:\n"
+            f"1. Read the feature specification from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(spec_key, "SPEC")
+            + f"   echo \"Spec loaded: $(echo $SPEC | wc -c) chars\"\n"
+            f"   ```\n"
+            f"2. Design the {lang} implementation architecture:\n"
+            f"   - Identify the main components/classes/modules.\n"
+            f"   - Define the public API (function signatures, class interfaces).\n"
+            f"   - List key design decisions (data structures, error handling strategy).\n"
+            f"   - Note any constraints or non-functional requirements.\n"
+            f"3. Write the design to `DESIGN.md`:\n"
+            f"   ```markdown\n"
+            f"   # Design: {body.feature}\n"
+            f"   ## Components\n"
+            f"   ## Public API\n"
+            f"   ## Key Design Decisions\n"
+            f"   ## Implementation Notes\n"
+            f"   ```\n"
+            f"4. Store DESIGN.md in the scratchpad:\n"
+            f"   ```bash\n"
+            f"   CONTENT=$(cat DESIGN.md)\n"
+            + _write_snippet(design_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Focus on the architecture, not the implementation. Max 400 words."
+        )
+
+        # ---------------------------------------------------------------
+        # 3. TDD-TEST-WRITER prompt
+        # ---------------------------------------------------------------
+        test_writer_prompt = (
+            f"You are the TDD-TEST-WRITER agent in a Full Software Development Lifecycle workflow.\n"
+            f"\n"
+            f"**Feature:** {body.feature}\n"
+            f"**Language:** {lang}\n"
+            f"\n"
+            f"Your task (RED phase — write failing tests first):\n"
+            f"1. Read the specification and design from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(spec_key, "SPEC")
+            + _read_snippet(design_key, "DESIGN")
+            + f"   echo \"Spec + Design loaded\"\n"
+            f"   ```\n"
+            f"2. Write {lang} pytest tests for '{body.feature}':\n"
+            f"   - Each test must correspond to an Acceptance Criterion in the spec.\n"
+            f"   - Tests must FAIL against an empty/stub implementation.\n"
+            f"   - Use descriptive test names that act as a specification.\n"
+            f"   - Import the module that the implementer will create.\n"
+            f"3. Save tests to `test_{feature_slug}.py` in your working directory.\n"
+            f"4. Verify tests fail: `python -m pytest test_{feature_slug}.py -v 2>&1 | tail -20`\n"
+            f"   (Expect ImportError or AssertionError — that's correct for RED phase)\n"
+            f"5. Store the ABSOLUTE PATH to the test file in the scratchpad:\n"
+            f"   ```bash\n"
+            f"   CONTENT=$(pwd)/test_{feature_slug}.py\n"
+            + _write_snippet(tests_key, "CONTENT")
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Do NOT write any implementation code. Focus only on tests."
+        )
+
+        # ---------------------------------------------------------------
+        # 4. TDD-IMPLEMENTER prompt
+        # ---------------------------------------------------------------
+        implementer_prompt = (
+            f"You are the TDD-IMPLEMENTER agent in a Full Software Development Lifecycle workflow.\n"
+            f"\n"
+            f"**Feature:** {body.feature}\n"
+            f"**Language:** {lang}\n"
+            f"\n"
+            f"Your task (GREEN phase — make tests pass):\n"
+            f"1. Read the specification and test file path from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(spec_key, "SPEC")
+            + _read_snippet(tests_key, "TEST_FILE")
+            + f"   echo \"Spec loaded, test file: $TEST_FILE\"\n"
+            f"   ```\n"
+            f"2. Read the test file: `cat $TEST_FILE`\n"
+            f"3. Write the MINIMAL {lang} implementation of '{body.feature}' that makes\n"
+            f"   all tests pass:\n"
+            f"   - Implement only what the tests require.\n"
+            f"   - Follow the design from the spec (the architect's DESIGN.md).\n"
+            f"   - Write the module in the same directory as the tests\n"
+            f"     (so the test imports work).\n"
+            f"4. Verify: `python -m pytest $TEST_FILE -v`\n"
+            f"   All tests must pass before proceeding.\n"
+            f"5. Store the ABSOLUTE PATH to the implementation file in the scratchpad:\n"
+            f"   ```bash\n"
+            f"   # Replace 'your_impl_file.py' with the actual filename\n"
+            f"   CONTENT=$(pwd)/your_impl_file.py\n"
+            + _write_snippet(impl_key, "CONTENT")
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Implement '{body.feature}' to make all tests pass."
+        )
+
+        # ---------------------------------------------------------------
+        # 5. REVIEWER prompt
+        # ---------------------------------------------------------------
+        reviewer_prompt = (
+            f"You are the REVIEWER agent in a Full Software Development Lifecycle workflow.\n"
+            f"\n"
+            f"**Feature:** {body.feature}\n"
+            f"**Language:** {lang}\n"
+            f"\n"
+            f"Your task:\n"
+            f"1. Read all artifacts from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(spec_key, "SPEC")
+            + _read_snippet(tests_key, "TEST_FILE")
+            + _read_snippet(impl_key, "IMPL_FILE")
+            + f"   echo \"All artifacts loaded\"\n"
+            f"   echo \"Test file: $TEST_FILE\"\n"
+            f"   echo \"Impl file: $IMPL_FILE\"\n"
+            f"   ```\n"
+            f"2. Read the actual test and implementation files:\n"
+            f"   `cat $TEST_FILE && cat $IMPL_FILE`\n"
+            f"3. Run the tests to verify they pass:\n"
+            f"   `python -m pytest $TEST_FILE -v`\n"
+            f"4. Write a structured code review to `REVIEW.md`:\n"
+            f"   ```markdown\n"
+            f"   # Code Review: {body.feature}\n"
+            f"   ## Summary\n"
+            f"   ## Spec Compliance\n"
+            f"   (Does the implementation satisfy all acceptance criteria?)\n"
+            f"   ## Blocking Issues\n"
+            f"   ## Non-Blocking Issues\n"
+            f"   ## Suggestions\n"
+            f"   ## Test Coverage Assessment\n"
+            f"   ## Conclusion: APPROVED / APPROVED WITH CHANGES / REJECTED\n"
+            f"   ```\n"
+            f"5. Store your review in the scratchpad:\n"
+            f"   ```bash\n"
+            f"   CONTENT=$(cat REVIEW.md)\n"
+            + _write_snippet(review_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Be rigorous. Do not approve code that fails tests or violates the spec."
+        )
+
+        # ---------------------------------------------------------------
+        # Submit the 5-step DAG (linear pipeline)
+        # ---------------------------------------------------------------
+        sw_task = await orchestrator.submit_task(
+            spec_writer_prompt,
+            required_tags=body.spec_writer_tags or None,
+        )
+        arch_task = await orchestrator.submit_task(
+            architect_prompt,
+            required_tags=body.architect_tags or None,
+            depends_on=[sw_task.id],
+        )
+        tw_task = await orchestrator.submit_task(
+            test_writer_prompt,
+            required_tags=body.test_writer_tags or None,
+            depends_on=[arch_task.id],
+        )
+        impl_task = await orchestrator.submit_task(
+            implementer_prompt,
+            required_tags=body.implementer_tags or None,
+            depends_on=[tw_task.id],
+        )
+        rev_task = await orchestrator.submit_task(
+            reviewer_prompt,
+            required_tags=body.reviewer_tags or None,
+            depends_on=[impl_task.id],
+            reply_to=body.reply_to,
+        )
+
+        task_ids_map = {
+            "spec_writer": sw_task.id,
+            "architect": arch_task.id,
+            "test_writer": tw_task.id,
+            "implementer": impl_task.id,
+            "reviewer": rev_task.id,
         }
 
         all_task_ids = list(task_ids_map.values())

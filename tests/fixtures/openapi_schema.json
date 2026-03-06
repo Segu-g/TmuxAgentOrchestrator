@@ -282,6 +282,76 @@
         "title": "DynamicAgentCreate",
         "type": "object"
       },
+      "FulldevWorkflowSubmit": {
+        "description": "Request body for POST /workflows/fulldev \u2014 Full Software Development Lifecycle.\n\nSubmits a 5-agent sequential pipeline DAG:\n\n  1. ``spec-writer``: writes feature requirements specification (SPEC.md) and\n     stores it in ``{scratchpad_prefix}_spec``.\n  2. ``architect``: reads spec, writes ADR/design document (DESIGN.md) and\n     stores it in ``{scratchpad_prefix}_design``.\n  3. ``tdd-test-writer``: reads spec + design, writes failing pytest tests and\n     stores them in ``{scratchpad_prefix}_tests``.\n  4. ``tdd-implementer``: reads spec + tests, writes implementation that makes\n     tests pass, stores it in ``{scratchpad_prefix}_impl``.\n  5. ``reviewer``: reads all artifacts, writes code review to\n     ``{scratchpad_prefix}_review``.\n\nAll handoffs use the shared scratchpad (Blackboard pattern). Each task\n``depends_on`` the previous task, forming a linear pipeline.\n\nDesign references:\n- MetaGPT arXiv:2308.00352 (2023/2024): PM \u2192 Architect \u2192 Engineer SOP pipeline.\n- AgentMesh arXiv:2507.19902 (2025): Planner \u2192 Coder \u2192 Debugger \u2192 Reviewer.\n- arXiv:2508.00083 \"Survey on Code Generation with LLM-based Agents\" (2025):\n  Pipeline-based labor division + Blackboard model for inter-agent handoff.\n- arXiv:2505.16339 \"Rethinking Code Review Workflows\" (2025): LLM code review\n  integrated into automated pipelines.\n- DESIGN.md \u00a710.16 (v0.42.0)",
+        "properties": {
+          "architect_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Architect Tags",
+            "type": "array"
+          },
+          "feature": {
+            "title": "Feature",
+            "type": "string"
+          },
+          "implementer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Implementer Tags",
+            "type": "array"
+          },
+          "language": {
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "reviewer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Reviewer Tags",
+            "type": "array"
+          },
+          "spec_writer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Spec Writer Tags",
+            "type": "array"
+          },
+          "test_writer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Test Writer Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "feature"
+        ],
+        "title": "FulldevWorkflowSubmit",
+        "type": "object"
+      },
       "GroupAddAgent": {
         "description": "Request body for POST /groups/{name}/agents.",
         "properties": {
@@ -2771,6 +2841,47 @@
           }
         },
         "summary": "Submit a multi-round Advocate/Critic/Judge debate workflow"
+      }
+    },
+    "/workflows/fulldev": {
+      "post": {
+        "description": "Submit a 5-agent Full Software Development Lifecycle Workflow DAG.\n\nPipeline (each step depends_on the previous):\n\n1. **spec-writer**: writes a precise feature specification (SPEC.md) with\n   functional requirements and acceptance criteria; stores it to scratchpad.\n2. **architect**: reads the spec, writes an architecture/design document\n   (DESIGN.md or ADR) with component breakdown and interface definitions;\n   stores it to scratchpad.\n3. **tdd-test-writer** (RED): reads spec + design, writes failing pytest\n   tests that codify acceptance criteria; stores test file path to scratchpad.\n4. **tdd-implementer** (GREEN): reads spec + test file path, writes the\n   minimal implementation that makes all tests pass; stores impl path.\n5. **reviewer**: reads spec, tests, and implementation; writes a structured\n   code review (REVIEW.md) categorising blocking/non-blocking issues.\n\nAll artifacts are passed via the shared scratchpad (Blackboard pattern).\nScratchpad keys use underscores (not slashes) as namespace separator.\n\nReturns:\n- ``workflow_id``: workflow run UUID for status polling\n- ``name``: human-readable name (``fulldev/<feature>``)\n- ``task_ids``: dict with keys ``spec_writer``, ``architect``,\n  ``test_writer``, ``implementer``, ``reviewer`` mapping to global task IDs\n- ``scratchpad_prefix``: scratchpad namespace for this run\n  (e.g. ``fulldev_{run_id[:8]}``)\n\nDesign references:\n- MetaGPT arXiv:2308.00352 (2023/2024): PM \u2192 Architect \u2192 Engineer SOP pipeline.\n- AgentMesh arXiv:2507.19902 (2025): Planner \u2192 Coder \u2192 Debugger \u2192 Reviewer.\n- arXiv:2508.00083 \"Survey on Code Generation with LLM-based Agents\" (2025).\n- arXiv:2505.16339 \"Rethinking Code Review Workflows\" (2025).\n- DESIGN.md \u00a710.16 (v0.42.0)",
+        "operationId": "submit_fulldev_workflow_workflows_fulldev_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FulldevWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Fulldev Workflow Workflows Fulldev Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a 5-agent Full Software Development Lifecycle workflow"
       }
     },
     "/workflows/tdd": {

@@ -6,6 +6,51 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.42.0] — 2026-03-06
+
+### Added
+
+**Full Software Development Lifecycle Workflow — `POST /workflows/fulldev`**
+
+- New endpoint `POST /workflows/fulldev`: submits a 5-agent linear pipeline DAG
+  covering the complete software development lifecycle:
+  1. **spec-writer** — writes feature requirements specification (SPEC.md) and stores
+     it to `{prefix}_spec` in the shared scratchpad.
+  2. **architect** — reads the spec, writes architecture/design document (DESIGN.md)
+     and stores it to `{prefix}_design`.
+  3. **tdd-test-writer** (RED) — reads spec + design, writes failing pytest tests,
+     stores the test file path to `{prefix}_tests`.
+  4. **tdd-implementer** (GREEN) — reads spec + tests, writes the minimal implementation
+     that makes all tests pass, stores impl path to `{prefix}_impl`.
+  5. **reviewer** — reads all artifacts (spec, tests, impl), writes a structured code
+     review (REVIEW.md) with BLOCKING / NON-BLOCKING / SUGGESTION categorisation,
+     stores to `{prefix}_review`.
+- All handoffs use the shared scratchpad (Blackboard pattern). Each task `depends_on`
+  the previous task in the chain.
+- New `FulldevWorkflowSubmit` Pydantic model with per-role `*_tags` fields and
+  `reply_to` routing to the reviewer (last task).
+- New role template `.claude/prompts/roles/architect.md` — Architect agent prompt with
+  prohibited behaviours (no code), completion criteria (fully-typed API), document
+  format (Components / Public API / Key Design Decisions), and design references.
+- 43 new unit tests in `tests/test_workflow_fulldev.py` covering schema validation,
+  response structure, DAG dependencies, required tags, prompt content, and OpenAPI.
+- OpenAPI snapshot updated.
+
+### References
+
+- MetaGPT arXiv:2308.00352 (2023/2024): PM → Architect → Engineer SOP pipeline with
+  structured intermediate outputs.
+- AgentMesh arXiv:2507.19902 (2025): Planner → Coder → Debugger → Reviewer 4-role
+  pipeline outperforms single-agent baselines.
+- arXiv:2508.00083 "A Survey on Code Generation with LLM-based Agents" (2025):
+  Pipeline-based labor division + Blackboard (shared scratchpad) model for handoff.
+- arXiv:2505.16339 "Rethinking Code Review Workflows with LLM Assistance" (2025):
+  Automated LLM code review integrated into CI/CD pipelines.
+- arXiv:2407.01489 "Agentless" (2025): Simple linear pipeline matches complex agentic
+  approaches on SWE-bench.
+
+---
+
 ## [0.41.0] — 2026-03-06
 
 ### Added
