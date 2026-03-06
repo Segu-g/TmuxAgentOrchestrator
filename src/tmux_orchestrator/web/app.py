@@ -1325,11 +1325,21 @@ def create_app(
                 ),
             )
 
-        # Parse optional body
+        # Parse optional body sent by the Stop hook.
+        # Claude Code sends: {"stop_hook_active": bool, "last_assistant_message": str, ...}
         output = ""
         try:
             body = await request.json()
-            output = body.get("output", "") or ""
+            # stop_hook_active=true means Claude is in a hook-initiated continuation
+            # (not a genuine task completion) — skip to avoid false completions.
+            if body.get("stop_hook_active"):
+                return {"status": "skipped", "reason": "stop_hook_active"}
+            # Prefer the authoritative last_assistant_message over pane-scraped output.
+            output = (
+                body.get("last_assistant_message")
+                or body.get("output")
+                or ""
+            )
         except Exception:  # noqa: BLE001
             pass  # body is optional; empty output is fine
 

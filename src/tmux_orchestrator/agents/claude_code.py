@@ -483,6 +483,14 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
                                 "type": "http",
                                 "url": url,
                                 "timeout": 5,
+                                # $TMUX_ORCHESTRATOR_API_KEY is injected into the
+                                # tmux session env by _set_session_env_api_key().
+                                # allowedEnvVars is required for Claude Code to
+                                # expand $VAR references in headers.
+                                "headers": {
+                                    "X-Api-Key": "$TMUX_ORCHESTRATOR_API_KEY",
+                                },
+                                "allowedEnvVars": ["TMUX_ORCHESTRATOR_API_KEY"],
                             }
                         ],
                     }
@@ -640,6 +648,11 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
         prev = ""
         while True:
             await asyncio.sleep(_POLL_INTERVAL)
+            # Stop hook may have already called handle_output() and cleared
+            # _current_task.  If so, this task is done — return immediately
+            # to avoid a second handle_output() call (double-completion).
+            if self._current_task is None or self._current_task.id != task.id:
+                return
             loop = asyncio.get_running_loop()
             text = await loop.run_in_executor(
                 None, self._tmux.capture_pane, self.pane
