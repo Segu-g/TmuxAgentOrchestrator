@@ -127,6 +127,16 @@ Each step is **required**. Never skip to the next step until the current one is 
   This ensures `WorktreeManager` uses the demo folder as its repo root, so agent worktrees
   and any files written by agents stay inside `~/Demonstration/v<version>-<topic>/`
   and never pollute the TmuxAgentOrchestrator repository.
+- **The orchestrator server must also be started with `cwd` set to the demo folder.**
+  In `demo.py`, when launching the server subprocess, pass `cwd=str(DEMO_DIR)` — NOT
+  `cwd=PROJECT_ROOT`. This is what makes `WorktreeManager(Path.cwd())` pick up the
+  demo repo instead of the TmuxAgentOrchestrator repo.
+  ```python
+  DEMO_DIR = Path(__file__).parent   # ~/Demonstration/v<version>-<topic>/
+  subprocess.Popen([...server command...], cwd=str(DEMO_DIR))
+  ```
+  If the server is started with `cwd=PROJECT_ROOT`, worktrees will be created inside
+  the TmuxAgentOrchestrator repository — this is a bug, not the intended behaviour.
 - **Write `demo.py`, then immediately run it from the demo folder:**
   ```
   cd ~/Demonstration/v<version>-<topic>/
