@@ -367,6 +367,43 @@ class DebateWorkflowSubmit(BaseModel):
         return v
 
 
+class AdrWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/adr — Architecture Decision Record auto-generation.
+
+    Submits a Proposer → Reviewer → Synthesizer Workflow DAG that produces a
+    MADR-format DECISION.md via the shared scratchpad (Blackboard pattern):
+
+      - ``{scratchpad_prefix}_proposal``: proposer's analysis of options
+      - ``{scratchpad_prefix}_review``:   reviewer's technical critique
+      - ``{scratchpad_prefix}_decision``: synthesizer's final MADR DECISION.md
+
+    Design references:
+    - AgenticAKM arXiv:2602.04445 (2026): Extractor/Retriever/Generator/Validator
+      multi-agent decomposition improves ADR quality over single-LLM calls.
+    - Ochoa et al. arXiv:2507.05981 "MAD for Requirements Engineering" (RE 2025):
+      multi-agent debate enhances requirements classification accuracy.
+    - MADR 4.0.0 (2024-09-17): Markdown Architectural Decision Records standard format.
+    - DESIGN.md §10.14 (v0.40.0)
+    """
+
+    topic: str
+    # Optional per-role required_tags for agent capability routing
+    proposer_tags: list[str] = []
+    reviewer_tags: list[str] = []
+    synthesizer_tags: list[str] = []
+    # When set, the synthesizer RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    from pydantic import field_validator
+
+    @field_validator("topic")
+    @classmethod
+    def topic_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("topic must not be empty")
+        return v
+
+
 # ---------------------------------------------------------------------------
 # Module-level auth state
 # ---------------------------------------------------------------------------
@@ -1681,6 +1718,210 @@ def create_app(
         task_ids_map["judge"] = judge_task.id
 
         # Register all tasks with WorkflowManager
+        all_task_ids = list(task_ids_map.values())
+        run = wm.submit(name=wf_name, task_ids=all_task_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids_map,
+            "scratchpad_prefix": scratchpad_prefix,
+        }
+
+    @app.post(
+        "/workflows/adr",
+        summary="Submit a Proposer/Reviewer/Synthesizer ADR generation workflow",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_adr_workflow(body: AdrWorkflowSubmit) -> dict:
+        """Submit a 3-agent Architecture Decision Record (ADR) Workflow DAG.
+
+        Pipeline:
+          1. **proposer**: analyses the topic, lists candidate options with
+             technical pros/cons, and stores the analysis in the scratchpad.
+          2. **reviewer**: reads the proposal and produces a technical critique
+             — identifies gaps, missing trade-offs, and biases.
+          3. **synthesizer**: reads both proposal and review, then produces a
+             final MADR-format ``DECISION.md`` and writes it to the scratchpad.
+
+        Returns:
+        - ``workflow_id``: workflow run UUID for status polling
+        - ``name``: human-readable name (``adr/<topic>``)
+        - ``task_ids``: dict with keys ``proposer``, ``reviewer``, ``synthesizer``
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+
+        Design references:
+        - AgenticAKM arXiv:2602.04445 (2026): multi-agent decomposition.
+        - Ochoa et al. arXiv:2507.05981 "MAD for RE" (2025).
+        - MADR 4.0.0 (2024-09-17): Markdown ADR standard.
+        - DESIGN.md §10.14 (v0.40.0)
+        """
+        import uuid as _uuid  # noqa: PLC0415
+
+        wm = orchestrator.get_workflow_manager()
+        wf_name = f"adr/{body.topic}"
+
+        pre_run_id = str(_uuid.uuid4())
+        scratchpad_prefix = f"adr_{pre_run_id[:8]}"
+
+        # Shared bash snippets for reading context and API key
+        _ctx_snippet = (
+            "WEB_BASE_URL=$(python3 -c \""
+            "import json; d=json.load(open('__orchestrator_context__.json')); "
+            "print(d['web_base_url'])\")\n"
+            "   API_KEY=$(cat __orchestrator_api_key__ 2>/dev/null || "
+            "echo \"$TMUX_ORCHESTRATOR_API_KEY\")"
+        )
+
+        def _scratchpad_key(suffix: str) -> str:
+            return f"{scratchpad_prefix}_{suffix}"
+
+        def _write_snippet(key: str, var: str = "CONTENT") -> str:
+            return (
+                f"   curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     -H 'Content-Type: application/json' \\\n"
+                f"     -d '{{\"value\": \"'${var}'\"}}'  "
+            )
+
+        def _read_snippet(key: str, varname: str) -> str:
+            return (
+                f"   {varname}=$(curl -s -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"value\"])')\n"
+            )
+
+        proposal_key = _scratchpad_key("proposal")
+        review_key = _scratchpad_key("review")
+        decision_key = _scratchpad_key("decision")
+
+        # --- Proposer prompt ---
+        proposer_prompt = (
+            f"You are the PROPOSER agent in an Architecture Decision Record (ADR) workflow.\n"
+            f"\n"
+            f"**ADR Topic:** {body.topic}\n"
+            f"\n"
+            f"Your task is to analyse the architectural decision and identify candidate options.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Identify 2-3 concrete options for addressing '{body.topic}'.\n"
+            f"2. For each option, document:\n"
+            f"   - Brief description\n"
+            f"   - Pros (technical advantages, performance, maintainability, cost)\n"
+            f"   - Cons (drawbacks, risks, operational complexity)\n"
+            f"   - When this option is most appropriate\n"
+            f"3. Write your analysis to `proposal.md` in your working directory.\n"
+            f"4. Store it in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            f"   CONTENT=$(cat proposal.md)\n"
+            + _write_snippet(proposal_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Be technical, specific, and objective. Do not recommend a winner yet — "
+            f"that is the synthesizer's job. Max 500 words."
+        )
+
+        # --- Reviewer prompt ---
+        reviewer_prompt = (
+            f"You are the REVIEWER agent in an Architecture Decision Record (ADR) workflow.\n"
+            f"\n"
+            f"**ADR Topic:** {body.topic}\n"
+            f"\n"
+            f"Your task is to critically review the proposer's analysis.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read the proposer's analysis from the scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(proposal_key, "PROPOSAL")
+            + f"   echo \"Proposal: $PROPOSAL\"\n"
+            f"   ```\n"
+            f"2. Critically evaluate the proposal:\n"
+            f"   - Are any options missing or underrepresented?\n"
+            f"   - Are the pros/cons accurate and complete?\n"
+            f"   - Are there hidden risks or biases in the analysis?\n"
+            f"   - What additional decision drivers should be considered?\n"
+            f"     (e.g. team expertise, operational burden, vendor lock-in, scalability)\n"
+            f"3. Write your critique to `review.md` in your working directory.\n"
+            f"4. Store it in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   CONTENT=$(cat review.md)\n"
+            + _write_snippet(review_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Be rigorous and independent. Do not simply agree with the proposer — "
+            f"your role is to stress-test the analysis. Max 400 words."
+        )
+
+        # --- Synthesizer prompt ---
+        synthesizer_prompt = (
+            f"You are the SYNTHESIZER agent in an Architecture Decision Record (ADR) workflow.\n"
+            f"\n"
+            f"**ADR Topic:** {body.topic}\n"
+            f"\n"
+            f"Your task is to read the proposal and review, then produce a final "
+            f"MADR-format DECISION.md.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read both artifacts from the scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(proposal_key, "PROPOSAL")
+            + _read_snippet(review_key, "REVIEW")
+            + f"   ```\n"
+            f"2. Write `DECISION.md` in MADR format with these sections:\n"
+            f"   ```markdown\n"
+            f"   # ADR: {body.topic}\n"
+            f"   Status: Accepted\n"
+            f"   Date: $(date +%Y-%m-%d)\n"
+            f"   ## Context and Problem Statement\n"
+            f"   ## Decision Drivers\n"
+            f"   ## Considered Options\n"
+            f"   ## Decision Outcome\n"
+            f"   ### Consequences\n"
+            f"   ## Pros and Cons of the Options\n"
+            f"   ```\n"
+            f"3. Store DECISION.md in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   CONTENT=$(cat DECISION.md)\n"
+            + _write_snippet(decision_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Synthesize both the proposal and the reviewer's critique. "
+            f"Choose the best option with clear rationale. "
+            f"Acknowledge the reviewer's concerns in the Consequences section."
+        )
+
+        # Submit tasks in pipeline order
+        proposer_task = await orchestrator.submit_task(
+            proposer_prompt,
+            required_tags=body.proposer_tags or None,
+            depends_on=[],
+        )
+
+        reviewer_task = await orchestrator.submit_task(
+            reviewer_prompt,
+            required_tags=body.reviewer_tags or None,
+            depends_on=[proposer_task.id],
+        )
+
+        synthesizer_task = await orchestrator.submit_task(
+            synthesizer_prompt,
+            required_tags=body.synthesizer_tags or None,
+            depends_on=[reviewer_task.id],
+            reply_to=body.reply_to,
+        )
+
+        task_ids_map = {
+            "proposer": proposer_task.id,
+            "reviewer": reviewer_task.id,
+            "synthesizer": synthesizer_task.id,
+        }
+
         all_task_ids = list(task_ids_map.values())
         run = wm.submit(name=wf_name, task_ids=all_task_ids)
 

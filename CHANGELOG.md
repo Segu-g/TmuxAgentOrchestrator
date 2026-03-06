@@ -6,6 +6,36 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.40.0] — 2026-03-06
+
+### Added
+
+**`POST /workflows/adr` — Architecture Decision Record auto-generation workflow**
+
+- `AdrWorkflowSubmit` Pydantic model: `topic`, `proposer_tags`, `reviewer_tags`,
+  `synthesizer_tags`, `reply_to`.
+- 3-agent pipeline DAG: proposer (no deps) → reviewer (depends_on proposer) →
+  synthesizer (depends_on reviewer).
+- Proposer: analyses topic, lists 2-3 options with pros/cons, stores in scratchpad.
+- Reviewer: reads proposal from scratchpad, produces critical technical review,
+  identifies gaps, biases and missing decision drivers.
+- Synthesizer: reads both proposal and review, produces MADR-format DECISION.md
+  (title / context / decision drivers / considered options / decision outcome /
+  consequences / pros and cons) and stores in scratchpad.
+- Scratchpad Blackboard pattern: keys `{prefix}_proposal`, `{prefix}_review`,
+  `{prefix}_decision` for artifact passing between agents.
+- `reply_to` forwarded to synthesizer so director agents can receive the final ADR.
+- OpenAPI snapshot updated.
+- 25 new unit tests in `tests/test_workflow_adr.py`.
+
+### References
+
+- AgenticAKM arXiv:2602.04445 (2026): multi-agent ADR generation improves quality
+- Ochoa et al. arXiv:2507.05981 "MAD for Requirements Engineering" (RE 2025)
+- MADR 4.0.0 (2024-09-17): Markdown Architectural Decision Records standard
+
+---
+
 ## [0.39.0] — 2026-03-06
 
 ### Added

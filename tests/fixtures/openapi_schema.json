@@ -1,6 +1,55 @@
 {
   "components": {
     "schemas": {
+      "AdrWorkflowSubmit": {
+        "description": "Request body for POST /workflows/adr \u2014 Architecture Decision Record auto-generation.\n\nSubmits a Proposer \u2192 Reviewer \u2192 Synthesizer Workflow DAG that produces a\nMADR-format DECISION.md via the shared scratchpad (Blackboard pattern):\n\n  - ``{scratchpad_prefix}_proposal``: proposer's analysis of options\n  - ``{scratchpad_prefix}_review``:   reviewer's technical critique\n  - ``{scratchpad_prefix}_decision``: synthesizer's final MADR DECISION.md\n\nDesign references:\n- AgenticAKM arXiv:2602.04445 (2026): Extractor/Retriever/Generator/Validator\n  multi-agent decomposition improves ADR quality over single-LLM calls.\n- Ochoa et al. arXiv:2507.05981 \"MAD for Requirements Engineering\" (RE 2025):\n  multi-agent debate enhances requirements classification accuracy.\n- MADR 4.0.0 (2024-09-17): Markdown Architectural Decision Records standard format.\n- DESIGN.md \u00a710.14 (v0.40.0)",
+        "properties": {
+          "proposer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Proposer Tags",
+            "type": "array"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "reviewer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Reviewer Tags",
+            "type": "array"
+          },
+          "synthesizer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Synthesizer Tags",
+            "type": "array"
+          },
+          "topic": {
+            "title": "Topic",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic"
+        ],
+        "title": "AdrWorkflowSubmit",
+        "type": "object"
+      },
       "AgentKillResponse": {
         "properties": {
           "agent_id": {
@@ -2640,6 +2689,47 @@
           }
         },
         "summary": "Submit a multi-step workflow DAG"
+      }
+    },
+    "/workflows/adr": {
+      "post": {
+        "description": "Submit a 3-agent Architecture Decision Record (ADR) Workflow DAG.\n\nPipeline:\n  1. **proposer**: analyses the topic, lists candidate options with\n     technical pros/cons, and stores the analysis in the scratchpad.\n  2. **reviewer**: reads the proposal and produces a technical critique\n     \u2014 identifies gaps, missing trade-offs, and biases.\n  3. **synthesizer**: reads both proposal and review, then produces a\n     final MADR-format ``DECISION.md`` and writes it to the scratchpad.\n\nReturns:\n- ``workflow_id``: workflow run UUID for status polling\n- ``name``: human-readable name (``adr/<topic>``)\n- ``task_ids``: dict with keys ``proposer``, ``reviewer``, ``synthesizer``\n- ``scratchpad_prefix``: scratchpad namespace for this run\n\nDesign references:\n- AgenticAKM arXiv:2602.04445 (2026): multi-agent decomposition.\n- Ochoa et al. arXiv:2507.05981 \"MAD for RE\" (2025).\n- MADR 4.0.0 (2024-09-17): Markdown ADR standard.\n- DESIGN.md \u00a710.14 (v0.40.0)",
+        "operationId": "submit_adr_workflow_workflows_adr_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdrWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Adr Workflow Workflows Adr Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a Proposer/Reviewer/Synthesizer ADR generation workflow"
       }
     },
     "/workflows/debate": {
