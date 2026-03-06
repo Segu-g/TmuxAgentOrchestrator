@@ -564,6 +564,13 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
             )
             self._tmux.unwatch_pane(self.pane)
         await self.bus.unsubscribe(self.id)
+        # Always remove the Stop hook settings file on shutdown.
+        # For isolated agents this is redundant (the worktree is deleted), but
+        # for non-isolated agents (isolate: false) the file lives in the shared
+        # repo root and must be cleaned up explicitly to avoid stale hooks.
+        if self.worktree_path is not None:
+            settings_file = self.worktree_path / ".claude" / "settings.local.json"
+            settings_file.unlink(missing_ok=True)
         await self._teardown_worktree()
         logger.info("ClaudeCodeAgent %s stopped", self.id)
 

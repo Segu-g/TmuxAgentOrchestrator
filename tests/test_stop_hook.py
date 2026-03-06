@@ -470,6 +470,38 @@ async def test_start_writes_stop_hook_settings(tmp_path: Path) -> None:
     await agent.stop()
 
 
+@pytest.mark.asyncio
+async def test_stop_removes_stop_hook_settings_file(tmp_path: Path) -> None:
+    """stop() must delete .claude/settings.local.json to avoid stale hooks.
+
+    This is critical for non-isolated agents (isolate=False) whose worktree
+    is the shared repo root and is NOT deleted by _teardown_worktree().
+    """
+    bus = make_bus()
+    tmux = make_tmux_mock()
+
+    wm = MagicMock()
+    wm.setup = MagicMock(return_value=tmp_path)
+
+    agent = ClaudeCodeAgent(
+        agent_id="cleanup-agent",
+        bus=bus,
+        tmux=tmux,
+        worktree_manager=wm,
+        web_base_url="http://localhost:8000",
+    )
+
+    with patch.object(agent, "_wait_for_ready", new_callable=AsyncMock):
+        await agent.start()
+
+    settings_path = tmp_path / ".claude" / "settings.local.json"
+    assert settings_path.exists(), "precondition: file must exist after start()"
+
+    await agent.stop()
+
+    assert not settings_path.exists(), "stop() must remove .claude/settings.local.json"
+
+
 # ---------------------------------------------------------------------------
 # stop_hook_active and last_assistant_message handling
 # ---------------------------------------------------------------------------
