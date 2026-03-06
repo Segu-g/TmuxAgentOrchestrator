@@ -1,0 +1,36 @@
+# Declarative Workflow Demo Configuration
+# =========================================
+# Three specialized agents for the declarative workflow demo (v0.48.0):
+# - implementer: writes the implementation
+# - reviewer-a: reviews the implementation (parallel review)
+# - reviewer-b: second reviewer (parallel review)
+#
+# Demo pattern: implement (single) → review (parallel:2)
+# This demonstrates multi-agent coordination via the new phases= API.
+
+session_name: declarative-demo
+mailbox_dir: ~/.tmux_orchestrator
+
+agents:
+  - id: implementer
+    type: claude_code
+    tags: [implementer, coder]
+    task_timeout: 900
+
+  - id: reviewer-a
+    type: claude_code
+    tags: [reviewer]
+    task_timeout: 900
+
+  - id: reviewer-b
+    type: claude_code
+    tags: [reviewer]
+    task_timeout: 900
+
+p2p_permissions:
+  - [implementer, reviewer-a]
+  - [implementer, reviewer-b]
+  - [reviewer-a, reviewer-b]
+
+task_timeout: 900
+web_base_url: "http://localhost:8799"

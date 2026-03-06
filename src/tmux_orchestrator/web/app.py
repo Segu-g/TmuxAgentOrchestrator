@@ -260,11 +260,112 @@ class WorkflowTaskSpec(BaseModel):
     ttl: float | None = None
 
 
+class AgentSelectorModel(BaseModel):
+    """Agent selector for a workflow phase.
+
+    Attributes
+    ----------
+    tags:
+        ``required_tags`` constraint applied to task dispatch.
+    count:
+        Number of parallel agent slots (used by ``parallel`` and ``competitive``
+        patterns, and for the advocate/critic role in ``debate``).
+    target_agent:
+        Force-dispatch to a specific agent ID.
+    target_group:
+        Restrict to agents in the named group.
+
+    Design reference: DESIGN.md §10.15 (v0.48.0)
+    """
+
+    tags: list[str] = []
+    count: int = 1
+    target_agent: str | None = None
+    target_group: str | None = None
+
+
+class PhaseSpecModel(BaseModel):
+    """A single phase in a declarative workflow submission.
+
+    Attributes
+    ----------
+    name:
+        Human-readable phase label.
+    pattern:
+        Execution strategy: ``single`` | ``parallel`` | ``competitive`` | ``debate``.
+    agents:
+        Agent selector for the primary role.
+    critic_agents:
+        Agent selector for the critic role (debate only).
+    judge_agents:
+        Agent selector for the judge role (debate only).
+    debate_rounds:
+        Number of advocate/critic rounds (debate only, default 1).
+    context:
+        Optional per-phase context override.
+
+    Design references:
+    - arXiv:2512.19769 (PayPal DSL 2025): declarative phase → task expansion
+    - §12「ワークフロー設計の層構造」層1・2・3
+    - DESIGN.md §10.15 (v0.48.0)
+    """
+
+    name: str
+    pattern: str
+    agents: AgentSelectorModel = AgentSelectorModel()
+    critic_agents: AgentSelectorModel = AgentSelectorModel()
+    judge_agents: AgentSelectorModel = AgentSelectorModel()
+    debate_rounds: int = 1
+    context: str | None = None
+    required_tags: list[str] = []
+
+    from pydantic import field_validator
+
+    @field_validator("pattern")
+    @classmethod
+    def pattern_must_be_valid(cls, v: str) -> str:
+        valid = {"single", "parallel", "competitive", "debate"}
+        if v not in valid:
+            raise ValueError(f"pattern must be one of {sorted(valid)!r}")
+        return v
+
+
 class WorkflowSubmit(BaseModel):
-    """Request body for POST /workflows."""
+    """Request body for POST /workflows.
+
+    Supports two mutually exclusive submission modes:
+
+    1. **tasks= (legacy)**: Submit a raw DAG of :class:`WorkflowTaskSpec` nodes.
+       Backward-compatible with the original ``POST /workflows`` API.
+
+    2. **phases= (new)**: Submit a declarative list of :class:`PhaseSpecModel`
+       objects.  The server expands each phase into task specs and builds a
+       DAG automatically.
+
+    Exactly one of ``tasks`` or ``phases`` must be provided.  Providing neither
+    raises HTTP 422.
+
+    Design references:
+    - arXiv:2512.19769 (PayPal DSL 2025): declarative pattern reduces dev time 60%
+    - §12「ワークフロー設計の層構造」層1 宣言的モード
+    - DESIGN.md §10.15 (v0.48.0)
+    """
 
     name: str = "workflow"
-    tasks: list[WorkflowTaskSpec]
+    tasks: list[WorkflowTaskSpec] | None = None
+    phases: list[PhaseSpecModel] | None = None
+    context: str = ""
+    task_timeout: int | None = None
+
+    from pydantic import model_validator
+
+    @model_validator(mode="after")
+    def tasks_or_phases_required(self) -> "WorkflowSubmit":
+        if not self.tasks and not self.phases:
+            raise ValueError("Either 'tasks' or 'phases' must be provided")
+        if self.tasks and self.phases:
+            raise ValueError("Provide either 'tasks' or 'phases', not both")
+        return self
 
 
 class TddWorkflowSubmit(BaseModel):
@@ -1385,9 +1486,21 @@ def create_app(
     async def submit_workflow(body: WorkflowSubmit) -> dict:
         """Submit a named workflow as a directed acyclic graph of tasks.
 
-        Each task in ``tasks`` may reference other tasks in the same submission
-        via ``depends_on`` (a list of ``local_id`` strings).  The handler:
+        Supports two submission modes:
 
+        **tasks= (legacy DAG mode)**:
+        Each task in ``tasks`` may reference other tasks in the same submission
+        via ``depends_on`` (a list of ``local_id`` strings).
+
+        **phases= (declarative phase mode)**:
+        A list of :class:`PhaseSpecModel` objects where each phase has a
+        ``pattern`` (single | parallel | competitive | debate) and an
+        ``agents`` selector.  The server expands phases into a task DAG
+        automatically.  Sequential phases are chained via ``depends_on``;
+        parallel/competitive phases fan out; debate phases build an
+        advocate/critic/judge chain.
+
+        In both modes the handler:
         1. Validates the DAG for unknown ``local_id`` references and cycles.
         2. Assigns a global orchestrator task ID to each local node.
         3. Submits tasks to the orchestrator in topological order, translating
@@ -1397,18 +1510,73 @@ def create_app(
         5. Returns the workflow ID and a ``local_id → global_task_id`` mapping.
 
         Returns 400 on invalid DAG (unknown dependency or cycle).
+        Returns 422 on schema validation failure (neither tasks nor phases provided).
 
         Design references:
         - Apache Airflow DAG model — directed acyclic graph of tasks
         - AWS Step Functions — state machine workflow definition
         - Tomasulo's algorithm — register renaming == local_id → task_id mapping
         - Prefect "Modern Data Stack" — submit pipeline as a unit
-        - DESIGN.md §10.20 (v0.25.0)
+        - arXiv:2512.19769 (PayPal DSL 2025): declarative pattern → 60% dev-time reduction
+        - §12「ワークフロー設計の層構造」層1 宣言的モード
+        - DESIGN.md §10.20 (v0.25.0), §10.15 (v0.48.0)
         """
         from tmux_orchestrator.workflow_manager import validate_dag  # noqa: PLC0415
 
-        # Validate and topologically sort
-        task_specs = [t.model_dump() for t in body.tasks]
+        # ------------------------------------------------------------------
+        # Phase expansion path (new declarative mode)
+        # ------------------------------------------------------------------
+        phase_statuses = None
+        if body.phases is not None:
+            from tmux_orchestrator.phase_executor import (  # noqa: PLC0415
+                AgentSelector,
+                PhaseSpec,
+                expand_phases_with_status,
+            )
+
+            run_id_prefix = uuid.uuid4().hex[:8]
+            phase_specs: list[PhaseSpec] = []
+            for p in body.phases:
+                phase_specs.append(
+                    PhaseSpec(
+                        name=p.name,
+                        pattern=p.pattern,  # type: ignore[arg-type]
+                        agents=AgentSelector(
+                            tags=p.agents.tags,
+                            count=p.agents.count,
+                            target_agent=p.agents.target_agent,
+                            target_group=p.agents.target_group,
+                        ),
+                        critic_agents=AgentSelector(
+                            tags=p.critic_agents.tags,
+                            count=p.critic_agents.count,
+                            target_agent=p.critic_agents.target_agent,
+                            target_group=p.critic_agents.target_group,
+                        ),
+                        judge_agents=AgentSelector(
+                            tags=p.judge_agents.tags,
+                            count=p.judge_agents.count,
+                            target_agent=p.judge_agents.target_agent,
+                            target_group=p.judge_agents.target_group,
+                        ),
+                        debate_rounds=p.debate_rounds,
+                        context=p.context,
+                        required_tags=p.required_tags,
+                    )
+                )
+
+            task_specs, phase_statuses = expand_phases_with_status(
+                phase_specs,
+                context=body.context,
+                scratchpad_prefix=f"wf/{run_id_prefix}",
+            )
+        else:
+            # Legacy tasks= path
+            task_specs = [t.model_dump() for t in body.tasks]  # type: ignore[union-attr]
+
+        # ------------------------------------------------------------------
+        # DAG validation + submission (shared by both paths)
+        # ------------------------------------------------------------------
         try:
             ordered = validate_dag(task_specs, local_id_key="local_id", deps_key="depends_on")
         except ValueError as exc:
@@ -1438,11 +1606,21 @@ def create_app(
         wm = orchestrator.get_workflow_manager()
         run = wm.submit(name=body.name, task_ids=global_task_ids)
 
-        return {
+        # Attach phase status trackers to the workflow run (if phases were used)
+        if phase_statuses is not None:
+            # Remap local_id → global_task_id for each phase's task_ids
+            for ps in phase_statuses:
+                ps.task_ids = [local_to_global[lid] for lid in ps.task_ids]
+            run.phases = phase_statuses
+
+        response: dict = {
             "workflow_id": run.id,
             "name": run.name,
             "task_ids": local_to_global,
         }
+        if phase_statuses is not None:
+            response["phases"] = [ps.to_dict() for ps in phase_statuses]
+        return response
 
     @app.post(
         "/workflows/tdd",

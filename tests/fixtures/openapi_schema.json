@@ -68,6 +68,48 @@
         "title": "AgentKillResponse",
         "type": "object"
       },
+      "AgentSelectorModel": {
+        "description": "Agent selector for a workflow phase.\n\nAttributes\n----------\ntags:\n    ``required_tags`` constraint applied to task dispatch.\ncount:\n    Number of parallel agent slots (used by ``parallel`` and ``competitive``\n    patterns, and for the advocate/critic role in ``debate``).\ntarget_agent:\n    Force-dispatch to a specific agent ID.\ntarget_group:\n    Restrict to agents in the named group.\n\nDesign reference: DESIGN.md \u00a710.15 (v0.48.0)",
+        "properties": {
+          "count": {
+            "default": 1,
+            "title": "Count",
+            "type": "integer"
+          },
+          "tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "target_agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Agent"
+          },
+          "target_group": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Group"
+          }
+        },
+        "title": "AgentSelectorModel",
+        "type": "object"
+      },
       "AutoScalerUpdate": {
         "description": "Request body for PUT /orchestrator/autoscaler.\n\nAll fields are optional \u2014 only supplied fields are updated.",
         "properties": {
@@ -399,6 +441,70 @@
           }
         },
         "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "PhaseSpecModel": {
+        "description": "A single phase in a declarative workflow submission.\n\nAttributes\n----------\nname:\n    Human-readable phase label.\npattern:\n    Execution strategy: ``single`` | ``parallel`` | ``competitive`` | ``debate``.\nagents:\n    Agent selector for the primary role.\ncritic_agents:\n    Agent selector for the critic role (debate only).\njudge_agents:\n    Agent selector for the judge role (debate only).\ndebate_rounds:\n    Number of advocate/critic rounds (debate only, default 1).\ncontext:\n    Optional per-phase context override.\n\nDesign references:\n- arXiv:2512.19769 (PayPal DSL 2025): declarative phase \u2192 task expansion\n- \u00a712\u300c\u30ef\u30fc\u30af\u30d5\u30ed\u30fc\u8a2d\u8a08\u306e\u5c64\u69cb\u9020\u300d\u5c641\u30fb2\u30fb3\n- DESIGN.md \u00a710.15 (v0.48.0)",
+        "properties": {
+          "agents": {
+            "$ref": "#/components/schemas/AgentSelectorModel",
+            "default": {
+              "count": 1,
+              "tags": []
+            }
+          },
+          "context": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          },
+          "critic_agents": {
+            "$ref": "#/components/schemas/AgentSelectorModel",
+            "default": {
+              "count": 1,
+              "tags": []
+            }
+          },
+          "debate_rounds": {
+            "default": 1,
+            "title": "Debate Rounds",
+            "type": "integer"
+          },
+          "judge_agents": {
+            "$ref": "#/components/schemas/AgentSelectorModel",
+            "default": {
+              "count": 1,
+              "tags": []
+            }
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pattern": {
+            "title": "Pattern",
+            "type": "string"
+          },
+          "required_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "pattern"
+        ],
+        "title": "PhaseSpecModel",
         "type": "object"
       },
       "RateLimitUpdate": {
@@ -822,24 +928,58 @@
         "type": "object"
       },
       "WorkflowSubmit": {
-        "description": "Request body for POST /workflows.",
+        "description": "Request body for POST /workflows.\n\nSupports two mutually exclusive submission modes:\n\n1. **tasks= (legacy)**: Submit a raw DAG of :class:`WorkflowTaskSpec` nodes.\n   Backward-compatible with the original ``POST /workflows`` API.\n\n2. **phases= (new)**: Submit a declarative list of :class:`PhaseSpecModel`\n   objects.  The server expands each phase into task specs and builds a\n   DAG automatically.\n\nExactly one of ``tasks`` or ``phases`` must be provided.  Providing neither\nraises HTTP 422.\n\nDesign references:\n- arXiv:2512.19769 (PayPal DSL 2025): declarative pattern reduces dev time 60%\n- \u00a712\u300c\u30ef\u30fc\u30af\u30d5\u30ed\u30fc\u8a2d\u8a08\u306e\u5c64\u69cb\u9020\u300d\u5c641 \u5ba3\u8a00\u7684\u30e2\u30fc\u30c9\n- DESIGN.md \u00a710.15 (v0.48.0)",
         "properties": {
+          "context": {
+            "default": "",
+            "title": "Context",
+            "type": "string"
+          },
           "name": {
             "default": "workflow",
             "title": "Name",
             "type": "string"
           },
+          "phases": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PhaseSpecModel"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phases"
+          },
+          "task_timeout": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Task Timeout"
+          },
           "tasks": {
-            "items": {
-              "$ref": "#/components/schemas/WorkflowTaskSpec"
-            },
-            "title": "Tasks",
-            "type": "array"
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/WorkflowTaskSpec"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tasks"
           }
         },
-        "required": [
-          "tasks"
-        ],
         "title": "WorkflowSubmit",
         "type": "object"
       },
@@ -2870,7 +3010,7 @@
         "summary": "List all workflow runs"
       },
       "post": {
-        "description": "Submit a named workflow as a directed acyclic graph of tasks.\n\nEach task in ``tasks`` may reference other tasks in the same submission\nvia ``depends_on`` (a list of ``local_id`` strings).  The handler:\n\n1. Validates the DAG for unknown ``local_id`` references and cycles.\n2. Assigns a global orchestrator task ID to each local node.\n3. Submits tasks to the orchestrator in topological order, translating\n   ``depends_on`` local IDs to global task IDs.\n4. Registers all task IDs with the ``WorkflowManager`` for status\n   tracking.\n5. Returns the workflow ID and a ``local_id \u2192 global_task_id`` mapping.\n\nReturns 400 on invalid DAG (unknown dependency or cycle).\n\nDesign references:\n- Apache Airflow DAG model \u2014 directed acyclic graph of tasks\n- AWS Step Functions \u2014 state machine workflow definition\n- Tomasulo's algorithm \u2014 register renaming == local_id \u2192 task_id mapping\n- Prefect \"Modern Data Stack\" \u2014 submit pipeline as a unit\n- DESIGN.md \u00a710.20 (v0.25.0)",
+        "description": "Submit a named workflow as a directed acyclic graph of tasks.\n\nSupports two submission modes:\n\n**tasks= (legacy DAG mode)**:\nEach task in ``tasks`` may reference other tasks in the same submission\nvia ``depends_on`` (a list of ``local_id`` strings).\n\n**phases= (declarative phase mode)**:\nA list of :class:`PhaseSpecModel` objects where each phase has a\n``pattern`` (single | parallel | competitive | debate) and an\n``agents`` selector.  The server expands phases into a task DAG\nautomatically.  Sequential phases are chained via ``depends_on``;\nparallel/competitive phases fan out; debate phases build an\nadvocate/critic/judge chain.\n\nIn both modes the handler:\n1. Validates the DAG for unknown ``local_id`` references and cycles.\n2. Assigns a global orchestrator task ID to each local node.\n3. Submits tasks to the orchestrator in topological order, translating\n   ``depends_on`` local IDs to global task IDs.\n4. Registers all task IDs with the ``WorkflowManager`` for status\n   tracking.\n5. Returns the workflow ID and a ``local_id \u2192 global_task_id`` mapping.\n\nReturns 400 on invalid DAG (unknown dependency or cycle).\nReturns 422 on schema validation failure (neither tasks nor phases provided).\n\nDesign references:\n- Apache Airflow DAG model \u2014 directed acyclic graph of tasks\n- AWS Step Functions \u2014 state machine workflow definition\n- Tomasulo's algorithm \u2014 register renaming == local_id \u2192 task_id mapping\n- Prefect \"Modern Data Stack\" \u2014 submit pipeline as a unit\n- arXiv:2512.19769 (PayPal DSL 2025): declarative pattern \u2192 60% dev-time reduction\n- \u00a712\u300c\u30ef\u30fc\u30af\u30d5\u30ed\u30fc\u8a2d\u8a08\u306e\u5c64\u69cb\u9020\u300d\u5c641 \u5ba3\u8a00\u7684\u30e2\u30fc\u30c9\n- DESIGN.md \u00a710.20 (v0.25.0), \u00a710.15 (v0.48.0)",
         "operationId": "submit_workflow_workflows_post",
         "requestBody": {
           "content": {

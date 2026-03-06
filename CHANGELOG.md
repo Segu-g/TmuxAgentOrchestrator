@@ -6,6 +6,67 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.48.0] — 2026-03-06
+
+### Added
+
+**Generic Declarative Workflow API + Phase First-Class Citizens (§12 層1・2・3)**
+
+- New module `src/tmux_orchestrator/phase_executor.py`:
+  - `AgentSelector`: Value object specifying agent constraints (tags, count, target_agent, target_group).
+  - `PhaseSpec`: Declarative phase specification — name, pattern (`single|parallel|competitive|debate`),
+    agent selectors, per-phase context override, and debate rounds.
+  - `WorkflowPhaseStatus`: First-class phase state tracker with `pending → running → complete/failed`
+    lifecycle, `started_at`/`completed_at` timestamps, and `to_dict()` for REST responses.
+  - `expand_phases(phases, context, scratchpad_prefix)`: Translates `PhaseSpec` list into task spec
+    dicts with `depends_on` automatically computed. Sequential phases chain; parallel/competitive fan
+    out; debate builds advocate/critic/judge chains.
+  - `expand_phases_with_status(...)`: Returns `(task_specs, phase_statuses)` for REST integration.
+
+- `POST /workflows` extended with declarative `phases=` mode:
+  - New Pydantic models: `AgentSelectorModel`, `PhaseSpecModel`
+  - `WorkflowSubmit` gains `phases: list[PhaseSpecModel] | None`, `context: str`, and `task_timeout`
+    fields. Model validator enforces exactly one of `tasks=` or `phases=`.
+  - When `phases=` is provided, the handler calls `expand_phases_with_status()`, submits the expanded
+    DAG via the existing task submission path, and attaches `WorkflowPhaseStatus` objects to the run.
+  - Response includes `"phases"` array when phases= mode is used.
+  - Backward compatible: `tasks=` mode unchanged.
+
+- `WorkflowRun` gains `phases: list[Any]` field; `to_dict()` includes `"phases"` when non-empty.
+  `GET /workflows/{id}` now returns phase-granular status.
+
+- New slash command `.claude/commands/plan-workflow.md`:
+  - `/plan-workflow <description>` — guides the Planner agent through designing a `phases` JSON array.
+  - `/plan-workflow --submit` — submits `WORKFLOW_PLAN.json` to `POST /workflows` and saves result
+    to `WORKFLOW_SUBMITTED.json`.
+
+- New role template `.claude/prompts/roles/planner.md`:
+  - Planner agent persona: analyses task → designs phase structure → outputs JSON.
+  - Includes pattern selection guide, prohibited behaviours (sycophancy suppression), and example.
+  - Design references: HTDAG (arXiv:2502.07056), Routine (arXiv:2507.14447), PayPal DSL (arXiv:2512.19769).
+
+- New config `examples/declarative_workflow_config.yaml`: 3-agent demo config (implementer, reviewer-a,
+  reviewer-b) for the declarative workflow demo.
+
+### Tests
+
+- `tests/test_phase_executor.py` — 22 unit tests for `PhaseSpec`, `AgentSelector`, `WorkflowPhaseStatus`,
+  `expand_phases()` across all 4 patterns.
+- `tests/test_phase_workflow_api.py` — 13 integration tests for `POST /workflows` with `phases=` mode.
+- `tests/test_planner_role.py` — 13 tests verifying `planner.md` and `plan-workflow.md` content.
+- OpenAPI snapshot regenerated to include `AgentSelectorModel`, `PhaseSpecModel`.
+- Total: 995 → 1043 tests (all pass).
+
+### Design References
+
+- arXiv:2512.19769 (PayPal DSL 2025): declarative pattern → 60% dev-time reduction, 74% fewer lines.
+- arXiv:2502.07056 (HTDAG 2025): hierarchical task DAG, planner-executor pattern.
+- arXiv:2507.14447 (Routine 2025): structural planning framework for LLM agents.
+- LangGraph (2024): phase as node, transition as edge in StateGraph.
+- DESIGN.md §12「ワークフロー設計の層構造」層1・2・3, §10.15.
+
+---
+
 ## [0.47.0] — 2026-03-06
 
 ### Added

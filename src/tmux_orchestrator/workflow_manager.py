@@ -28,10 +28,11 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from tmux_orchestrator.bus import Bus
+    from tmux_orchestrator.phase_executor import WorkflowPhaseStatus
 
 
 @dataclass
@@ -65,10 +66,14 @@ class WorkflowRun:
     completed_at: float | None = None
     _completed: set[str] = field(default_factory=set, repr=False)
     _failed: set[str] = field(default_factory=set, repr=False)
+    # Phase-level status trackers (set by REST handler when phases= mode is used).
+    # None when submitted via legacy tasks= mode.
+    # Type: list[WorkflowPhaseStatus] — imported lazily to avoid circular dependency.
+    phases: list[Any] = field(default_factory=list, repr=False)
 
     def to_dict(self) -> dict:
         """Return a JSON-serialisable snapshot of this run."""
-        return {
+        d: dict = {
             "id": self.id,
             "name": self.name,
             "task_ids": self.task_ids,
@@ -79,6 +84,9 @@ class WorkflowRun:
             "tasks_done": len(self._completed) + len(self._failed),
             "tasks_failed": len(self._failed),
         }
+        if self.phases:
+            d["phases"] = [p.to_dict() for p in self.phases]
+        return d
 
 
 class WorkflowManager:
