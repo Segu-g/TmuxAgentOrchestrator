@@ -65,6 +65,10 @@ class ClaudeCodeAgent(Agent):
         system_prompt: str | None = None,
         context_files: list[str] | None = None,
         context_files_root: Path | None = None,
+        # context_spec_files: glob patterns for cold-memory specification docs.
+        # Reference: Vasilopoulos arXiv:2602.20478 "Codified Context" (2026).
+        context_spec_files: list[str] | None = None,
+        context_spec_files_root: Path | None = None,
         # --- Capability tags ---
         tags: list[str] | None = None,
         # --- Worktree lifecycle ---
@@ -95,6 +99,9 @@ class ClaudeCodeAgent(Agent):
         # Root directory from which context_files paths are resolved.
         # Defaults to None (not set); callers must provide this if context_files is non-empty.
         self._context_files_root: Path | None = context_files_root
+        # Cold-memory spec files: glob patterns for specification documents.
+        self._context_spec_files: list[str] = context_spec_files or []
+        self._context_spec_files_root: Path | None = context_spec_files_root
         # Capability tags: advertised capabilities used for smart dispatch.
         self.tags: list[str] = tags or []
 
@@ -130,6 +137,7 @@ class ClaudeCodeAgent(Agent):
                 await loop.run_in_executor(None, self._write_agent_claude_md, cwd)
             await loop.run_in_executor(None, self._write_notes_template, cwd)
             await loop.run_in_executor(None, self._copy_context_files, cwd)
+            await loop.run_in_executor(None, self._copy_context_spec_files, cwd)
             await loop.run_in_executor(None, self._write_stop_hook_settings, cwd)
         launch = (
             f"cd {shlex.quote(str(cwd))} && {self._command}" if cwd else self._command
@@ -394,6 +402,53 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest)
             logger.debug("Agent %s: copied context file %s → %s", self.id, src, dest)
+
+    def _copy_context_spec_files(self, cwd: Path) -> None:
+        """Copy cold-memory specification documents into the agent's working directory.
+
+        Each entry in ``context_spec_files`` is treated as a glob pattern relative to
+        ``context_spec_files_root``.  All matching files are copied preserving their
+        relative directory structure, so the agent sees the same layout.
+
+        Non-matching patterns are silently skipped (no warning) since globs may match
+        zero files when a spec directory is empty.  Literal paths that do not exist emit
+        a per-file warning instead of raising.
+
+        Reference: Vasilopoulos arXiv:2602.20478 "Codified Context" (2026-02):
+        cold-memory specification documents (Tier 3) are provided on-demand to prevent
+        agents from forgetting project conventions across sessions.
+        """
+        if not self._context_spec_files:
+            return
+        if self._context_spec_files_root is None:
+            logger.warning(
+                "Agent %s: context_spec_files is set but context_spec_files_root is None — "
+                "cannot copy spec files; set context_spec_files_root to resolve globs.",
+                self.id,
+            )
+            return
+        root = self._context_spec_files_root
+        for pattern in self._context_spec_files:
+            matches = list(root.glob(pattern))
+            if not matches:
+                # Pattern matched nothing — warn only if it looks like a literal path
+                # (no glob metacharacters), otherwise silently skip.
+                if not any(c in pattern for c in ("*", "?", "[")):
+                    logger.warning(
+                        "Agent %s: context_spec_file %r not found at %s — skipping",
+                        self.id, pattern, root / pattern,
+                    )
+                continue
+            for src in matches:
+                if not src.is_file():
+                    continue
+                rel = src.relative_to(root)
+                dest = cwd / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
+                logger.debug(
+                    "Agent %s: copied spec file %s → %s", self.id, src, dest
+                )
 
     def _write_stop_hook_settings(self, cwd: Path) -> None:
         """Write ``.claude/settings.local.json`` with a Stop hook HTTP handler.

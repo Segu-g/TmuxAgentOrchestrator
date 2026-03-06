@@ -1992,6 +1992,84 @@ Date: <date>
 
 ---
 
+## 10.15 Codified Context インフラ (v0.41.0) — 選定・調査記録
+
+### 選定根拠
+
+**選択: Codified Context インフラ — `.claude/specs/` + `AgentConfig.context_spec_files`**
+
+§11 高優先度項目の中で本項目を選んだ理由:
+1. **v0.39.0 の `context_files` 機構の自然な拡張**: `context_files` は既存機能で、
+   任意ファイルをワークツリーにコピーできる。`context_spec_files` は `glob パターン`
+   で `.claude/specs/` 内の仕様ファイルを一括指定する糖衣構文として実装できる。
+2. **実装コストが低い**: 既存の `_copy_context_files()` ロジックに glob 展開を加えるだけ。
+3. **研究的裏付け**: Vasilopoulos arXiv:2602.20478 "Codified Context" (2026) が
+   108,000行 C# 分散システムで 283 セッションにわたる規約維持を実証。
+4. **ADR ワークフローとの相補関係**: ADR ワークフロー (v0.40.0) が生成した
+   DECISION.md を `.claude/specs/` に配置し、後続タスクのエージェントに自動配布できる。
+
+**非選択: チェックポイント永続化**
+SQLite 追加は実装コストが高い。`context_spec_files` の実装が先に完了すれば
+後続の規約維持テストがより現実的になる。
+
+**非選択: OpenTelemetry GenAI Semantic Conventions**
+アーキテクチャ品質改善項目であり、ユーザー向け即効性が低い。
+
+### WebSearch 調査結果
+
+**Query 1**: "codified context AI agents specification files session consistency 2026"
+- Vasilopoulos "Codified Context: Infrastructure for AI Agents in a Complex Codebase"
+  arXiv:2602.20478v1 (2026-02) — https://arxiv.org/abs/2602.20478:
+  **108,000行 C# 分散システムで 283 セッションにわたり3層構造で規約を維持**:
+  1. Hot-memory constitution (CLAUDE.md 相当)
+  2. 19専門エージェント (role-specific)
+  3. 34の cold-memory 仕様ドキュメント (on-demand)
+  今回実装する `context_spec_files` は3層目 (cold-memory spec) のコンセプトをサポート。
+
+**Query 2**: "context engineering AI agents specification YAML machine readable constraints 2025"
+- Kubiya "Context Engineering for Reliable AI Agents" (2025) — https://www.kubiya.ai/blog/context-engineering-ai-agents:
+  YAML で「エージェントが絶対に行ってはいけないこと」「優先度ルール」を機械可読な形式で記述することが
+  コンテキストエンジニアリングのベストプラクティス。
+- Anthropic "Effective Context Engineering for AI Agents" — https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents:
+  「仕様ドキュメントを on-demand に利用できるようにするのが持続的メモリのシミュレーションに有効」。
+
+**Query 3**: "Claude Code context files CLAUDE.md specification best practices multi-agent 2025"
+- HumanLayer "Writing a good CLAUDE.md" — https://www.humanlayer.dev/blog/writing-a-good-claude-md:
+  CLAUDE.md は「300行以下で、常に全セッションに適用される内容のみ」が理想。
+  プロジェクト固有の命名規則・禁止事項・アーキテクチャ制約を記述する。
+- AGENTS.md standard (2025-): Sourcegraph/OpenAI/Google の協力で策定された
+  ツール非依存の AI コンテキストファイル規約。Linux Foundation 管理。
+
+**主要設計決定 (Codified Context インフラ):**
+
+1. `AgentConfig.context_spec_files: list[str]` — glob パターンのリスト。各パターンは
+   `context_spec_files_root` (デフォルト: `Path.cwd()`) を基準に展開。一致するすべてのファイルが
+   エージェント起動時にワークツリーにコピーされる。
+
+2. `context_spec_files_root: Path | None` — glob 展開の起点ディレクトリ。
+   factory.py の `build_system()` で `cwd` を使用 (既存の `context_files_root` パターンと同じ)。
+
+3. 既存の `_copy_context_files()` を拡張: `context_spec_files` の各 glob パターンを展開し、
+   一致ファイルを `context_files` と同じロジックでコピー。
+
+4. `.claude/specs/` を標準の仕様ファイル配置ディレクトリとして推奨:
+   - `.claude/specs/architecture.md` — アーキテクチャ概要
+   - `.claude/specs/conventions.yaml` — コーディング規約
+   - `.claude/specs/decisions/*.md` — ADR ワークフローで生成された DECISION.md
+
+5. YAML 設定例:
+   ```yaml
+   agents:
+     - id: implementer
+       type: claude_code
+       context_spec_files:
+         - .claude/specs/architecture.md
+         - .claude/specs/decisions/*.md
+         - .claude/specs/conventions.yaml
+   ```
+
+---
+
 ## 11. 今後の課題
 
 > 以下のバックログは、完了済み項目（旧 §11 テーブルの全 ~~完了~~ エントリ、§10.N 実装履歴）を除去し、

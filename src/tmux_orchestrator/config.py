@@ -33,6 +33,12 @@ class AgentConfig:
     # Reference: CONSENSAGENT ACL 2025 — sycophancy suppression via role prompts.
     system_prompt_file: str | None = None
     context_files: list[str] = field(default_factory=list)  # paths (relative to cwd) to pre-load
+    # context_spec_files: glob patterns for cold-memory specification documents
+    # (Vasilopoulos arXiv:2602.20478 "Codified Context" 2026: 3rd-tier cold memory).
+    # Each pattern is expanded relative to context_spec_files_root (defaults to cwd).
+    # Matched files are copied into the agent worktree at agent start time.
+    # Recommended location: .claude/specs/ (architecture.md, decisions/*.md, etc.)
+    context_spec_files: list[str] = field(default_factory=list)
     # --- Capability tags for smart dispatch ---
     # Tasks with required_tags are only dispatched to agents whose tags include
     # ALL required tags.  Reference: FIPA Directory Facilitator (2002),
@@ -169,6 +175,7 @@ def load_config(path: str | Path) -> OrchestratorConfig:
             system_prompt=a.get("system_prompt"),
             system_prompt_file=a.get("system_prompt_file"),
             context_files=a.get("context_files", []),
+            context_spec_files=a.get("context_spec_files", []),
             tags=a.get("tags", []),
             groups=a.get("groups", []),
             merge_on_stop=a.get("merge_on_stop", False),

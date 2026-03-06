@@ -121,6 +121,8 @@ def build_system(
                 system_prompt=_resolve_system_prompt(agent_cfg, config_path),
                 context_files=agent_cfg.context_files,
                 context_files_root=cwd if agent_cfg.context_files else None,
+                context_spec_files=agent_cfg.context_spec_files,
+                context_spec_files_root=cwd if agent_cfg.context_spec_files else None,
                 tags=agent_cfg.tags,
             )
         else:

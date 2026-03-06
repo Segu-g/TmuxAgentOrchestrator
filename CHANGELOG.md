@@ -6,6 +6,32 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.41.0] — 2026-03-06
+
+### Added
+
+**Codified Context Infrastructure — `context_spec_files` glob-pattern spec auto-copy**
+
+- `AgentConfig.context_spec_files: list[str]` — list of glob patterns for cold-memory
+  specification documents. Each pattern is expanded relative to `context_spec_files_root`
+  (defaults to `cwd` in `build_system()`). Supports `*.md`, `*.yaml`, `decisions/*.md` etc.
+- `ClaudeCodeAgent._copy_context_spec_files(cwd)` — expands all glob patterns and copies
+  matched files into the agent worktree preserving directory structure. Glob misses are
+  silently skipped; literal path misses emit a per-file warning (no crash).
+- `context_spec_files_root` passed through `build_system()` alongside existing
+  `context_files_root` pattern.
+- Recommended layout: `.claude/specs/` for specification documents
+  (architecture.md, conventions.yaml, decisions/*.md from ADR workflow).
+- 15 new unit tests in `tests/test_context_spec_files.py`.
+
+### References
+
+- Vasilopoulos arXiv:2602.20478 "Codified Context" (2026-02): 3-tier memory,
+  cold-memory spec documents as Tier 3 prevent session-to-session forgetting.
+- Anthropic "Effective Context Engineering for AI Agents" (2025).
+
+---
+
 ## [0.40.0] — 2026-03-06
 
 ### Added
