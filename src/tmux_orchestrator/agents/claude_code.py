@@ -249,7 +249,6 @@ class ClaudeCodeAgent(Agent):
             else "You are a top-level agent. Report results to the orchestrator."
         )
 
-        api = self._web_base_url
         director_api_block = (
             f"\n### API Quick Reference (Director)\n\n"
             f"```bash\n"
@@ -634,28 +633,6 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
             "_Nothing yet._\n"
         )
 
-    def _director_startup_prompt(self) -> str:
-        api = self._web_base_url
-        return (
-            f"You are the Director agent for this TmuxAgentOrchestrator session.\n"
-            f"Your role: have a conversation with the user to understand the project goals, "
-            f"decide on a plan together, then coordinate worker agents to carry it out.\n\n"
-            f"Orchestrator API: {api}\n"
-            f"  Check agents:  curl -s {api}/agents\n"
-            f"  Submit task:   curl -s -X POST {api}/tasks "
-            f"-H 'Content-Type: application/json' "
-            f"-d '{{\"prompt\":\"<task>\",\"priority\":0}}'\n"
-            f"  Check queue:   curl -s {api}/tasks\n\n"
-            f"Your session context is in __orchestrator_context__.json "
-            f"(read it with the Read tool for agent IDs and details).\n"
-            f"Incoming worker results will appear as mailbox notifications (__MSG__:<id>).\n\n"
-            f"Wait for the user. When they describe what they want built:\n"
-            f"1. Use /plan to break the work into concrete subtasks with acceptance criteria\n"
-            f"2. Submit each subtask to a worker via the API above\n"
-            f"3. Monitor progress via /list-agents and worker messages\n"
-            f"4. Report results back to the user"
-        )
-
     # ------------------------------------------------------------------
     # Lifecycle — stop
     # ------------------------------------------------------------------
@@ -723,17 +700,16 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
     async def _dispatch_task(self, task: Task) -> None:
         if self.pane is None:
             raise RuntimeError(f"Agent {self.id} has no pane")
+        loop = asyncio.get_running_loop()
         # Update the stop hook URL with this task's ID before dispatching.
-        # This prevents stop hooks from the director startup prompt or previous
-        # tasks from prematurely completing the current task.
+        # This prevents stop hooks from previous tasks from prematurely
+        # completing the current task.
         if self._cwd is not None:
-            loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 None, self._update_stop_hook_for_task, self._cwd, task.id
             )
         from tmux_orchestrator.security import sanitize_prompt
         safe_prompt = sanitize_prompt(task.prompt)
-        loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             None, self._tmux.send_keys, self.pane, safe_prompt
         )
