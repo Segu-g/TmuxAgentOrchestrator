@@ -141,6 +141,7 @@ class ClaudeCodeAgent(Agent):
             await loop.run_in_executor(None, self._copy_context_files, cwd)
             await loop.run_in_executor(None, self._copy_context_spec_files, cwd)
             await loop.run_in_executor(None, self._write_stop_hook_settings, cwd)
+            await loop.run_in_executor(None, self._copy_slash_commands, cwd)
         launch = (
             f"cd {shlex.quote(str(cwd))} && {self._command}" if cwd else self._command
         )
@@ -451,6 +452,56 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
                 logger.debug(
                     "Agent %s: copied spec file %s → %s", self.id, src, dest
                 )
+
+    def _copy_slash_commands(self, cwd: Path) -> None:
+        """Copy orchestrator slash commands into ``.claude/commands/`` in the worktree.
+
+        Claude Code discovers project-scoped commands from ``.claude/commands/``
+        relative to the directory it was launched in.  Agent worktrees have their
+        own root, so the orchestrator's top-level ``.claude/commands/`` is not
+        visible to agents running inside them.
+
+        This method copies the bundled commands from
+        ``src/tmux_orchestrator/commands/`` (co-located with the installed package)
+        into ``{worktree}/.claude/commands/`` at startup, making the full suite of
+        orchestrator slash commands available in every agent session:
+
+        - ``/send-message``    — send P2P message to another agent via REST
+        - ``/check-inbox``     — list unread messages in mailbox
+        - ``/read-message``    — read a specific message by ID
+        - ``/spawn-subagent``  — spawn a sub-agent from a config template
+        - ``/list-agents``     — list all agents and their current status
+        - ``/plan``            — write a structured PLAN.md before implementing
+        - ``/tdd``             — guide a TDD (Red→Green→Refactor) cycle
+        - ``/progress``        — report progress to parent agent
+        - ``/summarize``       — compress current context into NOTES.md
+        - ``/delegate``        — break task into subtasks and spawn sub-agents
+        - ``/change-strategy`` — escalate single→parallel/competitive execution
+        - ``/plan-workflow``   — design and submit a multi-phase workflow
+
+        References:
+        - Claude Code "Extend Claude with skills" docs (2025/2026)
+        - v1.0.5 build-log: agent-impl hit "Unknown skill: send-message" because
+          /send-message was not available in the worktree.
+        """
+        commands_src = Path(__file__).parent.parent / "commands"
+        if not commands_src.is_dir():
+            logger.warning(
+                "Agent %s: bundled commands directory not found at %s — "
+                "slash commands will not be available in worktree",
+                self.id, commands_src,
+            )
+            return
+        commands_dst = cwd / ".claude" / "commands"
+        commands_dst.mkdir(parents=True, exist_ok=True)
+        count = 0
+        for cmd_file in sorted(commands_src.glob("*.md")):
+            shutil.copy2(cmd_file, commands_dst / cmd_file.name)
+            count += 1
+        logger.debug(
+            "Agent %s: copied %d slash commands to %s",
+            self.id, count, commands_dst,
+        )
 
     def _write_stop_hook_settings(self, cwd: Path) -> None:
         """Write ``.claude/settings.local.json`` with a Stop hook HTTP handler.

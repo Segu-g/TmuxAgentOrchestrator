@@ -3159,6 +3159,7 @@ v0.49.0 でエージェント自律実行方式変更（§12 層3）が完了し
 |--------|------|------|
 | ~~高~~ | ~~**`POST /workflows/tdd`**~~ | ~~完了 v0.36.0~~ |
 | ~~高~~ | ~~**`POST /workflows/debate`**~~ | ~~完了 v0.37.0 — advocate/critic/judge 3役割, 1–3ラウンド, judge→DECISION.md. ALL 27 CHECKS PASSED. デモ: SQLite vs PostgreSQL, Advocate(PG)勝利.~~ |
+| **高** | **スラッシュコマンド群をエージェントワークツリーで使用可能にする** — エージェント起動時に TmuxAgentOrchestrator の `.claude/commands/*.md` をワークツリーの `.claude/commands/` へ自動コピーする。これにより `/send-message`, `/check-inbox`, `/read-message`, `/spawn-subagent`, `/list-agents`, `/progress`, `/summarize`, `/delegate` 等の全スラッシュコマンドをエージェントが利用できるようになる。既存の `_copy_context_files()` 機構を拡張して実装する | v1.0.5 デモで agent-impl が `/send-message` を使おうとして "Unknown skill: send-message" エラー。エージェントがタスクプロンプトに書かれたコマンドを実行できない → タスク設計の自由度が下がる。`context_files` (v0.11.0) の自動コピー機構が既に存在し、`.claude/commands/` への拡張は少ない変更で実現できる。 |
 | 高 | **役割別 system_prompt テンプレートライブラリ + `system_prompt_file:` YAML フィールド** — `.claude/prompts/roles/` に tester / implementer / reviewer / spec-writer / judge / advocate / critic の7種類のプロンプトファイルを提供し、`AgentConfig.system_prompt_file:` フィールドで参照できるようにする。各ファイルに「役割・禁止事項・完了条件・/plan /tdd の使い方・迎合抑制指示」を標準化して記述する | Vellum "Best practices for building multi-agent systems" (2025): 役割特化プロンプトとステート分離が精度向上に最も効果的。ChatEval ICLR 2024 (arXiv:2308.07201): 役割の多様性が討論品質を決定する最重要因子。同一ロール複数エージェントは性能低下を招く。CONSENSAGENT ACL 2025: 迎合抑制プロンプトが正答率・効率の両方を改善。v0.37.0 で advocate/critic/judge の 3 テンプレート (`.claude/prompts/roles/`) を追加。残りは tester / implementer / reviewer / spec-writer。 |
 | 高 | **`POST /workflows/adr` — Architecture Decision Record (ADR) 自動生成ワークフロー** — `proposer`（案提示）→ `reviewer`（技術的批評）→ `synthesizer`（ADR 文書化）の3エージェントが MADR フォーマット (title / status / context / decision / consequences) の `DECISION.md` を生成するテンプレートを追加。`context_files` に既存 ADR を渡すことで過去の決定との整合性を保つ | MAD in Requirements Engineering arXiv:2507.05981 (2025): MAD が要件分類 F1 を 0.726→0.841 に向上。SocraSynth arXiv:2402.06634: モデレーター + 対立エージェント + ジャッジ構成が設計討論に直接適用可能。`debate` ワークフローと共通基盤で実装できる。 |
 | 高 | **Codified Context インフラ** — プロジェクト規約・禁止事項を機械可読な YAML/JSON 仕様ファイルとして `.claude/specs/` に配置し、`AgentConfig.context_spec_files` (glob パターン) でタスク開始時にワークツリーへ自動コピーする。エージェントがセッションをまたいでも規約を忘れない基盤を実現する | Vasilopoulos arXiv:2602.20478 "Codified Context" (2026-02): 108,000行 C# 分散システムで 283 セッションにわたり規約を維持。Hot-memory constitution + Cold-memory spec documents の2層構造が有効。既存の `context_files` (v0.11.0) 機構の自然な拡張。 |
@@ -3207,6 +3208,54 @@ v0.49.0 でエージェント自律実行方式変更（§12 層3）が完了し
 | 中 | **Delphi 型合意形成デモ — "マイクロサービス vs モノリス"** | `POST /workflows/delphi`、5ペルソナエージェント、3ラウンド、各ラウンドの `delphi_round_{n}.md` 生成と最終 `consensus.md` を実証 |
 | 中 | **Red Team / Blue Team セキュリティレビューデモ** | `POST /workflows/redblue`、blue-team が FastAPI エンドポイントを実装、red-team が入力検証・認証・レートリミットの欠陥を列挙、arbiter がリスク評価レポートを生成 |
 | 低 | **Codified Context + PairCoder デモ — 長期プロジェクト規約維持** | `.claude/specs/` に規約 YAML を配置 → `POST /workflows/pair` で Navigator+Driver が5セッション連続で実装 → 全セッションにわたり規約違反ゼロを実証 |
+
+## 10.19 v1.0.1 — スラッシュコマンドをエージェントワークツリーで使用可能にする (2026-03-07)
+
+### 選定理由
+
+**選択**: スラッシュコマンド群 (`/send-message`, `/check-inbox` 等) をエージェントワークツリーで使用可能にする
+
+**選んだ理由**:
+- v1.0.5 デモで agent-impl が `/send-message agent-review ...` を実行したところ "Unknown skill: send-message" エラーが発生し、エージェントが REST API を手探りで探す羽目になった。
+- ワークツリー内で Claude Code を起動すると、スラッシュコマンドはそのワークツリーの `.claude/commands/` を探す。TmuxAgentOrchestrator リポジトリの `.claude/commands/` はプロジェクトルートではないため読み込まれない。
+- 既存の `_copy_context_files()` / `_write_stop_hook_settings()` と同じパターンで、ワークツリー起動時に `.claude/commands/*.md` をコピーするだけで解決できる。実装コストが低く、デモのタスク設計の自由度が大幅に上がる。
+
+**選ばなかったもの**:
+- v1.0.1 (Competitive Expression Evaluator): 引き続き候補。本機能が完了したあとのデモシナリオとして残す。
+- system_prompt テンプレートライブラリ: 価値は高いが、スラッシュコマンドが使えることが前提のため後回し。
+
+**実装するもの**:
+- `src/tmux_orchestrator/commands/` — パッケージ同梱コマンドディレクトリ (`.claude/commands/*.md` と同内容)
+- `ClaudeCodeAgent._copy_slash_commands(cwd)` — ワークツリー起動時に `.claude/commands/` へコピー
+- `start()` でコールする
+- テスト: `tests/test_slash_commands.py`
+- デモ: v1.0.5 の失敗シナリオを再現し、`/send-message` が使えることを確認
+
+### 調査記録
+
+**調査 1: Claude Code スラッシュコマンドの発見ロジック**
+- 出典: [Extend Claude with skills — Claude Code Docs](https://code.claude.com/docs/en/skills)
+- 発見: Claude Code はスラッシュコマンド (現在は "skills" に統合済み) を 4 箇所から読み込む:
+  1. Enterprise: managed settings
+  2. Personal: `~/.claude/skills/<name>/SKILL.md` または `~/.claude/commands/<name>.md`
+  3. Project: `.claude/skills/<name>/SKILL.md` または `.claude/commands/<name>.md` (プロジェクトルート基準)
+  4. Plugin: `<plugin>/skills/<name>/SKILL.md`
+- **キー**: "Project" スコープのコマンドは、Claude Code が起動したディレクトリ (= エージェントのワークツリールート) の `.claude/commands/` を探す。TmuxAgentOrchestrator リポジトリの `.claude/commands/` はここではない。
+- `.claude/commands/*.md` ファイルは後方互換として引き続き動作する。
+
+**調査 2: ワークツリーにおけるコマンド発見**
+- 出典: [GitHub Issue #27156 — claude -w (worktree mode) と git submodule](https://github.com/anthropics/claude-code/issues/27156)
+- 発見: ワークツリー内の Claude Code インスタンスは、ワークツリーのルートを project root として扱う。既存の `.claude/commands/` はワークツリーの外側にあるため読み込まれない。
+- 解決策: ワークツリー起動時に `{worktree}/.claude/commands/` を作成し、コマンドファイルをコピーする。
+
+**調査 3: パッケージデータとしてのバンドル方法**
+- 出典: Python `importlib.resources` 公式ドキュメント (Python 3.11+)
+- 採用方針: `Path(__file__).parent.parent / "commands"` (= `src/tmux_orchestrator/commands/`) でコマンドディレクトリを参照する。
+  - 開発環境: ファイルシステム上のパス直接参照
+  - インストール環境: hatchling が `packages = ["src/tmux_orchestrator"]` でサブディレクトリを丸ごとバンドルするため同じパスが有効
+  - `.claude/commands/` (開発者用) と `src/tmux_orchestrator/commands/` (エージェント用) を分離管理
+
+---
 
 ## 10.18 v1.0.1 — Competitive Expression Evaluator Demo (2026-03-07)
 
