@@ -228,8 +228,7 @@ class Agent(ABC):
         """Continuously dequeue and dispatch tasks, with optional timeout enforcement."""
         while self.status not in (AgentStatus.STOPPED, AgentStatus.ERROR):
             task = await self._task_queue.get()
-            self._current_task = task
-            self.status = AgentStatus.BUSY
+            self._set_busy(task)
             await self._publish_status_event("agent_busy", task_id=task.id)
             # Bind trace_id and agent_id into the async context so every log record
             # produced during this task automatically includes these fields.
@@ -347,7 +346,19 @@ class Agent(ABC):
         """Return additional keys for the context file. Override in subclasses."""
         return {}
 
+    # ------------------------------------------------------------------
+    # State management — all status transitions go through these methods.
+    # Call sites (run loop, timeout handler, tests) must NOT write to
+    # ``status`` or ``_current_task`` directly.
+    # ------------------------------------------------------------------
+
+    def _set_busy(self, task: Task) -> None:
+        """Transition the agent to BUSY state for *task*."""
+        self._current_task = task
+        self.status = AgentStatus.BUSY
+
     def _set_idle(self) -> None:
+        """Transition the agent back to IDLE, clearing the current task."""
         self._current_task = None
         if self.status not in (AgentStatus.STOPPED, AgentStatus.ERROR, AgentStatus.DRAINING):
             self.status = AgentStatus.IDLE

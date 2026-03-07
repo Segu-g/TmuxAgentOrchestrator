@@ -3,42 +3,33 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
-import re
 import shlex
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from tmux_orchestrator.agents.base import Agent, AgentStatus, Task
+from tmux_orchestrator.agents.completion import (
+    _POLL_INTERVAL,
+    _SETTLE_CYCLES,
+    looks_done,
+    make_completion_strategy,
+)
 from tmux_orchestrator.bus import Message, MessageType
 from tmux_orchestrator.config import AgentRole
 
 if TYPE_CHECKING:
     import libtmux
 
+    from tmux_orchestrator.agents.completion import CompletionStrategy
     from tmux_orchestrator.bus import Bus
     from tmux_orchestrator.messaging import Mailbox
     from tmux_orchestrator.tmux_interface import TmuxInterface
     from tmux_orchestrator.worktree import WorktreeManager
 
 logger = logging.getLogger(__name__)
-
-# Patterns that indicate Claude has finished and is waiting for input.
-# Adjust as the `claude` CLI evolves.
-# NOTE: match end-of-line (not whole-line) so trailing terminal padding / cursor
-# markers added by newer CLI versions do not prevent completion detection.
-_DONE_PATTERNS = [
-    re.compile(r"❯\s*$", re.MULTILINE),               # claude interactive prompt "❯"
-    re.compile(r"(?<!\S)>\s*$", re.MULTILINE),         # bare ">" prompt (older versions)
-    re.compile(r"Human:\s*$", re.MULTILINE),           # Human: prompt
-    re.compile(r"(?m)^\$\s*$"),                        # shell prompt (whole line only)
-]
-
-_POLL_INTERVAL = 0.5  # seconds between output checks
-_SETTLE_CYCLES = 3    # consecutive unchanged polls before declaring done
 
 
 class ClaudeCodeAgent(Agent):
@@ -104,8 +95,12 @@ class ClaudeCodeAgent(Agent):
         self._context_spec_files_root: Path | None = context_spec_files_root
         # Capability tags: advertised capabilities used for smart dispatch.
         self.tags: list[str] = tags or []
-        # Working directory set after worktree setup; used for per-task stop hook updates.
+        # Working directory set after worktree setup; passed to completion strategy.
         self._cwd: Path | None = None
+        # Completion detection strategy: how we know the task is done.
+        self._completion: "CompletionStrategy" = make_completion_strategy(
+            self.role, agent_id, self._web_base_url
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -143,7 +138,7 @@ class ClaudeCodeAgent(Agent):
             await loop.run_in_executor(None, self._write_notes_template, cwd)
             await loop.run_in_executor(None, self._copy_context_files, cwd)
             await loop.run_in_executor(None, self._copy_context_spec_files, cwd)
-            await loop.run_in_executor(None, self._write_stop_hook_settings, cwd)
+            await loop.run_in_executor(None, self._completion.on_start, cwd)
             await loop.run_in_executor(None, self._copy_slash_commands, cwd)
         launch = (
             f"cd {shlex.quote(str(cwd))} && {self._command}" if cwd else self._command
@@ -534,111 +529,6 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
             self.id, count, commands_dst,
         )
 
-    def _write_stop_hook_settings(self, cwd: Path) -> None:
-        """Write ``.claude/settings.local.json`` with a Stop hook HTTP handler.
-
-        The Stop hook fires when Claude finishes responding and sends an HTTP
-        POST to ``POST /agents/{agent_id}/task-complete`` on the orchestrator
-        web server.  This provides deterministic completion detection instead
-        of the 500 ms polling + regex fallback.
-
-        The file is placed in ``.claude/settings.local.json`` (gitignored by
-        Claude Code conventions) so it does not pollute the repository and is
-        cleaned up with the worktree on agent stop.
-
-        If ``web_base_url`` is empty (web server not started), the method is
-        a no-op and completion falls back to ``_wait_for_completion`` polling.
-
-        Director agents do not use the Stop hook because the hook fires after
-        every Claude response, not at true task completion.  Directors manage
-        multi-turn coordination across many responses; they signal task
-        completion explicitly via ``POST /agents/{id}/task-complete``.
-
-        Reference:
-        - Claude Code Hooks Reference https://code.claude.com/docs/en/hooks (2025)
-        - DESIGN.md §10.12 (v0.38.0)
-        """
-        if not self._web_base_url:
-            return
-        if self.role == AgentRole.DIRECTOR:
-            return
-
-        url = f"{self._web_base_url}/agents/{self.id}/task-complete"
-        settings = {
-            "hooks": {
-                "Stop": [
-                    {
-                        "matcher": "",
-                        "hooks": [
-                            {
-                                "type": "http",
-                                "url": url,
-                                "timeout": 5,
-                                # $TMUX_ORCHESTRATOR_API_KEY is injected into the
-                                # tmux session env by _set_session_env_api_key().
-                                # allowedEnvVars is required for Claude Code to
-                                # expand $VAR references in headers.
-                                "headers": {
-                                    "X-Api-Key": "$TMUX_ORCHESTRATOR_API_KEY",
-                                },
-                                "allowedEnvVars": ["TMUX_ORCHESTRATOR_API_KEY"],
-                            }
-                        ],
-                    }
-                ]
-            }
-        }
-        claude_dir = cwd / ".claude"
-        claude_dir.mkdir(parents=True, exist_ok=True)
-        settings_path = claude_dir / "settings.local.json"
-        settings_path.write_text(json.dumps(settings, indent=2))
-        logger.debug(
-            "Agent %s wrote Stop hook settings to %s (url=%s)",
-            self.id, settings_path, url,
-        )
-
-    def _update_stop_hook_for_task(self, cwd: Path, task_id: str) -> None:
-        """Rewrite settings.local.json with a task-scoped stop hook URL.
-
-        Called just before each task is dispatched to the pane so that only
-        the stop hook fired during THIS task carries the correct task_id.
-        Stop hooks from previous tasks carry a stale URL and are rejected by
-        the endpoint.
-
-        Director agents skip this: they signal completion explicitly and do
-        not rely on the Stop hook.
-        """
-        if not self._web_base_url:
-            return
-        if self.role == AgentRole.DIRECTOR:
-            return
-        url = f"{self._web_base_url}/agents/{self.id}/task-complete?task_id={task_id}"
-        settings = {
-            "hooks": {
-                "Stop": [
-                    {
-                        "matcher": "",
-                        "hooks": [
-                            {
-                                "type": "http",
-                                "url": url,
-                                "timeout": 5,
-                                "headers": {"X-Api-Key": "$TMUX_ORCHESTRATOR_API_KEY"},
-                                "allowedEnvVars": ["TMUX_ORCHESTRATOR_API_KEY"],
-                            }
-                        ],
-                    }
-                ]
-            }
-        }
-        claude_dir = cwd / ".claude"
-        claude_dir.mkdir(parents=True, exist_ok=True)
-        (claude_dir / "settings.local.json").write_text(json.dumps(settings, indent=2))
-        logger.debug(
-            "Agent %s updated Stop hook for task %s (url=%s)",
-            self.id, task_id, url,
-        )
-
     def _write_notes_template(self, cwd: Path) -> None:
         """Write an initial NOTES.md template for structured note-taking."""
         notes_path = cwd / "NOTES.md"
@@ -675,13 +565,11 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
             )
             self._tmux.unwatch_pane(self.pane)
         await self.bus.unsubscribe(self.id)
-        # Always remove the Stop hook settings file on shutdown.
-        # For isolated agents this is redundant (the worktree is deleted), but
-        # for non-isolated agents (isolate: false) the file lives in the shared
-        # repo root and must be cleaned up explicitly to avoid stale hooks.
+        # Delegate completion-strategy cleanup (e.g. remove Stop hook settings file).
+        # For non-isolated agents the worktree is NOT deleted by _teardown_worktree(),
+        # so the strategy must remove any files it wrote to avoid stale hooks.
         if self.worktree_path is not None:
-            settings_file = self.worktree_path / ".claude" / "settings.local.json"
-            settings_file.unlink(missing_ok=True)
+            self._completion.on_stop(self.worktree_path)
         await self._teardown_worktree()
         logger.info("ClaudeCodeAgent %s stopped", self.id)
 
@@ -726,20 +614,18 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
         if self.pane is None:
             raise RuntimeError(f"Agent {self.id} has no pane")
         loop = asyncio.get_running_loop()
-        # Update the stop hook URL with this task's ID before dispatching.
-        # This prevents stop hooks from previous tasks from prematurely
-        # completing the current task.
+        # Notify the completion strategy before sending the prompt so it can
+        # update any per-task configuration (e.g. task-scoped stop hook URL).
         if self._cwd is not None:
             await loop.run_in_executor(
-                None, self._update_stop_hook_for_task, self._cwd, task.id
+                None, self._completion.on_task_dispatch, self._cwd, task.id
             )
         from tmux_orchestrator.security import sanitize_prompt
         safe_prompt = sanitize_prompt(task.prompt)
         await loop.run_in_executor(
             None, self._tmux.send_keys, self.pane, safe_prompt
         )
-        # Poll until output settles and looks like a prompt
-        await self._wait_for_completion(task)
+        await self._completion.wait(self, task)
 
     async def _wait_for_ready(self) -> None:
         """Poll pane until claude's initial prompt appears and settles.
@@ -765,47 +651,7 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
             else:
                 settle = 0
                 prev = text
-            if settle >= _SETTLE_CYCLES and _looks_done(text):
-                return
-
-    async def _wait_for_completion(self, task: Task) -> None:
-        settle = 0
-        prev = ""
-        while True:
-            await asyncio.sleep(_POLL_INTERVAL)
-            # Stop hook (or explicit POST /task-complete) may have already
-            # called handle_output() and cleared _current_task.  Return
-            # immediately to avoid a double-completion.
-            if self._current_task is None or self._current_task.id != task.id:
-                return
-            # Director agents do not use the Stop hook and must signal
-            # completion explicitly via POST /task-complete.  Polling
-            # completion detection is disabled for them: a pane that shows
-            # "❯" between two director responses must NOT be treated as done.
-            if self.role == AgentRole.DIRECTOR:
-                continue
-            loop = asyncio.get_running_loop()
-            text = await loop.run_in_executor(
-                None, self._tmux.capture_pane, self.pane
-            )
-            if text == prev:
-                settle += 1
-            else:
-                settle = 0
-                prev = text
-            if settle >= _SETTLE_CYCLES and _looks_done(text):
-                # Reaching here means the Stop hook did NOT fire before polling
-                # detected completion — the hook is either misconfigured, the
-                # web server is unreachable, or the API key is wrong.
-                # Emit a warning so operators know the hook is not working.
-                logger.warning(
-                    "Agent %s: task %s completed via polling fallback — "
-                    "Stop hook did not fire (check web_base_url, API key, "
-                    "and .claude/settings.local.json in the worktree)",
-                    self.id,
-                    task.id,
-                )
-                await self.handle_output(text)
+            if settle >= _SETTLE_CYCLES and looks_done(text):
                 return
 
     # ------------------------------------------------------------------
@@ -833,9 +679,3 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
         )
 
 
-def _looks_done(text: str) -> bool:
-    # Pasted text preview — Claude CLI is waiting for the user to confirm;
-    # the task has not been executed yet so we must NOT declare completion.
-    if "[Pasted text #" in text:
-        return False
-    return any(p.search(text) for p in _DONE_PATTERNS)

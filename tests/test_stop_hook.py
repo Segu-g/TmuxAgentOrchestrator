@@ -21,6 +21,11 @@ import httpx
 import pytest
 
 from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent
+from tmux_orchestrator.agents.completion import (
+    ExplicitSignalStrategy,
+    StopHookStrategy,
+    make_completion_strategy,
+)
 from tmux_orchestrator.bus import Bus
 from tmux_orchestrator.web.app import create_app
 
@@ -47,59 +52,31 @@ def make_tmux_mock():
 
 
 # ---------------------------------------------------------------------------
-# Tests for _write_stop_hook_settings (unit-level, no tmux)
+# Tests for StopHookStrategy (unit-level — tests the strategy directly)
 # ---------------------------------------------------------------------------
 
 
-def test_write_stop_hook_settings_creates_settings_file(tmp_path: Path) -> None:
-    """_write_stop_hook_settings must create .claude/settings.local.json."""
-    bus = make_bus()
-    tmux = make_tmux_mock()
-
-    agent = ClaudeCodeAgent(
-        agent_id="worker-1",
-        bus=bus,
-        tmux=tmux,
-        web_base_url="http://localhost:9000",
-    )
-
-    agent._write_stop_hook_settings(tmp_path)
-
-    settings_path = tmp_path / ".claude" / "settings.local.json"
-    assert settings_path.exists(), ".claude/settings.local.json must be created"
+def test_stop_hook_strategy_creates_settings_file(tmp_path: Path) -> None:
+    """StopHookStrategy.on_start must create .claude/settings.local.json."""
+    strategy = StopHookStrategy("worker-1", "http://localhost:9000")
+    strategy.on_start(tmp_path)
+    assert (tmp_path / ".claude" / "settings.local.json").exists()
 
 
-def test_write_stop_hook_settings_correct_json_structure(tmp_path: Path) -> None:
+def test_stop_hook_strategy_correct_json_structure(tmp_path: Path) -> None:
     """settings.local.json must contain the correct Stop hook HTTP config."""
-    bus = make_bus()
-    tmux = make_tmux_mock()
+    strategy = StopHookStrategy("worker-1", "http://localhost:9000")
+    strategy.on_start(tmp_path)
 
-    agent = ClaudeCodeAgent(
-        agent_id="worker-1",
-        bus=bus,
-        tmux=tmux,
-        web_base_url="http://localhost:9000",
-    )
-
-    agent._write_stop_hook_settings(tmp_path)
-
-    settings_path = tmp_path / ".claude" / "settings.local.json"
-    data = json.loads(settings_path.read_text())
-
-    # Must have hooks.Stop
+    data = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
     assert "hooks" in data
     assert "Stop" in data["hooks"]
 
     stop_hooks = data["hooks"]["Stop"]
-    assert isinstance(stop_hooks, list)
-    assert len(stop_hooks) == 1
+    assert isinstance(stop_hooks, list) and len(stop_hooks) == 1
 
-    matcher_group = stop_hooks[0]
-    assert "hooks" in matcher_group
-
-    hook_handlers = matcher_group["hooks"]
-    assert isinstance(hook_handlers, list)
-    assert len(hook_handlers) == 1
+    hook_handlers = stop_hooks[0]["hooks"]
+    assert isinstance(hook_handlers, list) and len(hook_handlers) == 1
 
     handler = hook_handlers[0]
     assert handler["type"] == "http"
@@ -107,124 +84,54 @@ def test_write_stop_hook_settings_correct_json_structure(tmp_path: Path) -> None
     assert "task-complete" in handler["url"]
 
 
-def test_write_stop_hook_settings_url_includes_agent_id(tmp_path: Path) -> None:
-    """The hook URL must use the correct agent_id and base URL port."""
-    bus = make_bus()
-    tmux = make_tmux_mock()
+def test_stop_hook_strategy_url_includes_agent_id(tmp_path: Path) -> None:
+    """The hook URL must embed the correct agent_id and base URL port."""
+    strategy = StopHookStrategy("my-special-agent", "http://localhost:8765")
+    strategy.on_start(tmp_path)
 
-    agent = ClaudeCodeAgent(
-        agent_id="my-special-agent",
-        bus=bus,
-        tmux=tmux,
-        web_base_url="http://localhost:8765",
-    )
-
-    agent._write_stop_hook_settings(tmp_path)
-
-    settings_path = tmp_path / ".claude" / "settings.local.json"
-    data = json.loads(settings_path.read_text())
+    data = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
     handler = data["hooks"]["Stop"][0]["hooks"][0]
-
     assert handler["url"] == "http://localhost:8765/agents/my-special-agent/task-complete"
 
 
-def test_write_stop_hook_settings_has_timeout(tmp_path: Path) -> None:
-    """The hook handler must include a timeout field."""
-    bus = make_bus()
-    tmux = make_tmux_mock()
+def test_stop_hook_strategy_has_timeout(tmp_path: Path) -> None:
+    """The hook handler must include a positive integer timeout."""
+    strategy = StopHookStrategy("worker-1", "http://localhost:8000")
+    strategy.on_start(tmp_path)
 
-    agent = ClaudeCodeAgent(
-        agent_id="worker-1",
-        bus=bus,
-        tmux=tmux,
-        web_base_url="http://localhost:8000",
-    )
-
-    agent._write_stop_hook_settings(tmp_path)
-
-    settings_path = tmp_path / ".claude" / "settings.local.json"
-    data = json.loads(settings_path.read_text())
+    data = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
     handler = data["hooks"]["Stop"][0]["hooks"][0]
-
     assert "timeout" in handler
-    assert isinstance(handler["timeout"], int)
-    assert handler["timeout"] > 0
+    assert isinstance(handler["timeout"], int) and handler["timeout"] > 0
 
 
-def test_write_stop_hook_settings_creates_claude_dir(tmp_path: Path) -> None:
-    """_write_stop_hook_settings must create .claude/ directory if missing."""
-    bus = make_bus()
-    tmux = make_tmux_mock()
-
-    # Confirm .claude/ does not pre-exist
+def test_stop_hook_strategy_creates_claude_dir(tmp_path: Path) -> None:
+    """on_start must create .claude/ directory if missing."""
     assert not (tmp_path / ".claude").exists()
-
-    agent = ClaudeCodeAgent(
-        agent_id="worker-1",
-        bus=bus,
-        tmux=tmux,
-        web_base_url="http://localhost:8000",
-    )
-
-    agent._write_stop_hook_settings(tmp_path)
-
+    StopHookStrategy("worker-1", "http://localhost:8000").on_start(tmp_path)
     assert (tmp_path / ".claude").is_dir()
 
 
-def test_write_stop_hook_settings_skipped_when_no_web_base_url(tmp_path: Path) -> None:
+def test_stop_hook_strategy_skipped_when_no_web_base_url(tmp_path: Path) -> None:
     """When web_base_url is empty, no settings file must be written."""
-    bus = make_bus()
-    tmux = make_tmux_mock()
-
-    agent = ClaudeCodeAgent(
-        agent_id="worker-1",
-        bus=bus,
-        tmux=tmux,
-        web_base_url="",
-    )
-
-    agent._write_stop_hook_settings(tmp_path)
-
-    settings_path = tmp_path / ".claude" / "settings.local.json"
-    assert not settings_path.exists(), (
-        "settings.local.json must NOT be created when web_base_url is empty"
-    )
+    StopHookStrategy("worker-1", "").on_start(tmp_path)
+    assert not (tmp_path / ".claude" / "settings.local.json").exists()
 
 
-def test_write_stop_hook_settings_has_api_key_header(tmp_path: Path) -> None:
+def test_stop_hook_strategy_has_api_key_header(tmp_path: Path) -> None:
     """HTTP hook must include X-Api-Key header with $TMUX_ORCHESTRATOR_API_KEY."""
-    bus = make_bus()
-    tmux = make_tmux_mock()
-    agent = ClaudeCodeAgent(
-        agent_id="worker-1",
-        bus=bus,
-        tmux=tmux,
-        web_base_url="http://localhost:8000",
-    )
-    agent._write_stop_hook_settings(tmp_path)
-
+    StopHookStrategy("worker-1", "http://localhost:8000").on_start(tmp_path)
     data = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
     handler = data["hooks"]["Stop"][0]["hooks"][0]
-    assert "headers" in handler
     assert handler["headers"].get("X-Api-Key") == "$TMUX_ORCHESTRATOR_API_KEY"
 
 
-def test_write_stop_hook_settings_has_allowed_env_vars(tmp_path: Path) -> None:
+def test_stop_hook_strategy_has_allowed_env_vars(tmp_path: Path) -> None:
     """HTTP hook must declare allowedEnvVars so Claude Code expands $VAR in headers."""
-    bus = make_bus()
-    tmux = make_tmux_mock()
-    agent = ClaudeCodeAgent(
-        agent_id="worker-1",
-        bus=bus,
-        tmux=tmux,
-        web_base_url="http://localhost:8000",
-    )
-    agent._write_stop_hook_settings(tmp_path)
-
+    StopHookStrategy("worker-1", "http://localhost:8000").on_start(tmp_path)
     data = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
     handler = data["hooks"]["Stop"][0]["hooks"][0]
-    assert "allowedEnvVars" in handler
-    assert "TMUX_ORCHESTRATOR_API_KEY" in handler["allowedEnvVars"]
+    assert "TMUX_ORCHESTRATOR_API_KEY" in handler.get("allowedEnvVars", [])
 
 
 # ---------------------------------------------------------------------------
@@ -634,7 +541,7 @@ async def test_task_complete_accepts_matching_task_id(client, mock_orchestrator)
 
 
 def test_write_stop_hook_settings_skipped_for_director(tmp_path: Path) -> None:
-    """Director agents must NOT write a stop hook settings file.
+    """make_completion_strategy(DIRECTOR) returns ExplicitSignalStrategy with no-op on_start.
 
     Directors signal task completion explicitly via POST /task-complete,
     so the automatic stop hook must be disabled to avoid false completions
@@ -642,76 +549,62 @@ def test_write_stop_hook_settings_skipped_for_director(tmp_path: Path) -> None:
     """
     from tmux_orchestrator.config import AgentRole
 
-    bus = make_bus()
-    tmux = make_tmux_mock()
+    strategy = make_completion_strategy(AgentRole.DIRECTOR, "agent-director", "http://localhost:9000")
+    assert isinstance(strategy, ExplicitSignalStrategy)
 
-    agent = ClaudeCodeAgent(
-        agent_id="agent-director",
-        bus=bus,
-        tmux=tmux,
-        web_base_url="http://localhost:9000",
-        role=AgentRole.DIRECTOR,
-    )
+    strategy.on_start(tmp_path)
 
-    agent._write_stop_hook_settings(tmp_path)
-
-    settings_path = tmp_path / ".claude" / "settings.local.json"
-    assert not settings_path.exists(), (
-        "Director agents must NOT create stop hook settings — "
-        "they signal completion explicitly"
+    assert not (tmp_path / ".claude" / "settings.local.json").exists(), (
+        "Director strategy must NOT create stop hook settings"
     )
 
 
 @pytest.mark.asyncio
 async def test_wait_for_completion_director_skips_pane_polling() -> None:
-    """Director agents must ignore settled pane output and never auto-complete.
+    """ExplicitSignalStrategy must ignore settled pane output and never auto-complete.
 
-    The stop hook is disabled for directors; only an explicit POST /task-complete
-    (which clears _current_task) can end a director task.  A pane showing '❯'
-    between two director responses must NOT trigger task completion.
+    Only an explicit _current_task = None (via POST /task-complete) can end a
+    director task.  A pane showing '❯' between director responses must not trigger
+    completion.
     """
-    from tmux_orchestrator.config import AgentRole
+    strategy = ExplicitSignalStrategy()
 
-    bus = make_bus()
     tmux = make_tmux_mock()
-    # Pane looks done immediately — should NOT trigger completion for director
     tmux.capture_pane = MagicMock(return_value="❯ ")
 
-    agent = ClaudeCodeAgent(
-        agent_id="agent-director",
-        bus=bus,
-        tmux=tmux,
-        web_base_url="http://localhost:9000",
-        role=AgentRole.DIRECTOR,
-    )
-    agent.pane = MagicMock()
+    # Build a minimal agent-like object satisfying _AgentLike
+    class FakeAgent:
+        id = "agent-director"
+        pane = MagicMock()
+        _tmux = tmux
+        _current_task: "Task | None" = None
+
+        async def handle_output(self, text: str) -> None:
+            pass
 
     from tmux_orchestrator.agents.base import Task
 
+    agent = FakeAgent()
     task = Task(id="t-dir", prompt="orchestrate something")
     agent._current_task = task
 
-    # After a short delay, simulate explicit completion (clears _current_task)
+    # After a short delay, simulate explicit completion
     async def explicit_complete():
         await asyncio.sleep(0.3)
         agent._current_task = None
 
     asyncio.create_task(explicit_complete())
 
-    # Must wait for explicit completion (not pane-poll auto-complete)
-    # If pane polling fired, it would return in < _SETTLE_CYCLES * _POLL_INTERVAL = 1.5s
-    # The explicit completion arrives at 0.3s — verify it returns then, not earlier
     import time
     t0 = time.monotonic()
-    await asyncio.wait_for(agent._wait_for_completion(task), timeout=3.0)
+    await asyncio.wait_for(strategy.wait(agent, task), timeout=3.0)
     elapsed = time.monotonic() - t0
 
-    # Must have waited for the explicit signal (>= 0.3s), not short-circuited by pane poll
+    # Must have waited for explicit signal (>= 0.3s), not short-circuited by pane poll
     assert elapsed >= 0.25, (
         f"Director completed too early ({elapsed:.2f}s) — pane polling must be disabled"
     )
-    # capture_pane may or may not be called, but task completion was NOT triggered by it
-    # (the only completion was the explicit _current_task = None after 0.3s)
+    tmux.capture_pane.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -721,33 +614,33 @@ async def test_wait_for_completion_director_skips_pane_polling() -> None:
 
 @pytest.mark.asyncio
 async def test_wait_for_completion_returns_if_task_cleared() -> None:
-    """_wait_for_completion must return immediately if Stop hook already handled the task."""
-    bus = make_bus()
+    """StopHookStrategy.wait must return immediately if Stop hook cleared _current_task."""
+    strategy = StopHookStrategy("worker-wfc", "http://localhost:8000")
+
     tmux = make_tmux_mock()
-    # Return a stable pane output that looks like a done prompt
     tmux.capture_pane = MagicMock(return_value="❯ ")
 
-    agent = ClaudeCodeAgent(
-        agent_id="worker-wfc",
-        bus=bus,
-        tmux=tmux,
-        web_base_url="http://localhost:8000",
-    )
-    agent.pane = MagicMock()
+    class FakeAgent:
+        id = "worker-wfc"
+        pane = MagicMock()
+        _tmux = tmux
+        _current_task: "Task | None" = None
+        handle_output = AsyncMock()
 
     from tmux_orchestrator.agents.base import Task
 
+    agent = FakeAgent()
     task = Task(id="t-cleared", prompt="do something")
     agent._current_task = task
 
-    # Simulate Stop hook firing: clear _current_task before polling loop runs
+    # Simulate Stop hook firing: clear _current_task before polling detects done
     async def clear_task_after_delay():
         await asyncio.sleep(0.05)
-        agent._current_task = None  # Stop hook called _set_idle()
+        agent._current_task = None
 
     asyncio.create_task(clear_task_after_delay())
 
-    # _wait_for_completion should exit quickly once _current_task is None
-    await asyncio.wait_for(agent._wait_for_completion(task), timeout=3.0)
-    # handle_output must NOT have been called (Stop hook handled it)
-    # (no assertion needed beyond the function returning without error)
+    # wait() should return quickly once _current_task is None
+    await asyncio.wait_for(strategy.wait(agent, task), timeout=3.0)
+    # handle_output must NOT have been called (Stop hook handled it externally)
+    agent.handle_output.assert_not_awaited()
