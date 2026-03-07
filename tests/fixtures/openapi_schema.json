@@ -1618,6 +1618,22 @@
               "title": "Agent Id",
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "task_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Task Id"
+            }
           }
         ],
         "responses": {

@@ -104,6 +104,8 @@ class ClaudeCodeAgent(Agent):
         self._context_spec_files_root: Path | None = context_spec_files_root
         # Capability tags: advertised capabilities used for smart dispatch.
         self.tags: list[str] = tags or []
+        # Working directory set after worktree setup; used for per-task stop hook updates.
+        self._cwd: Path | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -128,6 +130,7 @@ class ClaudeCodeAgent(Agent):
             pane = await loop.run_in_executor(None, self._tmux.new_pane, self.id)
         self.pane = pane
         cwd = await self._setup_worktree()
+        self._cwd = cwd
         if cwd is not None:
             await loop.run_in_executor(None, self._write_context_file, cwd)
             if self._api_key:
@@ -150,10 +153,6 @@ class ClaudeCodeAgent(Agent):
         self._tmux.start_watcher()
         await self._wait_for_ready()
         self.status = AgentStatus.IDLE
-        if self.role == AgentRole.DIRECTOR:
-            await loop.run_in_executor(
-                None, self._tmux.send_keys, pane, self._director_startup_prompt()
-            )
         self._run_task = asyncio.create_task(self._run_loop(), name=f"{self.id}-loop")
         await self._start_message_loop()
         logger.info("ClaudeCodeAgent %s started in pane %s (role=%s)", self.id, pane.id, self.role)
@@ -250,14 +249,34 @@ class ClaudeCodeAgent(Agent):
             else "You are a top-level agent. Report results to the orchestrator."
         )
 
+        api = self._web_base_url
+        director_api_block = (
+            f"\n### API Quick Reference (Director)\n\n"
+            f"```bash\n"
+            f"# Check all agents\n"
+            f"curl -s {api}/agents -H 'X-Api-Key: $TMUX_ORCHESTRATOR_API_KEY'\n\n"
+            f"# Submit task to a specific agent\n"
+            f"curl -s -X POST {api}/tasks "
+            f"-H 'Content-Type: application/json' "
+            f"-H 'X-Api-Key: $TMUX_ORCHESTRATOR_API_KEY' "
+            f"-d '{{\"prompt\":\"<task>\",\"target_agent\":\"<id>\",\"priority\":0}}'\n\n"
+            f"# Check task queue\n"
+            f"curl -s {api}/tasks -H 'X-Api-Key: $TMUX_ORCHESTRATOR_API_KEY'\n"
+            f"```\n\n"
+            f"Your context is in `__orchestrator_context__.json`. "
+            f"Incoming worker completions arrive as mailbox notifications (`__MSG__:<id>`).\n\n"
+            f"**Workflow**: use `/plan` → spawn workers → monitor with `/check-inbox` → aggregate results."
+        )
         role_desc = {
             AgentRole.DIRECTOR: (
                 "You are the **Director** agent. Your responsibilities:\n"
-                "- Discuss project goals with the user via the web UI chat\n"
+                "- Receive goals from the orchestrator queue\n"
                 "- Break goals into concrete subtasks\n"
-                "- Delegate subtasks to workers via `POST /tasks` or `/spawn-subagent`\n"
-                "- Aggregate worker results and report back to the user\n"
+                "- Delegate subtasks to workers via `/spawn-subagent` or `POST /tasks`\n"
+                "- Wait for all workers to complete before finalising\n"
+                "- Aggregate worker results and commit a summary\n"
                 "- Use `/plan` before starting complex coordination work"
+                + director_api_block
             ),
             AgentRole.WORKER: (
                 "You are a **Worker** agent. Your responsibilities:\n"
@@ -559,6 +578,43 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
             self.id, settings_path, url,
         )
 
+    def _update_stop_hook_for_task(self, cwd: Path, task_id: str) -> None:
+        """Rewrite settings.local.json with a task-scoped stop hook URL.
+
+        Called just before each task is dispatched to the pane so that only
+        the stop hook fired during THIS task carries the correct task_id.
+        Stop hooks from the director startup prompt or previous tasks will
+        carry a stale URL and be rejected by the endpoint.
+        """
+        if not self._web_base_url:
+            return
+        url = f"{self._web_base_url}/agents/{self.id}/task-complete?task_id={task_id}"
+        settings = {
+            "hooks": {
+                "Stop": [
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            {
+                                "type": "http",
+                                "url": url,
+                                "timeout": 5,
+                                "headers": {"X-Api-Key": "$TMUX_ORCHESTRATOR_API_KEY"},
+                                "allowedEnvVars": ["TMUX_ORCHESTRATOR_API_KEY"],
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        claude_dir = cwd / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        (claude_dir / "settings.local.json").write_text(json.dumps(settings, indent=2))
+        logger.debug(
+            "Agent %s updated Stop hook for task %s (url=%s)",
+            self.id, task_id, url,
+        )
+
     def _write_notes_template(self, cwd: Path) -> None:
         """Write an initial NOTES.md template for structured note-taking."""
         notes_path = cwd / "NOTES.md"
@@ -667,6 +723,14 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
     async def _dispatch_task(self, task: Task) -> None:
         if self.pane is None:
             raise RuntimeError(f"Agent {self.id} has no pane")
+        # Update the stop hook URL with this task's ID before dispatching.
+        # This prevents stop hooks from the director startup prompt or previous
+        # tasks from prematurely completing the current task.
+        if self._cwd is not None:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None, self._update_stop_hook_for_task, self._cwd, task.id
+            )
         from tmux_orchestrator.security import sanitize_prompt
         safe_prompt = sanitize_prompt(task.prompt)
         loop = asyncio.get_running_loop()

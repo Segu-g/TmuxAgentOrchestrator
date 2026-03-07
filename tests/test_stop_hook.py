@@ -332,7 +332,7 @@ async def test_task_complete_endpoint_returns_ok(client, mock_orchestrator) -> N
     mock_orchestrator._agents["worker-1"] = mock_agent
 
     resp = await client.post(
-        "/agents/worker-1/task-complete",
+        "/agents/worker-1/task-complete?task_id=task-123",
         headers={"X-API-Key": _API_KEY},
         json={"output": "Task done!", "exit_code": 0},
     )
@@ -356,7 +356,7 @@ async def test_task_complete_endpoint_calls_handle_output(client, mock_orchestra
     mock_orchestrator._agents["worker-2"] = mock_agent
 
     resp = await client.post(
-        "/agents/worker-2/task-complete",
+        "/agents/worker-2/task-complete?task_id=task-abc",
         headers={"X-API-Key": _API_KEY},
         json={"output": "done", "exit_code": 0},
     )
@@ -428,7 +428,7 @@ async def test_task_complete_endpoint_body_optional(client, mock_orchestrator) -
     mock_orchestrator._agents["worker-empty"] = mock_agent
 
     resp = await client.post(
-        "/agents/worker-empty/task-complete",
+        "/agents/worker-empty/task-complete?task_id=task-empty",
         headers={"X-API-Key": _API_KEY},
         json={},
     )
@@ -522,7 +522,7 @@ async def test_task_complete_skips_when_stop_hook_active(
     mock_orchestrator._agents["worker-active"] = mock_agent
 
     resp = await client.post(
-        "/agents/worker-active/task-complete",
+        "/agents/worker-active/task-complete?task_id=task-x",
         headers={"X-API-Key": _API_KEY},
         json={"stop_hook_active": True, "last_assistant_message": "still going..."},
     )
@@ -547,7 +547,7 @@ async def test_task_complete_uses_last_assistant_message(
     mock_orchestrator._agents["worker-msg"] = mock_agent
 
     resp = await client.post(
-        "/agents/worker-msg/task-complete",
+        "/agents/worker-msg/task-complete?task_id=task-y",
         headers={"X-API-Key": _API_KEY},
         json={
             "stop_hook_active": False,
@@ -574,7 +574,7 @@ async def test_task_complete_falls_back_to_output_field(
     mock_orchestrator._agents["worker-fallback"] = mock_agent
 
     resp = await client.post(
-        "/agents/worker-fallback/task-complete",
+        "/agents/worker-fallback/task-complete?task_id=task-z",
         headers={"X-API-Key": _API_KEY},
         json={"output": "fallback output"},
     )

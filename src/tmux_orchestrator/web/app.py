@@ -1286,7 +1286,7 @@ def create_app(
         summary="Signal that an agent's current task is complete (called by Stop hook)",
         dependencies=[Depends(auth)],
     )
-    async def agent_task_complete(agent_id: str, request: Request) -> dict:
+    async def agent_task_complete(agent_id: str, request: Request, task_id: str | None = None) -> dict:
         """Receive task-complete notification from Claude Code's Stop hook.
 
         This endpoint is called by the ``Stop`` hook configured in
@@ -1324,6 +1324,19 @@ def create_app(
                     "cannot complete a task that is not in progress"
                 ),
             )
+
+        # Validate task_id against the current task.  _update_stop_hook_for_task()
+        # rewrites settings.local.json with ?task_id=<id> before each dispatch,
+        # so any stop hook that arrives without a matching task_id is stale (e.g.
+        # from the director startup prompt or a previous task run) and must be
+        # rejected.  When the agent is BUSY, we always require an exact match.
+        current_task_id = agent._current_task.id if agent._current_task else None
+        if current_task_id is not None and task_id != current_task_id:
+            logger.debug(
+                "Agent %s task-complete skipped: task_id mismatch (hook=%r, current=%r)",
+                agent_id, task_id, current_task_id,
+            )
+            return {"status": "skipped", "reason": "task_id_mismatch"}
 
         # Parse optional body sent by the Stop hook.
         # Claude Code sends: {"stop_hook_active": bool, "last_assistant_message": str, ...}
