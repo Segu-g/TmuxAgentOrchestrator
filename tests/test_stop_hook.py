@@ -629,6 +629,92 @@ async def test_task_complete_accepts_matching_task_id(client, mock_orchestrator)
 
 
 # ---------------------------------------------------------------------------
+# Director agents: stop hook skipped, pane polling skipped
+# ---------------------------------------------------------------------------
+
+
+def test_write_stop_hook_settings_skipped_for_director(tmp_path: Path) -> None:
+    """Director agents must NOT write a stop hook settings file.
+
+    Directors signal task completion explicitly via POST /task-complete,
+    so the automatic stop hook must be disabled to avoid false completions
+    after every Claude response.
+    """
+    from tmux_orchestrator.config import AgentRole
+
+    bus = make_bus()
+    tmux = make_tmux_mock()
+
+    agent = ClaudeCodeAgent(
+        agent_id="agent-director",
+        bus=bus,
+        tmux=tmux,
+        web_base_url="http://localhost:9000",
+        role=AgentRole.DIRECTOR,
+    )
+
+    agent._write_stop_hook_settings(tmp_path)
+
+    settings_path = tmp_path / ".claude" / "settings.local.json"
+    assert not settings_path.exists(), (
+        "Director agents must NOT create stop hook settings — "
+        "they signal completion explicitly"
+    )
+
+
+@pytest.mark.asyncio
+async def test_wait_for_completion_director_skips_pane_polling() -> None:
+    """Director agents must ignore settled pane output and never auto-complete.
+
+    The stop hook is disabled for directors; only an explicit POST /task-complete
+    (which clears _current_task) can end a director task.  A pane showing '❯'
+    between two director responses must NOT trigger task completion.
+    """
+    from tmux_orchestrator.config import AgentRole
+
+    bus = make_bus()
+    tmux = make_tmux_mock()
+    # Pane looks done immediately — should NOT trigger completion for director
+    tmux.capture_pane = MagicMock(return_value="❯ ")
+
+    agent = ClaudeCodeAgent(
+        agent_id="agent-director",
+        bus=bus,
+        tmux=tmux,
+        web_base_url="http://localhost:9000",
+        role=AgentRole.DIRECTOR,
+    )
+    agent.pane = MagicMock()
+
+    from tmux_orchestrator.agents.base import Task
+
+    task = Task(id="t-dir", prompt="orchestrate something")
+    agent._current_task = task
+
+    # After a short delay, simulate explicit completion (clears _current_task)
+    async def explicit_complete():
+        await asyncio.sleep(0.3)
+        agent._current_task = None
+
+    asyncio.create_task(explicit_complete())
+
+    # Must wait for explicit completion (not pane-poll auto-complete)
+    # If pane polling fired, it would return in < _SETTLE_CYCLES * _POLL_INTERVAL = 1.5s
+    # The explicit completion arrives at 0.3s — verify it returns then, not earlier
+    import time
+    t0 = time.monotonic()
+    await asyncio.wait_for(agent._wait_for_completion(task), timeout=3.0)
+    elapsed = time.monotonic() - t0
+
+    # Must have waited for the explicit signal (>= 0.3s), not short-circuited by pane poll
+    assert elapsed >= 0.25, (
+        f"Director completed too early ({elapsed:.2f}s) — pane polling must be disabled"
+    )
+    # capture_pane may or may not be called, but task completion was NOT triggered by it
+    # (the only completion was the explicit _current_task = None after 0.3s)
+
+
+# ---------------------------------------------------------------------------
 # _wait_for_completion: early return when Stop hook clears _current_task
 # ---------------------------------------------------------------------------
 

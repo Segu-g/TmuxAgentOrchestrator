@@ -264,7 +264,20 @@ class ClaudeCodeAgent(Agent):
             f"```\n\n"
             f"Your context is in `__orchestrator_context__.json`. "
             f"Incoming worker completions arrive as mailbox notifications (`__MSG__:<id>`).\n\n"
-            f"**Workflow**: use `/plan` → spawn workers → monitor with `/check-inbox` → aggregate results."
+            f"**Workflow**: use `/plan` → spawn workers → monitor with `/check-inbox` → aggregate results.\n\n"
+            f"### Task Completion (IMPORTANT)\n\n"
+            f"You are a Director agent: your task spans multiple Claude responses.\n"
+            f"The orchestrator does **not** auto-detect your completion — you must\n"
+            f"signal it explicitly once ALL workers have finished and all artefacts\n"
+            f"are committed:\n\n"
+            f"```bash\n"
+            f"curl -s -X POST {api}/agents/{self.id}/task-complete \\\n"
+            f"  -H 'X-Api-Key: $TMUX_ORCHESTRATOR_API_KEY' \\\n"
+            f"  -H 'Content-Type: application/json' \\\n"
+            f"  -d '{{\"output\": \"<one-line summary of what was accomplished>\"}}'\n"
+            f"```\n\n"
+            f"Call this **only once**, after confirming all workers are IDLE\n"
+            f"(`GET {api}/agents`) and all expected files exist in the repo."
         )
         role_desc = {
             AgentRole.DIRECTOR: (
@@ -536,11 +549,18 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
         If ``web_base_url`` is empty (web server not started), the method is
         a no-op and completion falls back to ``_wait_for_completion`` polling.
 
+        Director agents do not use the Stop hook because the hook fires after
+        every Claude response, not at true task completion.  Directors manage
+        multi-turn coordination across many responses; they signal task
+        completion explicitly via ``POST /agents/{id}/task-complete``.
+
         Reference:
         - Claude Code Hooks Reference https://code.claude.com/docs/en/hooks (2025)
         - DESIGN.md §10.12 (v0.38.0)
         """
         if not self._web_base_url:
+            return
+        if self.role == AgentRole.DIRECTOR:
             return
 
         url = f"{self._web_base_url}/agents/{self.id}/task-complete"
@@ -582,10 +602,15 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
 
         Called just before each task is dispatched to the pane so that only
         the stop hook fired during THIS task carries the correct task_id.
-        Stop hooks from the director startup prompt or previous tasks will
-        carry a stale URL and be rejected by the endpoint.
+        Stop hooks from previous tasks carry a stale URL and are rejected by
+        the endpoint.
+
+        Director agents skip this: they signal completion explicitly and do
+        not rely on the Stop hook.
         """
         if not self._web_base_url:
+            return
+        if self.role == AgentRole.DIRECTOR:
             return
         url = f"{self._web_base_url}/agents/{self.id}/task-complete?task_id={task_id}"
         settings = {
@@ -748,11 +773,17 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
         prev = ""
         while True:
             await asyncio.sleep(_POLL_INTERVAL)
-            # Stop hook may have already called handle_output() and cleared
-            # _current_task.  If so, this task is done — return immediately
-            # to avoid a second handle_output() call (double-completion).
+            # Stop hook (or explicit POST /task-complete) may have already
+            # called handle_output() and cleared _current_task.  Return
+            # immediately to avoid a double-completion.
             if self._current_task is None or self._current_task.id != task.id:
                 return
+            # Director agents do not use the Stop hook and must signal
+            # completion explicitly via POST /task-complete.  Polling
+            # completion detection is disabled for them: a pane that shows
+            # "❯" between two director responses must NOT be treated as done.
+            if self.role == AgentRole.DIRECTOR:
+                continue
             loop = asyncio.get_running_loop()
             text = await loop.run_in_executor(
                 None, self._tmux.capture_pane, self.pane
