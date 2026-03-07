@@ -3134,7 +3134,7 @@ v0.49.0 でエージェント自律実行方式変更（§12 層3）が完了し
 | **高** | **チェックポイント永続化による中断再開** — SQLite による状態永続化、`--resume` フラグ（v0.45.0 実装中） | 層5 |
 | **高** | **`ProcessPort` 抽象インターフェース抽出** — `ClaudeCodeAgent` の libtmux 直接依存を排除（v0.46.0 予定） | 層5 |
 | **高** | **OpenTelemetry GenAI Semantic Conventions** — `gen_ai.*` 属性 + OTLP エクスポーター（v0.47.0 予定） | 層5 |
-| **高** | **エージェントドリフト検出 (Agent Stability Index)** — 役割逸脱を検出し `agent_drift_warning` イベントを発行 | 層5 |
+| ~~**高**~~ | ~~**エージェントドリフト検出 (Agent Stability Index)**~~ | ~~完了 v1.0.9 — `DriftMonitor` (role/idle/length 3サブスコア)、`agent_drift_warning` イベント、`GET /drift`・`GET /agents/{id}/drift` エンドポイント。34テスト。17/17デモPASS。~~ |
 | 中 | **`UseCaseInteractor` 層の抽出** — FastAPI ハンドラーから業務ロジックを分離 | 層5 |
 | 中 | **エージェント状態機械の Hypothesis ステートフルテスト** — `AgentStatus` 遷移シーケンスの自動生成テスト | 層5 |
 | 低 | **構造化デバッグ: トレースリプレイ CLI** — `ResultStore` JSONL から過去実行を再現 | 層5 |
@@ -3187,7 +3187,9 @@ v0.49.0 でエージェント自律実行方式変更（§12 層3）が完了し
 | 優先度 | 課題 | 根拠 |
 |--------|------|------|
 | 高 | **OpenTelemetry GenAI Semantic Conventions 準拠トレース出力** — `gen_ai.*` 属性 (token counts, tool calls, agent spans) を既存 `trace_id` ベースの構造化ログに付加し、Datadog/Jaeger/OTLP エクスポーターへ送信できるようにする | OpenTelemetry "AI Agent Observability" (2025) が業界標準に収斂しつつあり、Datadog が GenAI Semantic Conventions にネイティブ対応済み。現状の `trace_id` は相関のみでスパン階層がない。[opentelemetry.io/blog/2025/ai-agent-observability](https://opentelemetry.io/blog/2025/ai-agent-observability/) |
-| 高 | **エージェントドリフト検出 (Agent Stability Index)** — 同一エージェントの連続出力に対し role adherence スコアを算出し、閾値を下回ったら `agent_drift_warning` STATUS イベントを発行する `DriftMonitor` を実装する | arXiv:2601.04170 "Agent Drift: Quantifying Behavioral Degradation" (2025) が12次元の Agent Stability Index (ASI) を提案。現行の `ContextMonitor` はトークン量のみ監視しており、役割逸脱・タスク重複を検出できない。ロールテンプレートライブラリ実装後に効果が発揮される。 |
+| ~~**高**~~ | ~~**エージェントドリフト検出 (Agent Stability Index)**~~ | ~~完了 v1.0.9 — `DriftMonitor` (role/idle/length 3サブスコア)、`agent_drift_warning` イベント。34テスト。17/17デモPASS。~~ |
+| 中 | **DriftMonitor — セマンティック類似度ベースの role_score 強化** — 現行のキーワードマッチを embedding コサイン類似度に置き換え、system_prompt と pane 出力の意味的乖離をより精密に測定する。`sentence-transformers` の軽量モデル (paraphrase-MiniLM-L6-v2, 22MB) を使用してランタイム外部 API 依存を回避する | Rath arXiv:2601.04170: ASI の Role Adherence 次元は「agent_id とタスクタイプの相互情報量」を使用。v1.0.9 のキーワードマッチは role_score = 1.0 に張り付く傾向（スコアが役割逸脱を検出しにくい）。embedding 距離により「形式は合っているが内容が違う」ドリフトを検出可能。 |
+| 中 | **Director の `agent_drift_warning` 購読による自動 re-brief** — Director エージェントが bus の `agent_drift_warning` イベントを購読し、ドリフトを検出したワーカーに自動で re-brief メッセージを送信する仕組みを追加する。v1.0.8 の「ディレクター投票が遅い」問題の根本解決。`/delegate` スラッシュコマンドで受信後に再ブリーフィングを実行 | v1.0.9 build-log: drift_warnings=0 は正常動作だが、将来の曖昧タスクでワーカーがドリフトする場合に Director が自動介入できる仕組みが必要。v1.0.8 build-log: 「Director polling が遅い (11分ループ)」根本原因は能動的な完了通知の欠如。`agent_drift_warning` bus イベントを Director が購読することで同様の問題を予防できる。 |
 | 中 | **`UseCaseInteractor` 層の抽出** — `web/app.py` の FastAPI ハンドラーが `orchestrator.*` メソッドを直接呼ぶ箇所を `SubmitTaskUseCase`, `CancelTaskUseCase` 等の Use Case クラスに置き換え、Web 層とドメイン層の依存方向を逆転させる | Martin "Clean Architecture" §22: Use Case Interactor がアプリケーション固有ビジネスルールを保持し、Web/CLI/TUI のどのインターフェースからも同一ロジックを呼べる。現状は FastAPI ハンドラーにロジックが漏れており、TUI から同機能を使うときに重複する。`ProcessPort` 抽出後に実施するのが自然な順序。 |
 | 中 | **MIRIX 型エピソード記憶ストア** — 各エージェントの `NOTES.md` に加えて、タスク完了ごとに `{task_id, summary, outcome, lessons}` を軽量 JSONL エピソードログとして蓄積し、次タスク開始時に直近N件を system prompt に付加するエピソード記憶を実装する | arXiv:2507.07957 "MIRIX: Multi-Agent Memory System" (2025) が RAG ベースラインより 35% 精度向上を達成。現行の `/summarize` → `NOTES.md` は単一ファイルに上書きされ過去エピソードが失われる。チェックポイント永続化の SQLite 基盤と共通化できる。 |
 | 中 | **スライディングウィンドウ + 重要度スコアによるコンテキスト圧縮** — `ContextMonitor` が 75% 閾値を検出したとき、タスクプロンプトとの TF-IDF 類似度で行の重要度スコアを算出し、スコア下位 40% を削除したうえで圧縮済みコンテキストを注入する（単純な `/summarize` の上位互換） | Liu et al. "Lost in the Middle" TACL 2024 が中央部情報の忘却を実証。JetBrains Research "Cutting Through the Noise" (2025-12) が重要度スコアリングによるコスト削減を実証。現行の `/summarize` はプロンプトとの関連度を考慮せず一律圧縮する。 |
