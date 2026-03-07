@@ -69,6 +69,24 @@ class TaskDeadLetteredPayload(_BasePayload):
     reason: str
 
 
+class DriftWarningPayload(_BasePayload):
+    """Payload for agent_drift_warning STATUS events.
+
+    Published by DriftMonitor when an agent's composite drift score falls
+    below the configured threshold.
+
+    Reference: Rath arXiv:2601.04170 "Agent Drift" (2026) — ASI framework;
+    DESIGN.md §10.20 (v1.0.9).
+    """
+    event: Literal["agent_drift_warning"]
+    agent_id: str
+    drift_score: float
+    role_score: float
+    idle_score: float
+    length_score: float
+    drift_threshold: float
+
+
 # ---------------------------------------------------------------------------
 # RESULT payloads
 # ---------------------------------------------------------------------------
@@ -122,6 +140,7 @@ _STATUS_PAYLOADS: dict[str, type[_BasePayload]] = {
     "agent_error": AgentErrorPayload,
     "subagent_spawned": SubagentSpawnedPayload,
     "task_dead_lettered": TaskDeadLetteredPayload,
+    "agent_drift_warning": DriftWarningPayload,
 }
 
 

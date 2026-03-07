@@ -94,6 +94,14 @@ class OrchestratorConfig:
     context_warn_threshold: float = 0.75
     context_auto_summarize: bool = False
     context_monitor_poll: float = 5.0
+    # --- Drift monitoring ---
+    # drift_threshold: composite drift score below which agent_drift_warning fires (default 0.6).
+    # drift_idle_threshold: seconds of unchanged pane output before idle_score reaches 0.0 (default 300).
+    # drift_monitor_poll: poll interval in seconds (default 10.0).
+    # Reference: Rath arXiv:2601.04170 "Agent Drift" (2026) — ASI framework
+    drift_threshold: float = 0.6
+    drift_idle_threshold: float = 300.0
+    drift_monitor_poll: float = 10.0
     # --- Queue-depth autoscaling ---
     # autoscale_min: minimum number of autoscaled agents (0 = scale to zero).
     # autoscale_max: maximum number of autoscaled agents (0 = disabled).
@@ -255,6 +263,9 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         context_warn_threshold=data.get("context_warn_threshold", 0.75),
         context_auto_summarize=data.get("context_auto_summarize", False),
         context_monitor_poll=data.get("context_monitor_poll", 5.0),
+        drift_threshold=data.get("drift_threshold", 0.6),
+        drift_idle_threshold=data.get("drift_idle_threshold", 300.0),
+        drift_monitor_poll=data.get("drift_monitor_poll", 10.0),
         autoscale_min=data.get("autoscale_min", 0),
         autoscale_max=data.get("autoscale_max", 0),
         autoscale_threshold=data.get("autoscale_threshold", 3),

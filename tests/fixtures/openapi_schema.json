@@ -1418,6 +1418,48 @@
         "summary": "Drain an agent \u2014 stop it after its current task completes"
       }
     },
+    "/agents/{agent_id}/drift": {
+      "get": {
+        "description": "Return behavioral drift statistics for *agent_id*.\n\nFields:\n- ``drift_score``: composite drift score (0\u20131; lower = more drifted).\n- ``role_score``: keyword overlap between system_prompt and pane output.\n- ``idle_score``: 1 when pane is active; 0 when idle past ``drift_idle_threshold``.\n- ``length_score``: output line-count stability score.\n- ``warned``: whether the agent is currently in a drift-warned state.\n- ``drift_warnings``: cumulative count of agent_drift_warning events emitted.\n- ``drift_threshold``: the configured composite score threshold.\n- ``last_polled``: monotonic timestamp of the most recent poll.\n\nReturns 404 if the agent is unknown or not yet tracked by the drift monitor.\n\nDesign reference: Rath arXiv:2601.04170 \"Agent Drift\" (2026) \u2014 ASI framework;\nDESIGN.md \u00a710.20 (v1.0.9).",
+        "operationId": "agent_drift_stats_agents__agent_id__drift_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Agent Drift Stats Agents  Agent Id  Drift Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Per-agent behavioral drift stats"
+      }
+    },
     "/agents/{agent_id}/history": {
       "get": {
         "description": "Return the last *limit* completed task records for *agent_id*.\n\nEach record contains:\n- ``task_id``: unique task identifier\n- ``prompt``: the task prompt text\n- ``started_at``: ISO timestamp when the task was dispatched\n- ``finished_at``: ISO timestamp when the RESULT arrived\n- ``duration_s``: wall-clock seconds from dispatch to RESULT\n- ``status``: ``\"success\"`` or ``\"error\"``\n- ``error``: error message string, or null on success\n\nResults are ordered most-recent-first.  Pass ``?limit=N`` to control\nhow many records are returned (default 50, capped at 200).\n\nDesign reference: TAMAS (IBM, 2025) \"Beyond Black-Box Benchmarking:\nObservability, Analytics, and Optimization of Agentic Systems\"\narXiv:2503.06745 \u2014 per-agent task history enables bottleneck analysis.\nLangfuse \"AI Agent Observability\" (2024): tracing decision paths.",
@@ -1882,6 +1924,27 @@
           }
         },
         "summary": "Dead letter queue"
+      }
+    },
+    "/drift": {
+      "get": {
+        "description": "Return behavioral drift statistics for all tracked agents.\n\nSee ``GET /agents/{id}/drift`` for field descriptions.\n\nDesign reference: Rath arXiv:2601.04170 \"Agent Drift\" (2026);\nDESIGN.md \u00a710.20 (v1.0.9).",
+        "operationId": "all_drift_stats_drift_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {},
+                  "title": "Response All Drift Stats Drift Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Behavioral drift stats for all agents"
       }
     },
     "/events": {

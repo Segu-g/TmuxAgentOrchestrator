@@ -1494,6 +1494,49 @@ def create_app(
         return orchestrator.all_agent_context_stats()
 
     @app.get(
+        "/agents/{agent_id}/drift",
+        summary="Per-agent behavioral drift stats",
+        dependencies=[Depends(auth)],
+    )
+    async def agent_drift_stats(agent_id: str) -> dict:
+        """Return behavioral drift statistics for *agent_id*.
+
+        Fields:
+        - ``drift_score``: composite drift score (0–1; lower = more drifted).
+        - ``role_score``: keyword overlap between system_prompt and pane output.
+        - ``idle_score``: 1 when pane is active; 0 when idle past ``drift_idle_threshold``.
+        - ``length_score``: output line-count stability score.
+        - ``warned``: whether the agent is currently in a drift-warned state.
+        - ``drift_warnings``: cumulative count of agent_drift_warning events emitted.
+        - ``drift_threshold``: the configured composite score threshold.
+        - ``last_polled``: monotonic timestamp of the most recent poll.
+
+        Returns 404 if the agent is unknown or not yet tracked by the drift monitor.
+
+        Design reference: Rath arXiv:2601.04170 "Agent Drift" (2026) — ASI framework;
+        DESIGN.md §10.20 (v1.0.9).
+        """
+        stats = orchestrator.get_agent_drift_stats(agent_id)
+        if stats is None:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} drift stats not yet available")
+        return stats
+
+    @app.get(
+        "/drift",
+        summary="Behavioral drift stats for all agents",
+        dependencies=[Depends(auth)],
+    )
+    async def all_drift_stats() -> list:
+        """Return behavioral drift statistics for all tracked agents.
+
+        See ``GET /agents/{id}/drift`` for field descriptions.
+
+        Design reference: Rath arXiv:2601.04170 "Agent Drift" (2026);
+        DESIGN.md §10.20 (v1.0.9).
+        """
+        return orchestrator.all_agent_drift_stats()
+
+    @app.get(
         "/agents/{agent_id}/history",
         summary="Per-agent task history",
         dependencies=[Depends(auth)],

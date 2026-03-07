@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from tmux_orchestrator.agents.base import Agent, AgentStatus, Task
 from tmux_orchestrator.bus import Bus, Message, MessageType
 from tmux_orchestrator.context_monitor import ContextMonitor
+from tmux_orchestrator.drift_monitor import DriftMonitor
 from tmux_orchestrator.group_manager import GroupManager
 from tmux_orchestrator.messaging import Mailbox
 from tmux_orchestrator.rate_limiter import RateLimitExceeded, TokenBucketRateLimiter
@@ -166,6 +167,17 @@ class Orchestrator:
             auto_summarize=config.context_auto_summarize,
             poll_interval=config.context_monitor_poll,
         )
+        # Drift monitor — behavioral degradation detection (Agent Stability Index subset).
+        # Publishes agent_drift_warning STATUS events when composite drift score < threshold.
+        # Reference: Rath arXiv:2601.04170 "Agent Drift" (2026); DESIGN.md §10.20 (v1.0.9)
+        self._drift_monitor = DriftMonitor(
+            bus=bus,
+            tmux=tmux,
+            agents=lambda: list(self.registry.all_agents().values()),
+            drift_threshold=config.drift_threshold,
+            idle_threshold=config.drift_idle_threshold,
+            poll_interval=config.drift_monitor_poll,
+        )
         # Queue-depth autoscaler — only created when autoscale_max > 0.
         # Reference: Kubernetes HPA; Thijssen "Autonomic Computing"; AWS cooldowns.
         # DESIGN.md §10.18 (v0.23.0)
@@ -318,6 +330,7 @@ class Orchestrator:
             name="orchestrator-recovery",
         )
         self._context_monitor.start()
+        self._drift_monitor.start()
         if self._autoscaler is not None:
             self._autoscaler.start()
         self._ttl_reaper_task = asyncio.create_task(
@@ -380,6 +393,7 @@ class Orchestrator:
         if self._autoscaler is not None:
             self._autoscaler.stop()
         self._context_monitor.stop()
+        self._drift_monitor.stop()
         internal_tasks = [
             t for t in [
                 self._dispatch_task, self._router_task,
@@ -463,6 +477,14 @@ class Orchestrator:
     def all_agent_context_stats(self) -> list[dict]:
         """Return context usage stats for all tracked agents."""
         return self._context_monitor.all_stats()
+
+    def get_agent_drift_stats(self, agent_id: str) -> dict | None:
+        """Return drift stats for *agent_id*, or None if not yet tracked."""
+        return self._drift_monitor.get_drift_stats(agent_id)
+
+    def all_agent_drift_stats(self) -> list[dict]:
+        """Return drift stats for all tracked agents."""
+        return self._drift_monitor.all_drift_stats()
 
     # ------------------------------------------------------------------
     # Rate limiter

@@ -3283,3 +3283,90 @@ v0.49.0 でエージェント自律実行方式変更（§12 層3）が完了し
 - 15 テストケースでスコアリング、スクラッチパッド経由で結果収集
 - `merge_on_stop: true` で実装をデモリポジトリに保存
 - デモ側でも実装を直接 import して検証
+
+---
+
+## 10.20 v1.0.9 — エージェントドリフト検出 (Agent Stability Index) (2026-03-08)
+
+### 選定理由
+
+**選択**: エージェントドリフト検出 — `DriftMonitor` + `agent_drift_warning` STATUSイベント
+
+**選んだ理由**:
+- §11「アーキテクチャ・品質」テーブルで **高** 優先度かつ未実装の最上位項目。
+- v1.0.8 build-log の「ディレクター投票が遅い (11分ループ)」根本原因は、ワーカーが
+  完了を能動通知せず、ディレクターが `/progress` を活用しなかったこと。
+  `DriftMonitor` を追加することで、エージェントが役割逸脱・停滞を示した瞬間に
+  自動介入 (re-brief / restart) できる基盤が生まれ、将来の slow-poll 問題を根本解決できる。
+- 既存の `ContextMonitor` (トークン量監視) との対称性が高く、同じ「監視→イベント発行」
+  パターンで実装できる。追加するファイルは `drift_monitor.py` 1本で済む。
+- arXiv:2601.04170 "Agent Drift: Quantifying Behavioral Degradation in LLM-Based Agents"
+  が12次元の Agent Stability Index (ASI) を定義しており、実装の指針が明確。
+- `ContextMonitor` が既に `context_warning` / `notes_updated` / `summarize_triggered` を
+  発行する bus 基盤が存在するため、`agent_drift_warning` イベントを追加するだけで
+  Director エージェントや Web UI が即座に購読・対応できる。
+
+**選ばなかったもの**:
+- **MIRIX型エピソード記憶ストア** (中優先度): 価値は高いが SQLite 基盤の拡張が必要で、
+  ドリフト検出よりも実装コストが大きい。ドリフト検出後の次候補として残す。
+- **`POST /workflows/delphi`** (中優先度): ワークフロー追加は価値あるが、
+  層3の機能であり、エージェントの安定性 (層5) が先に必要。
+- **スライディングウィンドウ文脈圧縮** (中優先度): ContextMonitor 強化として有用だが、
+  `DriftMonitor` の実装後に自然な拡張として追加できる。
+
+**実装するもの**:
+- `src/tmux_orchestrator/drift_monitor.py` — `DriftMonitor` クラス
+  - ペイン出力を監視し「役割逸脱スコア」を算出
+  - 閾値超過で `agent_drift_warning` bus イベントを発行
+  - 監視対象: キーワード違反 (禁止語句)、プロンプト放置 (long idle)、
+    出力の役割逸脱 (system_prompt との意味的乖離 — シンプルなキーワードマッチ)
+- `src/tmux_orchestrator/orchestrator.py` — `DriftMonitor` の起動・停止を統合
+- `src/tmux_orchestrator/schemas.py` — `DriftWarningPayload` モデル追加
+- `src/tmux_orchestrator/web/app.py` — `GET /agents/{id}/drift` エンドポイント追加
+- `tests/test_drift_monitor.py` — ≥15 ユニットテスト
+- デモ: `~/Demonstration/v1.0.9-drift-monitor/` — 2エージェント構成
+  - agent-a (coder): BST 実装タスクを受け取り実装する
+  - agent-b (monitor): orchestrator の bus を購読し `agent_drift_warning` を受信したら
+    RE-BRIEF メッセージを agent-a に送信する
+  - デモは agent-a に意図的に曖昧な追加指示を与えてドリフトを誘発し、
+    `DriftMonitor` が検出 → agent-b が介入する流れを検証する
+
+### 調査記録
+
+**調査 1: Agent Stability Index (ASI) — arXiv:2601.04170**
+- 出典: Abhishek Rath, "Agent Drift: Quantifying Behavioral Degradation in Multi-Agent LLM Systems Over Extended Interactions," arXiv:2601.04170, January 2026.
+  URL: https://arxiv.org/abs/2601.04170
+- ASI は12次元の複合指標 (正規化 [0,1]、1=完全安定)。4カテゴリに分類される:
+  - **Response Consistency (重み 0.30)**: 出力意味的類似度 (embedding 比較)、決定経路安定性 (推論チェーン一貫性)、信頼キャリブレーション
+  - **Tool Usage Patterns (重み 0.25)**: ツール選択安定性、ツール順序一貫性、ツールパラメータドリフト
+  - **Inter-Agent Coordination (重み 0.25)**: 合意率、ハンドオフ効率、**役割遵守 (role adherence)**
+  - **Behavioral Boundaries (重み 0.20)**: 出力長安定性、エラーパターン出現、人間介入率
+- **ドリフト検出閾値**: ASI が τ=0.75 を 3 連続 50-interaction ウィンドウで下回った場合に検出
+- 役割遵守測定: agent_id とタスクタイプの相互情報量 (mutual information) を使用
+- 主要ドリフト信号: タスク成功率 42% 低下、完了時間増加、エージェント間衝突 487.5% 増加
+- 3 つの緩和戦略: エピソード記憶統合、ドリフト認識ルーティング、適応型行動アンカリング
+
+**調査 2: Multi-Agent System Monitoring via Node Evaluation — arXiv:2510.19420**
+- 出典: "Monitoring LLM-based Multi-Agent Systems Against Corruptions via Node Evaluation," arXiv:2510.19420, October 2025.
+  URL: https://arxiv.org/abs/2510.19420
+- MAS をグラフ (エージェント=ノード、通信=エッジ) として捉え、動的防衛パラダイムを採用
+- 静的防衛ではなく通信を継続的に監視しグラフトポロジーを動的調整することで進化する攻撃に対応
+- 実装方針: ノード評価スコアに基づき問題のあるエージェントを隔離または再ルーティング
+
+**調査 3: Behavioral Monitoring & Anomaly Detection — tekysinfo.com (2025)**
+- 出典: "Behavioral Monitoring & Anomaly Detection for Agents: What I Learned Building Safe AI Systems," tekysinfo.com, 2025.
+  URL: https://tekysinfo.com/behavioral-monitoring-anomaly-detection-for-agents-what-i-learned-building-safe-ai-systems/
+- 実装すべき3つの基本的な行動次元:
+  1. **API使用パターン**: ツール呼び出し頻度・順序。正常なコード生成エージェントは「2-3回の検索、1-2回の実行試行」。15回連続検索かつ実行ゼロ → 混乱またはゴールドリフトの可能性
+  2. **データアクセス行動**: 担当タスクと無関係なデータソースへのアクセス
+  3. **応答レイテンシ分布**: 200-400ms から 3秒以上への急変 → 異常
+- ローリングベースライン方式 (静的閾値ではなく適応型) を推奨
+- エージェント内問題 (intra-agent) とエージェント間問題 (inter-agent) の二分類
+
+**採用方針**:
+TmuxAgentOrchestrator の `DriftMonitor` では外部 embedding API を使わずに実装できる範囲で
+ASI のサブセットを採用する:
+1. **役割遵守スコア** — `system_prompt` のキーワードと出力テキストの overlap 率 (役割から逸脱した禁止語句の出現頻度を含む)
+2. **アイドル時間スコア** — 最後のペイン出力変化から経過時間 (長時間変化なし = ドリフト/スタック)
+3. **出力長安定性** — 出力行数の rolling variance (急激な変化 = 異常)
+これら3スコアを重み付き平均し、閾値 τ=0.6 以上を正常とし下回ったとき `agent_drift_warning` イベントを発行する。
