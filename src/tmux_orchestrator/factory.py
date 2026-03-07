@@ -141,6 +141,8 @@ def build_system(
                 context_spec_files=agent_cfg.context_spec_files,
                 context_spec_files_root=cwd if agent_cfg.context_spec_files else None,
                 tags=agent_cfg.tags,
+                merge_on_stop=agent_cfg.merge_on_stop,
+                merge_target=agent_cfg.merge_target,
             )
         else:
             raise ValueError(f"Unknown agent type: {agent_cfg.type!r}")
