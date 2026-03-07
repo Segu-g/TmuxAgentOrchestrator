@@ -3207,3 +3207,30 @@ v0.49.0 でエージェント自律実行方式変更（§12 層3）が完了し
 | 中 | **Delphi 型合意形成デモ — "マイクロサービス vs モノリス"** | `POST /workflows/delphi`、5ペルソナエージェント、3ラウンド、各ラウンドの `delphi_round_{n}.md` 生成と最終 `consensus.md` を実証 |
 | 中 | **Red Team / Blue Team セキュリティレビューデモ** | `POST /workflows/redblue`、blue-team が FastAPI エンドポイントを実装、red-team が入力検証・認証・レートリミットの欠陥を列挙、arbiter がリスク評価レポートを生成 |
 | 低 | **Codified Context + PairCoder デモ — 長期プロジェクト規約維持** | `.claude/specs/` に規約 YAML を配置 → `POST /workflows/pair` で Navigator+Driver が5セッション連続で実装 → 全セッションにわたり規約違反ゼロを実証 |
+
+## 10.18 v1.0.1 — Competitive Expression Evaluator Demo (2026-03-07)
+
+### 選定理由
+
+**選択**: 3エージェント競合実装デモ — 算術式評価器 (best-of-3)
+
+**選んだ理由**:
+- v1.0.0 デモは2エージェントの単純なリニアパイプライン (spec→impl) で、タスク内容が
+  "echo でファイルを書く" レベルで簡単すぎると指摘を受けた。
+- v1.0.1 ではエージェントに **アルゴリズム設計+実装+自己テスト実行** を要求し、
+  実質的な CS の問題 (式評価器) を解かせる。
+- `competitive` 相当の並列タスク (target_agent×3) を使い、3エージェントが
+  同時並行で異なるアルゴリズムを実装する。 → マルチエージェントの価値を明示。
+- 客観的スコアリング (15テストケース) で勝者を自動決定できる。
+
+**選ばなかったもの**:
+- §11 の MIRIX エピソード記憶・TLA+ 仕様化: フレームワーク変更が大きく、
+  ユーザーの要望 (デモのタスク難易度向上) とは別軸。
+
+**実装するもの**:
+- `~/Demonstration/v1.0.1-expr-eval/` デモリポジトリ
+- 3エージェント (agent-recursive, agent-shunting, agent-ast) が並列で
+  `evaluate(expr: str) -> float` を実装
+- 15 テストケースでスコアリング、スクラッチパッド経由で結果収集
+- `merge_on_stop: true` で実装をデモリポジトリに保存
+- デモ側でも実装を直接 import して検証
