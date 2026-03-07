@@ -1325,16 +1325,15 @@ def create_app(
                 ),
             )
 
-        # Validate task_id against the current task.  _update_stop_hook_for_task()
-        # rewrites settings.local.json with ?task_id=<id> before each dispatch,
-        # so any stop hook that arrives without a matching task_id is stale (e.g.
-        # from the director startup prompt or a previous task run) and must be
-        # rejected.  When the agent is BUSY, we always require an exact match.
-        current_task_id = agent._current_task.id if agent._current_task else None
-        if current_task_id is not None and task_id != current_task_id:
+        # If the stop hook URL includes ?task_id=<id>, validate it against the
+        # current task.  _update_stop_hook_for_task() writes the task_id into the
+        # URL before each dispatch, so a mismatch means the hook is stale (fired
+        # from a previous task).  Calls without a task_id (e.g. direct API use
+        # or old-style stop hooks) are accepted as before.
+        if task_id and agent._current_task and agent._current_task.id != task_id:
             logger.debug(
                 "Agent %s task-complete skipped: task_id mismatch (hook=%r, current=%r)",
-                agent_id, task_id, current_task_id,
+                agent_id, task_id, agent._current_task.id,
             )
             return {"status": "skipped", "reason": "task_id_mismatch"}
 

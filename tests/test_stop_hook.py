@@ -332,7 +332,7 @@ async def test_task_complete_endpoint_returns_ok(client, mock_orchestrator) -> N
     mock_orchestrator._agents["worker-1"] = mock_agent
 
     resp = await client.post(
-        "/agents/worker-1/task-complete?task_id=task-123",
+        "/agents/worker-1/task-complete",
         headers={"X-API-Key": _API_KEY},
         json={"output": "Task done!", "exit_code": 0},
     )
@@ -356,7 +356,7 @@ async def test_task_complete_endpoint_calls_handle_output(client, mock_orchestra
     mock_orchestrator._agents["worker-2"] = mock_agent
 
     resp = await client.post(
-        "/agents/worker-2/task-complete?task_id=task-abc",
+        "/agents/worker-2/task-complete",
         headers={"X-API-Key": _API_KEY},
         json={"output": "done", "exit_code": 0},
     )
@@ -428,7 +428,7 @@ async def test_task_complete_endpoint_body_optional(client, mock_orchestrator) -
     mock_orchestrator._agents["worker-empty"] = mock_agent
 
     resp = await client.post(
-        "/agents/worker-empty/task-complete?task_id=task-empty",
+        "/agents/worker-empty/task-complete",
         headers={"X-API-Key": _API_KEY},
         json={},
     )
@@ -522,7 +522,7 @@ async def test_task_complete_skips_when_stop_hook_active(
     mock_orchestrator._agents["worker-active"] = mock_agent
 
     resp = await client.post(
-        "/agents/worker-active/task-complete?task_id=task-x",
+        "/agents/worker-active/task-complete",
         headers={"X-API-Key": _API_KEY},
         json={"stop_hook_active": True, "last_assistant_message": "still going..."},
     )
@@ -547,7 +547,7 @@ async def test_task_complete_uses_last_assistant_message(
     mock_orchestrator._agents["worker-msg"] = mock_agent
 
     resp = await client.post(
-        "/agents/worker-msg/task-complete?task_id=task-y",
+        "/agents/worker-msg/task-complete",
         headers={"X-API-Key": _API_KEY},
         json={
             "stop_hook_active": False,
@@ -574,12 +574,58 @@ async def test_task_complete_falls_back_to_output_field(
     mock_orchestrator._agents["worker-fallback"] = mock_agent
 
     resp = await client.post(
-        "/agents/worker-fallback/task-complete?task_id=task-z",
+        "/agents/worker-fallback/task-complete",
         headers={"X-API-Key": _API_KEY},
         json={"output": "fallback output"},
     )
     assert resp.status_code == 200
     mock_agent.handle_output.assert_awaited_once_with("fallback output")
+
+
+async def test_task_complete_rejects_stale_task_id(client, mock_orchestrator) -> None:
+    """Stop hook with a mismatched task_id must be rejected (stale hook from previous task)."""
+    from tmux_orchestrator.agents.base import AgentStatus
+
+    mock_agent = MagicMock()
+    mock_agent.status = AgentStatus.BUSY
+    mock_agent._current_task = MagicMock(id="current-task-id")
+    mock_agent.id = "worker-stale"
+    mock_agent.bus = mock_orchestrator.bus
+    mock_agent.handle_output = AsyncMock()
+    mock_orchestrator._agents["worker-stale"] = mock_agent
+
+    resp = await client.post(
+        "/agents/worker-stale/task-complete?task_id=old-task-id",
+        headers={"X-API-Key": _API_KEY},
+        json={"output": "done"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "skipped"
+    assert data["reason"] == "task_id_mismatch"
+    mock_agent.handle_output.assert_not_awaited()
+
+
+async def test_task_complete_accepts_matching_task_id(client, mock_orchestrator) -> None:
+    """Stop hook with the correct task_id must complete the task normally."""
+    from tmux_orchestrator.agents.base import AgentStatus
+
+    mock_agent = MagicMock()
+    mock_agent.status = AgentStatus.BUSY
+    mock_agent._current_task = MagicMock(id="task-xyz")
+    mock_agent.id = "worker-match"
+    mock_agent.bus = mock_orchestrator.bus
+    mock_agent.handle_output = AsyncMock()
+    mock_orchestrator._agents["worker-match"] = mock_agent
+
+    resp = await client.post(
+        "/agents/worker-match/task-complete?task_id=task-xyz",
+        headers={"X-API-Key": _API_KEY},
+        json={"output": "done"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+    mock_agent.handle_output.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
