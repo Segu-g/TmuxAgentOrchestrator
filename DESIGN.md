@@ -92,6 +92,48 @@ TmuxAgentOrchestrator/
 - 新機能を追加するとき、既存ファイルに混入させず、対応するドメインのファイルに追加する。
 - ドメインが明確に定まらない場合は、まず小さなモジュールとして切り出し、後から統合を判断する。
 
+**目標とするクリーンアーキテクチャ層構造**:
+
+```
+tmux_orchestrator/
+├── domain/          # 純粋ドメイン型。外部依存ゼロ。AgentStatus, Task, MessageType など
+├── application/     # ユースケース・業務ロジック。domain のみに依存
+│                    # orchestrator, registry, bus, supervision, workflow, phase_executor
+├── infrastructure/  # 外部システム実装詳細。tmux, git worktree, SQLite, ファイルI/O
+│                    # tmux_interface, messaging, result_store, checkpoint_store, worktree
+├── monitoring/      # 横断的観測。context_monitor, drift_monitor, autoscaler, telemetry
+├── adapters/        # フレームワーク接続。config (YAML→内部型), factory (DI), security,
+│                    # schemas (Pydantic), web/ (FastAPI), tui/ (Textual)
+├── agents/          # Claude CLI ドライバ (infrastructure の特殊ケース。現位置維持)
+└── agent_plugin/    # Claude Code プラグイン (スラッシュコマンド・hooks)
+```
+
+現状は全ファイルがフラットに配置されており、段階的なイテレーションで上記構造へ移行する（§11 参照）。
+
+### 設計・実装レビュープロセス
+
+設計と実装の品質を担保するため、以下のレビュープロセスを設ける。
+
+**原則**:
+- 設計内容は必ずファイルとして書き出してから実装に入る。
+- 設計文書はコンテキストを共有しないサブエージェント（または別セッションのエージェント）によるレビューを経てから実装する。
+- レビューで指摘を受けた場合、修正後に再レビューを実施し、指摘が改善されていることを確認する。
+
+**ファイル規約**:
+- 設計文書: `./design/${version}.md`（例: `design/v1.0.11-clean-arch.md`）
+- レビュアーの指摘は同ファイルに `## レビュー指摘` セクションとして追記する。
+- 指摘は**決して削除しない**。修正内容を `> 対応: ...` として明記する。
+
+**フロー**:
+```
+設計文書を design/${version}.md に書く
+  → サブエージェントが設計文書のみを受け取りレビュー（コードは読まない）
+  → 指摘を design/${version}.md に追記
+  → 指摘を修正（設計文書 + 実装）
+  → 再レビューで改善を確認
+  → 実装確定・コミット
+```
+
 ---
 
 ## 3. tmux 階層マッピング
@@ -653,6 +695,9 @@ AI エージェントにとって TDD は「ガードレール」として機能
 
 | 優先度 | 課題 | 根拠 |
 |--------|------|------|
+| **高** | **クリーンアーキテクチャ層別ディレクトリ移行** — 現在フラットな `tmux_orchestrator/` 以下のモジュールを `domain/` / `application/` / `infrastructure/` / `monitoring/` / `adapters/` に段階的に移動する。後方互換シム（旧パスからの re-export）を置き、テストを壊さずに移行する。移行順: ① `domain/` (AgentStatus, Task, MessageType 抽出), ② `infrastructure/` (tmux_interface, messaging, worktree 等), ③ `application/` (orchestrator, registry, bus), ④ `adapters/` (config, factory, schemas, web, tui)。各移動は独立したコミット単位で行い、`uv run pytest tests/ -x -q` が常にグリーンであることを確認する | §2「ドメイン分離方針」および「目標とするクリーンアーキテクチャ層構造」参照。Martin "Clean Architecture" (2017): 依存は常にドメイン中心に向かう（Dependency Rule）。現状は orchestrator.py が context_monitor / drift_monitor / result_store 等のインフラを直接 import しており、依存方向が逆転している。移行することで各層の単体テストが高速化・安定化する。 |
+| **高** | **`domain/` 純粋型の抽出** — `AgentStatus`, `AgentRole` (from config.py / agents/base.py)、`Task` (from agents/base.py)、`MessageType` / `Message` (from bus.py) を `domain/agent.py` / `domain/task.py` / `domain/message.py` に移動。既存モジュールは `from tmux_orchestrator.domain.agent import AgentStatus` を re-export するシムに書き換える。domain/ は外部ライブラリを一切 import しない | Clean Architecture の「Entity」層はフレームワーク非依存のビジネスルールのみを持つ。現状 `config.py` の `AgentRole` と `agents/base.py` の `AgentStatus` が分散しており、どちらが正規の場所か不明確。domain/ への集約で責務を明確化する。 |
+| **高** | **`orchestrator.py` のインフラ依存を依存注入（DI）に置き換える** — `Orchestrator.__init__` で直接 import している `ContextMonitor`, `DriftMonitor`, `ResultStore`, `CheckpointStore`, `Autoscaler`, `WebhookManager` を抽象 Protocol 型（または TypeVar Bound）として受け取るように変更し、具体実装は `factory.py` で注入する。`Orchestrator` が infrastructure モジュールを import しないようにする | 現状 orchestrator.py の import 行が最多（14 個のローカル import）。ContextMonitor / DriftMonitor がモニタリングインフラであるにもかかわらず business logic と同居している。DI 化により orchestrator の単体テストでモックが不要になる。 |
 | 高 | **OpenTelemetry GenAI Semantic Conventions 準拠トレース出力** — `gen_ai.*` 属性 (token counts, tool calls, agent spans) を既存 `trace_id` ベースの構造化ログに付加し、Datadog/Jaeger/OTLP エクスポーターへ送信できるようにする | OpenTelemetry "AI Agent Observability" (2025) が業界標準に収斂しつつあり、Datadog が GenAI Semantic Conventions にネイティブ対応済み。現状の `trace_id` は相関のみでスパン階層がない。[opentelemetry.io/blog/2025/ai-agent-observability](https://opentelemetry.io/blog/2025/ai-agent-observability/) |
 | ~~**高**~~ | ~~**エージェントドリフト検出 (Agent Stability Index)**~~ | ~~完了 v1.0.9 — `DriftMonitor` (role/idle/length 3サブスコア)、`agent_drift_warning` イベント。34テスト。17/17デモPASS。~~ |
 | 中 | **DriftMonitor — セマンティック類似度ベースの role_score 強化** — 現行のキーワードマッチを embedding コサイン類似度に置き換え、system_prompt と pane 出力の意味的乖離をより精密に測定する。`sentence-transformers` の軽量モデル (paraphrase-MiniLM-L6-v2, 22MB) を使用してランタイム外部 API 依存を回避する | Rath arXiv:2601.04170: ASI の Role Adherence 次元は「agent_id とタスクタイプの相互情報量」を使用。v1.0.9 のキーワードマッチは role_score = 1.0 に張り付く傾向（スコアが役割逸脱を検出しにくい）。embedding 距離により「形式は合っているが内容が違う」ドリフトを検出可能。 |
