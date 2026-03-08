@@ -17,6 +17,7 @@ from tmux_orchestrator.agents.completion import (
 )
 from tmux_orchestrator.bus import Message, MessageType
 from tmux_orchestrator.config import AgentRole
+from tmux_orchestrator.trust import pre_trust_worktree
 
 if TYPE_CHECKING:
     import libtmux
@@ -148,6 +149,13 @@ class ClaudeCodeAgent(Agent):
             # /tmux-orchestrator:task-complete).  Does not overwrite existing files.
             await loop.run_in_executor(None, self._copy_commands, cwd)
             await loop.run_in_executor(None, self._completion.on_start, cwd)
+            # Pre-trust the worktree directory so Claude Code does not show the
+            # interactive "Do you trust the files in this folder?" prompt.
+            # That prompt blocks _wait_for_ready() (SessionStart hook) causing
+            # a 60-second timeout.  Writing hasTrustDialogAccepted=true to
+            # ~/.claude.json before launching claude prevents the dialog.
+            # Reference: trust.py module, GitHub Issue #23109, #2147.
+            await loop.run_in_executor(None, pre_trust_worktree, cwd)
             if self._web_base_url:
                 self._startup_ready = asyncio.Event()
                 # SessionStart hook is in the agent plugin (loaded via --plugin-dir).

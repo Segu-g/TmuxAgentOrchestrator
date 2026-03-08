@@ -19,6 +19,7 @@ from tmux_orchestrator.messaging import Mailbox
 from tmux_orchestrator.rate_limiter import RateLimitExceeded, TokenBucketRateLimiter
 from tmux_orchestrator.registry import AgentRegistry
 from tmux_orchestrator.supervision import supervised_task
+from tmux_orchestrator.task_queue import AsyncPriorityTaskQueue, TaskQueue
 from tmux_orchestrator.webhook_manager import WebhookManager
 
 if TYPE_CHECKING:
@@ -47,6 +48,7 @@ class Orchestrator:
         tmux: "TmuxInterface",
         config: "OrchestratorConfig",
         worktree_manager: "WorktreeManager | None" = None,
+        task_queue: "TaskQueue | None" = None,
     ) -> None:
         self.bus = bus
         self.tmux = tmux
@@ -63,8 +65,13 @@ class Orchestrator:
         # equal priority so the heap never tries to compare Task objects directly.
         # Without seq, heapq with Task.__lt__(always False for equal-priority items)
         # causes the same task to cycle at the heap root indefinitely.
-        self._task_queue: asyncio.PriorityQueue[tuple[int, int, Task]] = asyncio.PriorityQueue(
-            maxsize=config.task_queue_maxsize
+        # Dependency-injected via task_queue parameter (TaskQueue Protocol);
+        # defaults to AsyncPriorityTaskQueue for production use.
+        # Reference: task_queue.py, DESIGN.md §11 "orchestrator DI 化".
+        self._task_queue: TaskQueue = (
+            task_queue
+            if task_queue is not None
+            else AsyncPriorityTaskQueue(maxsize=config.task_queue_maxsize)
         )
         self._task_seq: int = 0  # monotonically increasing enqueue counter
         self._paused = False
