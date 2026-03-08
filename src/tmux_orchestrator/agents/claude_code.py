@@ -143,6 +143,10 @@ class ClaudeCodeAgent(Agent):
             await loop.run_in_executor(None, self._write_notes_template, cwd)
             await loop.run_in_executor(None, self._copy_context_files, cwd)
             await loop.run_in_executor(None, self._copy_context_spec_files, cwd)
+            # Copy slash commands so agents can use /task-complete etc. without
+            # the namespace prefix (plain /task-complete instead of
+            # /tmux-orchestrator:task-complete).  Does not overwrite existing files.
+            await loop.run_in_executor(None, self._copy_commands, cwd)
             await loop.run_in_executor(None, self._completion.on_start, cwd)
             if self._web_base_url:
                 self._startup_ready = asyncio.Event()
@@ -362,22 +366,26 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
 - Context file: `__orchestrator_context__.json` (agent_id, mailbox, web_base_url)
 - Notes file: `NOTES.md` (your structured scratchpad — keep it updated)
 - Plan file: `PLAN.md` (created by `/plan`, deleted when task is done)
+- Slash commands: available in `.claude/commands/` — use plain `/task-complete` etc.
 {context_files_section}{custom_section}
 ## Slash Command Reference
 
+Slash commands are copied into `.claude/commands/` at agent startup so you can
+use the plain form without a namespace prefix.
+
 | Command | Usage | Purpose |
 |---|---|---|
-| `/tmux-orchestrator:check-inbox` | `/tmux-orchestrator:check-inbox` | List unread messages |
-| `/tmux-orchestrator:read-message` | `/tmux-orchestrator:read-message <id>` | Read a message in full |
-| `/tmux-orchestrator:send-message` | `/tmux-orchestrator:send-message <agent_id> <text>` | Send a message |
-| `/tmux-orchestrator:spawn-subagent` | `/tmux-orchestrator:spawn-subagent <template_id>` | Spawn a sub-agent |
-| `/tmux-orchestrator:list-agents` | `/tmux-orchestrator:list-agents` | Show all agent statuses |
-| `/tmux-orchestrator:plan` | `/tmux-orchestrator:plan <description>` | Write PLAN.md before implementing |
-| `/tmux-orchestrator:tdd` | `/tmux-orchestrator:tdd <feature>` | Start a TDD cycle for a feature |
-| `/tmux-orchestrator:progress` | `/tmux-orchestrator:progress <summary>` | Report progress to parent |
-| `/tmux-orchestrator:summarize` | `/tmux-orchestrator:summarize` | Compress context → NOTES.md |
-| `/tmux-orchestrator:delegate` | `/tmux-orchestrator:delegate <task>` | Spawn sub-agents and assign subtasks |
-| `/tmux-orchestrator:task-complete` | `/tmux-orchestrator:task-complete <summary>` | Signal task completion to orchestrator |
+| `/check-inbox` | `/check-inbox` | List unread messages |
+| `/read-message` | `/read-message <id>` | Read a message in full |
+| `/send-message` | `/send-message <agent_id> <text>` | Send a message |
+| `/spawn-subagent` | `/spawn-subagent <template_id>` | Spawn a sub-agent |
+| `/list-agents` | `/list-agents` | Show all agent statuses |
+| `/plan` | `/plan <description>` | Write PLAN.md before implementing |
+| `/tdd` | `/tdd <feature>` | Start a TDD cycle for a feature |
+| `/progress` | `/progress <summary>` | Report progress to parent |
+| `/summarize` | `/summarize` | Compress context → NOTES.md |
+| `/delegate` | `/delegate <task>` | Spawn sub-agents and assign subtasks |
+| `/task-complete` | `/task-complete <summary>` | Signal task completion to orchestrator |
 """
         claude_md_path = cwd / "CLAUDE.md"
         claude_md_path.write_text(content)
@@ -465,6 +473,41 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
                 shutil.copy2(src, dest)
                 logger.debug(
                     "Agent %s: copied spec file %s → %s", self.id, src, dest
+                )
+
+    def _copy_commands(self, cwd: Path) -> None:
+        """Copy agent_plugin slash-command definitions into ``{cwd}/.claude/commands/``.
+
+        This makes commands available as plain ``/task-complete`` (without the
+        ``/tmux-orchestrator:`` namespace prefix that the ``--plugin-dir`` flag
+        requires).  Both forms remain functional after the copy — using
+        ``--plugin-dir`` for the namespace prefix and the local copy for the plain
+        form is non-conflicting.
+
+        Files are copied only if the destination does not already exist, so any
+        agent-level customisations are preserved.  If the source ``commands``
+        directory does not exist (e.g. development environment without the plugin),
+        the method is a no-op rather than raising.
+
+        This is invoked by ``start()`` after worktree setup and before launching
+        the ``claude`` process so that the commands are available from the first
+        response turn.
+        """
+        commands_src = Path(__file__).parent.parent / "agent_plugin" / "commands"
+        if not commands_src.is_dir():
+            logger.debug(
+                "Agent %s: agent_plugin/commands not found at %s — skipping command copy",
+                self.id, commands_src,
+            )
+            return
+        commands_dst = cwd / ".claude" / "commands"
+        commands_dst.mkdir(parents=True, exist_ok=True)
+        for cmd_file in sorted(commands_src.glob("*.md")):
+            dest = commands_dst / cmd_file.name
+            if not dest.exists():
+                shutil.copy2(cmd_file, dest)
+                logger.debug(
+                    "Agent %s: copied slash command %s → %s", self.id, cmd_file.name, dest
                 )
 
     def _write_notes_template(self, cwd: Path) -> None:
