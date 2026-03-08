@@ -8,7 +8,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from tmux_orchestrator.agents.base import Agent, AgentStatus, Task
 from tmux_orchestrator.bus import Bus, Message, MessageType
@@ -31,6 +31,99 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Monitor Protocols — dependency-injection interfaces
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class ContextMonitorProtocol(Protocol):
+    """Structural interface for context-window monitors injected into Orchestrator.
+
+    Any object that implements ``start()``, ``stop()``, ``get_stats()``, and
+    ``all_stats()`` satisfies this protocol — no inheritance required.
+
+    The real implementation is :class:`~tmux_orchestrator.context_monitor.ContextMonitor`.
+    Tests may inject a :class:`NullContextMonitor` or any other conforming object.
+
+    Reference: PEP 544 — Protocols: Structural subtyping (static duck typing).
+    DESIGN.md §10.N (v1.0.14 — orchestrator full DI).
+    """
+
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    def get_stats(self, agent_id: str) -> "dict[str, Any] | None": ...
+    def all_stats(self) -> "list[dict[str, Any]]": ...
+
+
+@runtime_checkable
+class DriftMonitorProtocol(Protocol):
+    """Structural interface for behavioral-drift monitors injected into Orchestrator.
+
+    The real implementation is :class:`~tmux_orchestrator.drift_monitor.DriftMonitor`.
+    Tests may inject a :class:`NullDriftMonitor` or any other conforming object.
+
+    Reference: PEP 544 — Protocols: Structural subtyping (static duck typing).
+    DESIGN.md §10.N (v1.0.14 — orchestrator full DI).
+    """
+
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    def get_drift_stats(self, agent_id: str) -> "dict[str, Any] | None": ...
+    def all_drift_stats(self) -> "list[dict[str, Any]]": ...
+
+
+# ---------------------------------------------------------------------------
+# Null Object implementations (Null Object Pattern)
+# ---------------------------------------------------------------------------
+
+
+class NullContextMonitor:
+    """No-op context monitor for use in unit tests.
+
+    Satisfies :class:`ContextMonitorProtocol` without requiring tmux or
+    filesystem access.  All query methods return empty results.
+
+    Reference: Fowler "Refactoring" (1999) — Null Object pattern;
+    DESIGN.md §10.N (v1.0.14 — orchestrator full DI).
+    """
+
+    def start(self) -> None:  # noqa: D401
+        """No-op."""
+
+    def stop(self) -> None:  # noqa: D401
+        """No-op."""
+
+    def get_stats(self, agent_id: str) -> "dict[str, Any] | None":
+        return None
+
+    def all_stats(self) -> "list[dict[str, Any]]":
+        return []
+
+
+class NullDriftMonitor:
+    """No-op drift monitor for use in unit tests.
+
+    Satisfies :class:`DriftMonitorProtocol` without requiring tmux or
+    filesystem access.  All query methods return empty results.
+
+    Reference: Fowler "Refactoring" (1999) — Null Object pattern;
+    DESIGN.md §10.N (v1.0.14 — orchestrator full DI).
+    """
+
+    def start(self) -> None:  # noqa: D401
+        """No-op."""
+
+    def stop(self) -> None:  # noqa: D401
+        """No-op."""
+
+    def get_drift_stats(self, agent_id: str) -> "dict[str, Any] | None":
+        return None
+
+    def all_drift_stats(self) -> "list[dict[str, Any]]":
+        return []
+
+
 class Orchestrator:
     """Manages the full agent lifecycle and routes all messages.
 
@@ -49,6 +142,8 @@ class Orchestrator:
         config: "OrchestratorConfig",
         worktree_manager: "WorktreeManager | None" = None,
         task_queue: "TaskQueue | None" = None,
+        context_monitor: "ContextMonitorProtocol | None" = None,
+        drift_monitor: "DriftMonitorProtocol | None" = None,
     ) -> None:
         self.bus = bus
         self.tmux = tmux
@@ -164,26 +259,41 @@ class Orchestrator:
             self._rate_limiter = None
         # Context window monitor: tracks pane output size, estimates token count,
         # detects NOTES.md updates, and optionally auto-injects /summarize.
+        # Injected via context_monitor parameter (ContextMonitorProtocol); defaults to
+        # ContextMonitor for production use.  NullContextMonitor (or any conforming object)
+        # can be injected for unit tests that don't require real tmux access.
         # Reference: Liu et al. "Lost in the Middle" TACL 2024; DESIGN.md §11 (v0.21.0)
-        self._context_monitor = ContextMonitor(
-            bus=bus,
-            tmux=tmux,
-            agents=lambda: list(self.registry.all_agents().values()),
-            context_window_tokens=config.context_window_tokens,
-            warn_threshold=config.context_warn_threshold,
-            auto_summarize=config.context_auto_summarize,
-            poll_interval=config.context_monitor_poll,
+        # Reference: PEP 544 Structural subtyping; DESIGN.md §10.N (v1.0.14 — orchestrator DI)
+        self._context_monitor: ContextMonitorProtocol = (
+            context_monitor
+            if context_monitor is not None
+            else ContextMonitor(
+                bus=bus,
+                tmux=tmux,
+                agents=lambda: list(self.registry.all_agents().values()),
+                context_window_tokens=config.context_window_tokens,
+                warn_threshold=config.context_warn_threshold,
+                auto_summarize=config.context_auto_summarize,
+                poll_interval=config.context_monitor_poll,
+            )
         )
         # Drift monitor — behavioral degradation detection (Agent Stability Index subset).
-        # Publishes agent_drift_warning STATUS events when composite drift score < threshold.
+        # Injected via drift_monitor parameter (DriftMonitorProtocol); defaults to
+        # DriftMonitor for production use.  NullDriftMonitor (or any conforming object)
+        # can be injected for unit tests that don't require real tmux access.
         # Reference: Rath arXiv:2601.04170 "Agent Drift" (2026); DESIGN.md §10.20 (v1.0.9)
-        self._drift_monitor = DriftMonitor(
-            bus=bus,
-            tmux=tmux,
-            agents=lambda: list(self.registry.all_agents().values()),
-            drift_threshold=config.drift_threshold,
-            idle_threshold=config.drift_idle_threshold,
-            poll_interval=config.drift_monitor_poll,
+        # Reference: PEP 544 Structural subtyping; DESIGN.md §10.N (v1.0.14 — orchestrator DI)
+        self._drift_monitor: DriftMonitorProtocol = (
+            drift_monitor
+            if drift_monitor is not None
+            else DriftMonitor(
+                bus=bus,
+                tmux=tmux,
+                agents=lambda: list(self.registry.all_agents().values()),
+                drift_threshold=config.drift_threshold,
+                idle_threshold=config.drift_idle_threshold,
+                poll_interval=config.drift_monitor_poll,
+            )
         )
         # Queue-depth autoscaler — only created when autoscale_max > 0.
         # Reference: Kubernetes HPA; Thijssen "Autonomic Computing"; AWS cooldowns.
