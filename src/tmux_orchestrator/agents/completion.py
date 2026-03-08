@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shlex
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -139,25 +140,34 @@ class ExplicitSignalStrategy(CompletionStrategy):
 
 
 def _build_stop_hook_settings(url: str) -> dict:
-    """Return the .claude/settings.local.json dict for a Stop hook pointing at *url*."""
+    """Return the .claude/settings.local.json dict for a Stop hook pointing at *url*.
+
+    Uses ``type: "command"`` (curl) instead of ``type: "http"`` so that
+    ``$TMUX_ORCHESTRATOR_API_KEY`` is expanded by the shell — where the env var
+    is guaranteed to be available — rather than by Claude Code's internal HTTP
+    hook runner, which may not expose the env var through ``allowedEnvVars``
+    when the variable was injected via libtmux's ``new_window(environment=...)``.
+
+    Claude Code passes hook data (``stop_hook_active``, ``last_assistant_message``,
+    etc.) as JSON on stdin; ``body=$(cat)`` captures it and forwards it to curl.
+    """
+    command = (
+        f"body=$(cat); "
+        f"curl -sf -X POST {shlex.quote(url)} "
+        f'-H "X-Api-Key: $TMUX_ORCHESTRATOR_API_KEY" '
+        f'-H "Content-Type: application/json" '
+        f'-d "$body" '
+        f"--max-time 10 || true"
+    )
     return {
         "hooks": {
             "Stop": [
                 {
-                    "matcher": "",
                     "hooks": [
                         {
-                            "type": "http",
-                            "url": url,
-                            "timeout": 5,
-                            # $TMUX_ORCHESTRATOR_API_KEY is injected into the tmux
-                            # session env before the pane is created.
-                            # allowedEnvVars is required for Claude Code to expand
-                            # $VAR references in hook headers.
-                            "headers": {
-                                "X-Api-Key": "$TMUX_ORCHESTRATOR_API_KEY",
-                            },
-                            "allowedEnvVars": ["TMUX_ORCHESTRATOR_API_KEY"],
+                            "type": "command",
+                            "command": command,
+                            "timeout": 15,
                         }
                     ],
                 }

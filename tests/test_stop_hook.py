@@ -80,19 +80,27 @@ def test_nudging_strategy_on_task_dispatch_writes_stop_hook(tmp_path: Path) -> N
     assert "Stop" in data["hooks"]
 
     handler = data["hooks"]["Stop"][0]["hooks"][0]
-    assert handler["type"] == "http"
-    assert "worker-1" in handler["url"]
-    assert "task-complete" in handler["url"]
-    assert "task_id=task-abc" in handler["url"]
+    assert handler["type"] == "command"
+    assert "worker-1" in handler["command"]
+    assert "task-complete" in handler["command"]
+    assert "task_id=task-abc" in handler["command"]
 
 
-def test_nudging_strategy_stop_hook_includes_api_key_header(tmp_path: Path) -> None:
-    """Stop hook HTTP handler must include X-Api-Key header expanding the env var."""
+def test_nudging_strategy_stop_hook_includes_api_key_in_command(tmp_path: Path) -> None:
+    """Stop hook command must reference $TMUX_ORCHESTRATOR_API_KEY via shell expansion.
+
+    Using type: "command" (curl) instead of type: "http" ensures the env var is
+    expanded by the shell — where it is guaranteed to be present — rather than by
+    Claude Code's internal HTTP hook runner which may not see pane-local env vars.
+    """
     NudgingStrategy("worker-1", "http://localhost:8000").on_task_dispatch(tmp_path, "t-1")
     data = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
     handler = data["hooks"]["Stop"][0]["hooks"][0]
-    assert handler["headers"].get("X-Api-Key") == "$TMUX_ORCHESTRATOR_API_KEY"
-    assert "TMUX_ORCHESTRATOR_API_KEY" in handler.get("allowedEnvVars", [])
+    assert handler["type"] == "command"
+    assert "TMUX_ORCHESTRATOR_API_KEY" in handler["command"]
+    assert "curl" in handler["command"]
+    # Must NOT use the http-type allowedEnvVars mechanism (that's what we replaced).
+    assert "allowedEnvVars" not in handler
 
 
 def test_nudging_strategy_stop_hook_has_timeout(tmp_path: Path) -> None:
