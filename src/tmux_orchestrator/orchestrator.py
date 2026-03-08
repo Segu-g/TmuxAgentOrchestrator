@@ -278,6 +278,13 @@ class Orchestrator:
         # Azure Service Bus message expiration (Microsoft Docs 2024);
         # DESIGN.md §10.28 (v0.33.0)
         self._ttl_reaper_task: asyncio.Task | None = None
+        # Background agent-startup tasks created by start_agents().  Tracked
+        # so that stop() can cancel any that haven't finished yet.
+        self._agent_startup_tasks: list[asyncio.Task] = []
+        # When True, start() does NOT call start_agents() inline — the caller
+        # (web lifespan) is responsible for calling start_agents() after the
+        # HTTP server is up so that SessionStart hooks can reach the server.
+        self._defer_agent_start: bool = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -302,11 +309,26 @@ class Orchestrator:
         self._bus_queue = await self.bus.subscribe(
             "__orchestrator__", broadcast=True
         )
-        for agent in self.registry.all_agents().values():
-            await agent.start()
-        # Resume from checkpoint if requested and store is available.
         if resume and self._checkpoint_store is not None:
             await self._resume_from_checkpoint()
+
+        if self._defer_agent_start:
+            # Web mode: dispatch loop starts FIRST so it is ready when agents
+            # become IDLE asynchronously.  Agent processes start later (via the
+            # web lifespan background task) once the server is accepting requests,
+            # allowing the SessionStart hook to call POST /agents/{id}/ready.
+            self._start_background_tasks()
+        else:
+            # TUI / test mode: agents start BEFORE the dispatch loop is created.
+            # This preserves the original ordering so tests can call pause()
+            # between orchestrator.start() and submit_task() without the
+            # dispatch loop having already begun a cycle.
+            await self.start_agents()
+            self._start_background_tasks()
+        logger.info("Orchestrator started with %d agents", len(self.registry.all_agents()))
+
+    def _start_background_tasks(self) -> None:
+        """Create the dispatch, route, watchdog, recovery, TTL-reaper tasks."""
         self._dispatch_task = asyncio.create_task(
             supervised_task(self._dispatch_loop, "orchestrator-dispatch",
                             on_permanent_failure=self._on_internal_failure),
@@ -337,7 +359,39 @@ class Orchestrator:
             self._ttl_reaper_loop(poll=self.config.ttl_reaper_poll),
             name="orchestrator-ttl-reaper",
         )
-        logger.info("Orchestrator started with %d agents", len(self.registry.all_agents()))
+
+    async def start_agents(self) -> None:
+        """Start all registered agent processes.
+
+        Called either directly from ``start()`` (TUI / test mode) or as a
+        background task from the web lifespan AFTER the HTTP server is
+        accepting requests, so that the SessionStart hook can call
+        ``POST /agents/{id}/ready`` without a deadlock.
+
+        Background agent startup tasks are tracked in ``_agent_startup_tasks``
+        so that ``stop()`` can cancel any still in flight.
+
+        When called from the web lifespan (``_defer_agent_start=True``), agents
+        are started as fire-and-forget asyncio tasks so the caller can return
+        immediately (the server is already accepting requests and agents will
+        call ``POST /agents/{id}/ready`` when their claude session starts).
+
+        When called directly from ``start()`` (TUI / test mode,
+        ``_defer_agent_start=False``), agents are started concurrently via
+        ``asyncio.gather``, which blocks until all are ready — preserving
+        backward-compatible synchronous behaviour for tests and the TUI.
+        """
+        agents = list(self.registry.all_agents().values())
+        if self._defer_agent_start:
+            # Web mode: fire-and-forget; server is already up
+            for agent in agents:
+                task = asyncio.create_task(agent.start(), name=f"{agent.id}-startup")
+                self._agent_startup_tasks.append(task)
+        else:
+            # TUI / test mode: start agents sequentially (preserves original
+            # ordering so bus subscriptions and pause/resume tests work correctly)
+            for agent in agents:
+                await agent.start()
 
     async def _resume_from_checkpoint(self) -> None:
         """Reload persisted tasks and workflows from the checkpoint store.
@@ -394,6 +448,13 @@ class Orchestrator:
             self._autoscaler.stop()
         self._context_monitor.stop()
         self._drift_monitor.stop()
+        # Cancel any agent-startup tasks that are still in flight.
+        for t in self._agent_startup_tasks:
+            if not t.done():
+                t.cancel()
+        if self._agent_startup_tasks:
+            await asyncio.gather(*self._agent_startup_tasks, return_exceptions=True)
+        self._agent_startup_tasks.clear()
         internal_tasks = [
             t for t in [
                 self._dispatch_task, self._router_task,

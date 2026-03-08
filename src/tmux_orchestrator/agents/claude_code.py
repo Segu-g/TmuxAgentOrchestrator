@@ -13,8 +13,6 @@ from typing import TYPE_CHECKING, Any
 from tmux_orchestrator.agents.base import Agent, AgentStatus, Task
 from tmux_orchestrator.agents.completion import (
     _POLL_INTERVAL,
-    _SETTLE_CYCLES,
-    looks_done,
     make_completion_strategy,
 )
 from tmux_orchestrator.bus import Message, MessageType
@@ -101,6 +99,8 @@ class ClaudeCodeAgent(Agent):
         self._completion: "CompletionStrategy" = make_completion_strategy(
             self.role, agent_id, self._web_base_url
         )
+        # Set by _write_startup_hook(); signalled by POST /agents/{id}/ready.
+        self._startup_ready: asyncio.Event | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -139,6 +139,9 @@ class ClaudeCodeAgent(Agent):
             await loop.run_in_executor(None, self._copy_context_files, cwd)
             await loop.run_in_executor(None, self._copy_context_spec_files, cwd)
             await loop.run_in_executor(None, self._completion.on_start, cwd)
+            if self._web_base_url:
+                self._startup_ready = asyncio.Event()
+                await loop.run_in_executor(None, self._write_startup_hook, cwd)
             await loop.run_in_executor(None, self._copy_slash_commands, cwd)
         launch = (
             f"cd {shlex.quote(str(cwd))} && {self._command}" if cwd else self._command
@@ -576,6 +579,12 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
         # so the strategy must remove any files it wrote to avoid stale hooks.
         if self.worktree_path is not None:
             self._completion.on_stop(self.worktree_path)
+        # Clean up the SessionStart hook settings file written by _write_startup_hook().
+        # NudgingStrategy.on_stop() handles WORKER agents (the file at that point contains
+        # the last task's Stop hook settings).  DIRECTOR agents use ExplicitSignalStrategy
+        # whose on_stop() is a no-op, so we must remove the SessionStart hook file here.
+        if self._startup_ready is not None and self._cwd is not None:
+            (self._cwd / ".claude" / "settings.local.json").unlink(missing_ok=True)
         await self._teardown_worktree()
         logger.info("ClaudeCodeAgent %s stopped", self.id)
 
@@ -633,32 +642,58 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
         )
         await self._completion.wait(self, task)
 
-    async def _wait_for_ready(self) -> None:
-        """Poll pane until claude's initial prompt appears and settles.
+    def _write_startup_hook(self, cwd: Path) -> None:
+        """Write a ``SessionStart`` hook that signals ``POST /agents/{id}/ready``.
 
-        Auto-accepts the workspace trust dialog if it appears.
+        SessionStart only supports ``type: "command"`` hooks (HTTP hooks are not
+        supported for this event).  The hook fires when Claude Code starts a new
+        session, before the agentic loop begins, allowing ``_wait_for_ready()``
+        to await the REST signal instead of polling pane output.
+
+        The ``/agents/{id}/ready`` endpoint has no auth requirement so the curl
+        command does not need to pass an API key.
+
+        Reference: Claude Code Hooks — SessionStart
+        https://code.claude.com/docs/en/hooks (2025)
         """
-        settle = 0
-        prev = ""
-        while True:
-            await asyncio.sleep(_POLL_INTERVAL)
-            loop = asyncio.get_running_loop()
-            text = await loop.run_in_executor(None, self._tmux.capture_pane, self.pane)
-            # Auto-accept the workspace trust dialog ("Yes, I trust this folder")
-            if "I trust this folder" in text and "Enter to confirm" in text:
-                await loop.run_in_executor(
-                    None, self._tmux.send_keys, self.pane, ""
-                )
-                settle = 0
-                prev = ""
-                continue
-            if text == prev:
-                settle += 1
-            else:
-                settle = 0
-                prev = text
-            if settle >= _SETTLE_CYCLES and looks_done(text):
-                return
+        url = f"{self._web_base_url}/agents/{self.id}/ready"
+        settings = {
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": f"curl -sf -X POST '{url}'",
+                                "timeout": 10,
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+        import json as _json
+        claude_dir = cwd / ".claude"
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        (claude_dir / "settings.local.json").write_text(_json.dumps(settings, indent=2))
+        logger.debug(
+            "Agent %s: wrote SessionStart hook → %s", self.id, cwd / ".claude" / "settings.local.json"
+        )
+
+    async def _wait_for_ready(self) -> None:
+        """Wait for claude to signal readiness via the ``SessionStart`` hook.
+
+        ``ClaudeCodeAgent.start()`` writes a ``SessionStart`` hook that calls
+        ``POST /agents/{id}/ready`` via ``curl``.  Claude Code fires this hook
+        synchronously at session start, before the agentic loop begins.  The
+        REST endpoint sets ``_startup_ready`` and this method returns.
+
+        If no web server is configured (``web_base_url`` empty), ``_startup_ready``
+        is ``None`` and this method returns immediately.
+        """
+        if self._startup_ready is None:
+            return
+        await asyncio.wait_for(self._startup_ready.wait(), timeout=60.0)
 
     # ------------------------------------------------------------------
     # Output handling

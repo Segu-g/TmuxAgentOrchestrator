@@ -1563,6 +1563,48 @@
         "summary": "Send a message to an agent"
       }
     },
+    "/agents/{agent_id}/ready": {
+      "post": {
+        "description": "Set the startup-ready event for *agent_id*.\n\nCalled by the ``SessionStart`` hook (via ``curl``) when Claude Code\nstarts a new session.  Sets ``agent._startup_ready`` so that\n``ClaudeCodeAgent._wait_for_ready()`` can return instead of timing out.\n\n- 404 if agent is not found.\n- 200 ``{\"status\": \"ok\"}`` on success (even if ``_startup_ready`` is\n  already set or absent \u2014 idempotent by design).",
+        "operationId": "agent_ready_agents__agent_id__ready_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Agent Ready Agents  Agent Id  Ready Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Signal agent startup readiness (called by SessionStart hook)"
+      }
+    },
     "/agents/{agent_id}/reset": {
       "post": {
         "description": "Stop and restart *agent_id*, clearing ERROR and permanently-failed state.\n\nUse this endpoint when an agent exhausted automatic recovery attempts\nand needs a manual restart.  Returns 404 if the agent is not registered.\n\nDesign note: ``POST /agents/{id}/reset`` follows the action sub-resource\npattern \u2014 an imperative verb endpoint rather than a PUT state replacement.\nReference: DESIGN.md \u00a711; Nordic APIs \"Designing a True REST State Machine\".",

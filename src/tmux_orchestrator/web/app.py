@@ -786,9 +786,28 @@ def create_app(
     async def _lifespan(application: FastAPI):  # noqa: ARG001
         await hub.start()
         logger.info("WebSocket hub started")
+        # Signal the orchestrator to defer agent process startup so that
+        # start_agents() can be called AFTER the server begins accepting
+        # requests.  This prevents the SessionStart hook deadlock: agents call
+        # POST /agents/{id}/ready via curl, which requires the HTTP server to
+        # be up first.
+        if hasattr(orchestrator, "_defer_agent_start"):
+            orchestrator._defer_agent_start = True
         if on_startup is not None:
             await on_startup()
+        # Server is now accepting requests.  Start agent processes in the
+        # background so their SessionStart hooks can reach this server.
+        _agents_task: asyncio.Task | None = None
+        if hasattr(orchestrator, "start_agents"):
+            _agents_task = asyncio.create_task(
+                orchestrator.start_agents(),
+                name="orchestrator-agent-startup",
+            )
         yield
+        # Cancel in-flight agent startups on shutdown.
+        if _agents_task and not _agents_task.done():
+            _agents_task.cancel()
+            await asyncio.gather(_agents_task, return_exceptions=True)
         if on_shutdown is not None:
             await on_shutdown()
         await hub.stop()
@@ -1390,6 +1409,31 @@ def create_app(
             agent_id,
             agent._current_task.id if agent._current_task else "unknown",
         )
+        return {"status": "ok"}
+
+    @app.post(
+        "/agents/{agent_id}/ready",
+        summary="Signal agent startup readiness (called by SessionStart hook)",
+        # No auth: hook fires from claude's process on the same host.
+        # The endpoint only sets an asyncio.Event — no sensitive data is exposed.
+    )
+    async def agent_ready(agent_id: str) -> dict:
+        """Set the startup-ready event for *agent_id*.
+
+        Called by the ``SessionStart`` hook (via ``curl``) when Claude Code
+        starts a new session.  Sets ``agent._startup_ready`` so that
+        ``ClaudeCodeAgent._wait_for_ready()`` can return instead of timing out.
+
+        - 404 if agent is not found.
+        - 200 ``{"status": "ok"}`` on success (even if ``_startup_ready`` is
+          already set or absent — idempotent by design).
+        """
+        agent = orchestrator.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
+        ready_event = getattr(agent, "_startup_ready", None)
+        if ready_event is not None:
+            ready_event.set()
         return {"status": "ok"}
 
     @app.post(
