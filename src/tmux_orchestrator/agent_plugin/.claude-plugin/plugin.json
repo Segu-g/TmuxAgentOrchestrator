@@ -1,0 +1,5 @@
+{
+  "name": "tmux-orchestrator",
+  "version": "1.0.10",
+  "description": "Slash commands and lifecycle hooks for TmuxAgentOrchestrator-managed agents"
+}

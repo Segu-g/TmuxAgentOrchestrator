@@ -108,13 +108,12 @@ class ClaudeCodeAgent(Agent):
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
-        # Inject API key into the tmux session environment BEFORE creating the
-        # pane.  tmux set-environment only propagates to panes created after the
-        # call, so if we set it after new_pane() the shell that claude runs in
-        # will not inherit the variable and the Stop hook headers cannot expand
-        # $TMUX_ORCHESTRATOR_API_KEY → HTTP 401.
-        if self._api_key:
-            await loop.run_in_executor(None, self._set_session_env_api_key)
+        # TMUX_ORCHESTRATOR_API_KEY is injected into the tmux session env (shared
+        # across all agents in the session; same value for all so no race).
+        # TMUX_ORCHESTRATOR_AGENT_ID and TMUX_ORCHESTRATOR_WEB_BASE_URL are
+        # per-agent and are embedded directly in the launch command via `env`
+        # so that concurrent agent starts cannot race on session-level variables.
+        await loop.run_in_executor(None, self._set_session_env_vars)
         if self._parent_pane is not None:
             # Sub-agent: split the parent's window to stay in the same tmux window
             pane = await loop.run_in_executor(
@@ -141,10 +140,21 @@ class ClaudeCodeAgent(Agent):
             await loop.run_in_executor(None, self._completion.on_start, cwd)
             if self._web_base_url:
                 self._startup_ready = asyncio.Event()
-                await loop.run_in_executor(None, self._write_startup_hook, cwd)
-            await loop.run_in_executor(None, self._copy_slash_commands, cwd)
+                # SessionStart hook is in the agent plugin (loaded via --plugin-dir).
+        plugin_dir = Path(__file__).parent.parent / "agent_plugin"
+        command = self._command
+        if plugin_dir.is_dir():
+            command = f"{command} --plugin-dir {shlex.quote(str(plugin_dir))}"
+        # Prepend per-agent env vars so concurrent agents don't race on the
+        # shared tmux session environment (which only supports one value per key).
+        env_prefix = (
+            f"env {shlex.quote(f'TMUX_ORCHESTRATOR_AGENT_ID={self.id}')}"
+            f" {shlex.quote(f'TMUX_ORCHESTRATOR_WEB_BASE_URL={self._web_base_url}')}"
+        )
         launch = (
-            f"cd {shlex.quote(str(cwd))} && {self._command}" if cwd else self._command
+            f"cd {shlex.quote(str(cwd))} && {env_prefix} {command}"
+            if cwd
+            else f"{env_prefix} {command}"
         )
         await loop.run_in_executor(None, self._tmux.send_keys, pane, launch)
         self._tmux.watch_pane(pane, self.id)
@@ -191,18 +201,16 @@ class ClaudeCodeAgent(Agent):
             os.close(fd)
         logger.debug("Agent %s wrote API key file to %s", self.id, key_path)
 
-    def _set_session_env_api_key(self) -> None:
-        """Inject TMUX_ORCHESTRATOR_API_KEY as a tmux session environment variable.
+    def _set_session_env_vars(self) -> None:
+        """Inject TMUX_ORCHESTRATOR_API_KEY into the tmux session environment.
 
-        libtmux's ``Session.set_environment()`` calls ``tmux set-environment``,
-        which causes subsequently created panes to inherit the variable.
-        This means the API key is available in the agent's shell without being
-        written to a world-readable file or appearing in shell history.
+        Only the API key is set here because it is the same for all agents in
+        the session.  Per-agent values (AGENT_ID, WEB_BASE_URL) are embedded
+        directly in the launch command via ``env VAR=value`` so concurrent
+        agent starts cannot overwrite each other's session-level variables.
 
         References:
           - libtmux docs: https://libtmux.readthedocs.io/en/latest/api.html
-          - tmux GitHub Discussion #3997 "Session environment variables"
-            https://github.com/orgs/tmux/discussions/3997
           - DESIGN.md §3, §10.30 "API キー配送のセキュリティ方針"
         """
         if not self._api_key:
@@ -210,13 +218,8 @@ class ClaudeCodeAgent(Agent):
         try:
             session = self._tmux.ensure_session()
             session.set_environment("TMUX_ORCHESTRATOR_API_KEY", self._api_key)
-            logger.debug(
-                "Agent %s set TMUX_ORCHESTRATOR_API_KEY on tmux session %s",
-                self.id, session.id,
-            )
+            logger.debug("Agent %s set TMUX_ORCHESTRATOR_API_KEY on tmux session", self.id)
         except Exception:  # noqa: BLE001
-            # Non-fatal: the key file is the primary delivery mechanism;
-            # the session env var is an additional layer.
             logger.warning(
                 "Agent %s: could not set TMUX_ORCHESTRATOR_API_KEY on tmux session",
                 self.id, exc_info=True,
@@ -388,17 +391,17 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
 
 | Command | Usage | Purpose |
 |---|---|---|
-| `/check-inbox` | `/check-inbox` | List unread messages |
-| `/read-message` | `/read-message <id>` | Read a message in full |
-| `/send-message` | `/send-message <agent_id> <text>` | Send a message |
-| `/spawn-subagent` | `/spawn-subagent <template_id>` | Spawn a sub-agent |
-| `/list-agents` | `/list-agents` | Show all agent statuses |
-| `/plan` | `/plan <description>` | Write PLAN.md before implementing |
-| `/tdd` | `/tdd <feature>` | Start a TDD cycle for a feature |
-| `/progress` | `/progress <summary>` | Report progress to parent |
-| `/summarize` | `/summarize` | Compress context → NOTES.md |
-| `/delegate` | `/delegate <task>` | Spawn sub-agents and assign subtasks |
-| `/task-complete` | `/task-complete <summary>` | Signal task completion to orchestrator |
+| `/tmux-orchestrator:check-inbox` | `/tmux-orchestrator:check-inbox` | List unread messages |
+| `/tmux-orchestrator:read-message` | `/tmux-orchestrator:read-message <id>` | Read a message in full |
+| `/tmux-orchestrator:send-message` | `/tmux-orchestrator:send-message <agent_id> <text>` | Send a message |
+| `/tmux-orchestrator:spawn-subagent` | `/tmux-orchestrator:spawn-subagent <template_id>` | Spawn a sub-agent |
+| `/tmux-orchestrator:list-agents` | `/tmux-orchestrator:list-agents` | Show all agent statuses |
+| `/tmux-orchestrator:plan` | `/tmux-orchestrator:plan <description>` | Write PLAN.md before implementing |
+| `/tmux-orchestrator:tdd` | `/tmux-orchestrator:tdd <feature>` | Start a TDD cycle for a feature |
+| `/tmux-orchestrator:progress` | `/tmux-orchestrator:progress <summary>` | Report progress to parent |
+| `/tmux-orchestrator:summarize` | `/tmux-orchestrator:summarize` | Compress context → NOTES.md |
+| `/tmux-orchestrator:delegate` | `/tmux-orchestrator:delegate <task>` | Spawn sub-agents and assign subtasks |
+| `/tmux-orchestrator:task-complete` | `/tmux-orchestrator:task-complete <summary>` | Signal task completion to orchestrator |
 """
         claude_md_path = cwd / "CLAUDE.md"
         claude_md_path.write_text(content)
@@ -488,56 +491,6 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
                     "Agent %s: copied spec file %s → %s", self.id, src, dest
                 )
 
-    def _copy_slash_commands(self, cwd: Path) -> None:
-        """Copy orchestrator slash commands into ``.claude/commands/`` in the worktree.
-
-        Claude Code discovers project-scoped commands from ``.claude/commands/``
-        relative to the directory it was launched in.  Agent worktrees have their
-        own root, so the orchestrator's top-level ``.claude/commands/`` is not
-        visible to agents running inside them.
-
-        This method copies the bundled commands from
-        ``src/tmux_orchestrator/commands/`` (co-located with the installed package)
-        into ``{worktree}/.claude/commands/`` at startup, making the full suite of
-        orchestrator slash commands available in every agent session:
-
-        - ``/send-message``    — send P2P message to another agent via REST
-        - ``/check-inbox``     — list unread messages in mailbox
-        - ``/read-message``    — read a specific message by ID
-        - ``/spawn-subagent``  — spawn a sub-agent from a config template
-        - ``/list-agents``     — list all agents and their current status
-        - ``/plan``            — write a structured PLAN.md before implementing
-        - ``/tdd``             — guide a TDD (Red→Green→Refactor) cycle
-        - ``/progress``        — report progress to parent agent
-        - ``/summarize``       — compress current context into NOTES.md
-        - ``/delegate``        — break task into subtasks and spawn sub-agents
-        - ``/change-strategy`` — escalate single→parallel/competitive execution
-        - ``/plan-workflow``   — design and submit a multi-phase workflow
-
-        References:
-        - Claude Code "Extend Claude with skills" docs (2025/2026)
-        - v1.0.5 build-log: agent-impl hit "Unknown skill: send-message" because
-          /send-message was not available in the worktree.
-        """
-        commands_src = Path(__file__).parent.parent / "commands"
-        if not commands_src.is_dir():
-            logger.warning(
-                "Agent %s: bundled commands directory not found at %s — "
-                "slash commands will not be available in worktree",
-                self.id, commands_src,
-            )
-            return
-        commands_dst = cwd / ".claude" / "commands"
-        commands_dst.mkdir(parents=True, exist_ok=True)
-        count = 0
-        for cmd_file in sorted(commands_src.glob("*.md")):
-            shutil.copy2(cmd_file, commands_dst / cmd_file.name)
-            count += 1
-        logger.debug(
-            "Agent %s: copied %d slash commands to %s",
-            self.id, count, commands_dst,
-        )
-
     def _write_notes_template(self, cwd: Path) -> None:
         """Write an initial NOTES.md template for structured note-taking."""
         notes_path = cwd / "NOTES.md"
@@ -579,12 +532,6 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
         # so the strategy must remove any files it wrote to avoid stale hooks.
         if self.worktree_path is not None:
             self._completion.on_stop(self.worktree_path)
-        # Clean up the SessionStart hook settings file written by _write_startup_hook().
-        # NudgingStrategy.on_stop() handles WORKER agents (the file at that point contains
-        # the last task's Stop hook settings).  DIRECTOR agents use ExplicitSignalStrategy
-        # whose on_stop() is a no-op, so we must remove the SessionStart hook file here.
-        if self._startup_ready is not None and self._cwd is not None:
-            (self._cwd / ".claude" / "settings.local.json").unlink(missing_ok=True)
         await self._teardown_worktree()
         logger.info("ClaudeCodeAgent %s stopped", self.id)
 
@@ -641,44 +588,6 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
             None, self._tmux.send_keys, self.pane, safe_prompt
         )
         await self._completion.wait(self, task)
-
-    def _write_startup_hook(self, cwd: Path) -> None:
-        """Write a ``SessionStart`` hook that signals ``POST /agents/{id}/ready``.
-
-        SessionStart only supports ``type: "command"`` hooks (HTTP hooks are not
-        supported for this event).  The hook fires when Claude Code starts a new
-        session, before the agentic loop begins, allowing ``_wait_for_ready()``
-        to await the REST signal instead of polling pane output.
-
-        The ``/agents/{id}/ready`` endpoint has no auth requirement so the curl
-        command does not need to pass an API key.
-
-        Reference: Claude Code Hooks — SessionStart
-        https://code.claude.com/docs/en/hooks (2025)
-        """
-        url = f"{self._web_base_url}/agents/{self.id}/ready"
-        settings = {
-            "hooks": {
-                "SessionStart": [
-                    {
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": f"curl -sf -X POST '{url}'",
-                                "timeout": 10,
-                            }
-                        ],
-                    }
-                ]
-            }
-        }
-        import json as _json
-        claude_dir = cwd / ".claude"
-        claude_dir.mkdir(parents=True, exist_ok=True)
-        (claude_dir / "settings.local.json").write_text(_json.dumps(settings, indent=2))
-        logger.debug(
-            "Agent %s: wrote SessionStart hook → %s", self.id, cwd / ".claude" / "settings.local.json"
-        )
 
     async def _wait_for_ready(self) -> None:
         """Wait for claude to signal readiness via the ``SessionStart`` hook.

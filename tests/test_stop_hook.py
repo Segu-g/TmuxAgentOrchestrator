@@ -1,18 +1,19 @@
 """Tests for completion strategies and agent startup/task-complete hooks.
 
-Design (v1.0.x):
+Design (v1.0.10):
 - ``NudgingStrategy`` (WORKER): writes Stop hook on each task dispatch so the
   web endpoint can send a nudge when Claude finishes a response without calling
   /task-complete.  ``on_start()`` is a no-op; task completion is explicit only.
 - ``ExplicitSignalStrategy`` (DIRECTOR): no hooks at all; pure spin-wait.
-- Startup detection (all roles): ``ClaudeCodeAgent._write_startup_hook()``
-  writes a ``SessionStart`` hook (type: "command", curl) that calls
-  ``POST /agents/{id}/ready``.  The endpoint sets ``_startup_ready`` so
-  ``_wait_for_ready()`` can return instead of timing out.
+- Startup detection (all roles): the agent plugin's ``hooks/session-start.sh``
+  calls ``POST /agents/{id}/ready`` via the ``SessionStart`` hook.  The plugin
+  is loaded via ``--plugin-dir`` passed to the claude launch command.  The
+  endpoint sets ``_startup_ready`` so ``_wait_for_ready()`` can return instead
+  of timing out.
 
 References:
 - Claude Code Hooks Reference https://code.claude.com/docs/en/hooks (2025)
-- DESIGN.md §10.latest (v1.0.x)
+- DESIGN.md §10.latest (v1.0.10)
 """
 
 from __future__ import annotations
@@ -415,17 +416,16 @@ async def test_agent_ready_endpoint_ok_when_no_startup_ready_attr(client, mock_o
 
 
 # ---------------------------------------------------------------------------
-# Integration: ClaudeCodeAgent start() writes SessionStart hook
+# Integration: ClaudeCodeAgent start() — plugin-dir and startup event
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_worker_start_writes_session_start_hook(tmp_path: Path) -> None:
-    """ClaudeCodeAgent.start() must write a SessionStart hook for any role when web_base_url is set.
+async def test_worker_start_sets_startup_ready_event(tmp_path: Path) -> None:
+    """ClaudeCodeAgent.start() must set _startup_ready to an asyncio.Event when web_base_url is set.
 
-    The SessionStart hook fires when Claude Code starts a session and calls
-    POST /agents/{id}/ready so _wait_for_ready() can return via asyncio.Event
-    instead of polling pane output.
+    The SessionStart hook is provided by the agent plugin loaded via --plugin-dir.
+    The plugin's session-start.sh calls POST /agents/{id}/ready, which sets this event.
     """
     from tmux_orchestrator.config import AgentRole
 
@@ -447,22 +447,16 @@ async def test_worker_start_writes_session_start_hook(tmp_path: Path) -> None:
     with patch.object(agent, "_wait_for_ready", new_callable=AsyncMock):
         await agent.start()
 
-    settings_path = tmp_path / ".claude" / "settings.local.json"
-    assert settings_path.exists(), "start() must write SessionStart hook settings file"
-    data = json.loads(settings_path.read_text())
-    assert "SessionStart" in data["hooks"], "settings must contain SessionStart hook"
-    matcher_group = data["hooks"]["SessionStart"][0]
-    assert "matcher" not in matcher_group, "SessionStart hooks must not have a matcher field"
-    handler = matcher_group["hooks"][0]
-    assert handler["type"] == "command"
-    assert "/ready" in handler["command"]
+    assert isinstance(agent._startup_ready, asyncio.Event), (
+        "start() must set _startup_ready to an asyncio.Event when web_base_url is set"
+    )
 
     await agent.stop()
 
 
 @pytest.mark.asyncio
-async def test_director_start_writes_session_start_hook(tmp_path: Path) -> None:
-    """DIRECTOR agents also write the SessionStart hook on start() when web_base_url is set."""
+async def test_director_start_sets_startup_ready_event(tmp_path: Path) -> None:
+    """DIRECTOR agents also get _startup_ready set to an asyncio.Event when web_base_url is set."""
     from tmux_orchestrator.config import AgentRole
 
     bus = make_bus()
@@ -483,17 +477,16 @@ async def test_director_start_writes_session_start_hook(tmp_path: Path) -> None:
     with patch.object(agent, "_wait_for_ready", new_callable=AsyncMock):
         await agent.start()
 
-    settings_path = tmp_path / ".claude" / "settings.local.json"
-    assert settings_path.exists(), "DIRECTOR must also write SessionStart hook when web_base_url is set"
-    data = json.loads(settings_path.read_text())
-    assert "SessionStart" in data["hooks"]
+    assert isinstance(agent._startup_ready, asyncio.Event), (
+        "DIRECTOR must also get _startup_ready set to an asyncio.Event when web_base_url is set"
+    )
 
     await agent.stop()
 
 
 @pytest.mark.asyncio
-async def test_stop_removes_settings_file_for_director(tmp_path: Path) -> None:
-    """DIRECTOR stop() must remove .claude/settings.local.json (SessionStart hook cleanup)."""
+async def test_start_includes_plugin_dir_in_launch_command(tmp_path: Path) -> None:
+    """start() must pass --plugin-dir to the claude launch command when the plugin dir exists."""
     from tmux_orchestrator.config import AgentRole
 
     bus = make_bus()
@@ -503,29 +496,33 @@ async def test_stop_removes_settings_file_for_director(tmp_path: Path) -> None:
     wm.setup = MagicMock(return_value=tmp_path)
 
     agent = ClaudeCodeAgent(
-        agent_id="director-cleanup",
+        agent_id="plugin-test-agent",
         bus=bus,
         tmux=tmux,
         worktree_manager=wm,
         web_base_url="http://localhost:8000",
-        role=AgentRole.DIRECTOR,
+        role=AgentRole.WORKER,
     )
-
-    settings_path = tmp_path / ".claude" / "settings.local.json"
 
     with patch.object(agent, "_wait_for_ready", new_callable=AsyncMock):
         await agent.start()
 
-    assert settings_path.exists(), "settings file must exist after start()"
+    # Collect all send_keys calls and find the launch command
+    send_keys_calls = tmux.send_keys.call_args_list
+    launch_calls = [str(call) for call in send_keys_calls if "--plugin-dir" in str(call)]
+    assert len(launch_calls) >= 1, (
+        f"Expected --plugin-dir in launch command; send_keys calls: {send_keys_calls}"
+    )
+    assert "agent_plugin" in launch_calls[0], (
+        f"--plugin-dir must point to agent_plugin directory; got: {launch_calls[0]}"
+    )
 
     await agent.stop()
 
-    assert not settings_path.exists(), "stop() must remove SessionStart hook settings file for DIRECTOR"
-
 
 @pytest.mark.asyncio
-async def test_worker_stop_removes_settings_file(tmp_path: Path) -> None:
-    """WORKER stop() must remove .claude/settings.local.json."""
+async def test_worker_stop_calls_on_stop_strategy(tmp_path: Path) -> None:
+    """WORKER stop() must call NudgingStrategy.on_stop() (which removes settings.local.json if written)."""
     from tmux_orchestrator.config import AgentRole
 
     bus = make_bus()
@@ -543,16 +540,57 @@ async def test_worker_stop_removes_settings_file(tmp_path: Path) -> None:
         role=AgentRole.WORKER,
     )
 
-    settings_path = tmp_path / ".claude" / "settings.local.json"
-
     with patch.object(agent, "_wait_for_ready", new_callable=AsyncMock):
         await agent.start()
 
-    assert settings_path.exists(), "settings file must exist after start()"
+    # Write a fake settings.local.json as if on_task_dispatch was called
+    settings_path = tmp_path / ".claude" / "settings.local.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text("{}")
 
     await agent.stop()
 
-    assert not settings_path.exists(), "stop() must remove settings file for WORKER"
+    # NudgingStrategy.on_stop() should remove the settings file
+    assert not settings_path.exists(), (
+        "stop() must invoke NudgingStrategy.on_stop() which removes settings.local.json"
+    )
+
+
+@pytest.mark.asyncio
+async def test_set_session_env_vars_sets_only_api_key(tmp_path: Path) -> None:
+    """_set_session_env_vars() must set only the API key on the tmux session.
+
+    Per-agent values (AGENT_ID, WEB_BASE_URL) are embedded directly in the
+    launch command via ``env VAR=value`` so concurrent agent starts cannot
+    race on session-level variables.
+    """
+    from tmux_orchestrator.config import AgentRole
+
+    bus = make_bus()
+    tmux = make_tmux_mock()
+    mock_session = MagicMock()
+    tmux.ensure_session = MagicMock(return_value=mock_session)
+
+    agent = ClaudeCodeAgent(
+        agent_id="env-test-agent",
+        bus=bus,
+        tmux=tmux,
+        web_base_url="http://localhost:9999",
+        api_key="my-secret-key",
+        role=AgentRole.WORKER,
+    )
+
+    agent._set_session_env_vars()
+
+    set_env_calls = {
+        call.args[0]: call.args[1]
+        for call in mock_session.set_environment.call_args_list
+    }
+    # Only API_KEY goes in the session environment (shared, same for all agents).
+    assert set_env_calls.get("TMUX_ORCHESTRATOR_API_KEY") == "my-secret-key"
+    # Per-agent vars must NOT be in the session env (race condition risk).
+    assert "TMUX_ORCHESTRATOR_AGENT_ID" not in set_env_calls
+    assert "TMUX_ORCHESTRATOR_WEB_BASE_URL" not in set_env_calls
 
 
 # ---------------------------------------------------------------------------
