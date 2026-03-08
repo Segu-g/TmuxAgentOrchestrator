@@ -4,16 +4,12 @@ from __future__ import annotations
 
 import yaml
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
 from typing import Literal
 
-
-class AgentRole(str, Enum):
-    """Role assigned to an agent in the orchestrator hierarchy."""
-
-    WORKER = "worker"
-    DIRECTOR = "director"
+# Backward-compat shim — AgentRole now lives in domain/
+# This re-export preserves all existing import paths unchanged.
+from tmux_orchestrator.domain.agent import AgentRole  # noqa: F401
 
 
 @dataclass

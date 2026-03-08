@@ -723,3 +723,64 @@ AI エージェントにとって TDD は「ガードレール」として機能
 | 中 | **Red Team / Blue Team セキュリティレビューデモ** | `POST /workflows/redblue`、blue-team が FastAPI エンドポイントを実装、red-team が入力検証・認証・レートリミットの欠陥を列挙、arbiter がリスク評価レポートを生成 |
 | 低 | **Codified Context + PairCoder デモ — 長期プロジェクト規約維持** | `.claude/specs/` に規約 YAML を配置 → `POST /workflows/pair` で Navigator+Driver が5セッション連続で実装 → 全セッションにわたり規約違反ゼロを実証 |
 
+
+---
+
+## 10. 調査記録
+
+### 10.21 v1.0.11 — domain/ 純粋型の抽出
+
+#### 選定理由
+
+**選択: `domain/` 純粋型の抽出 (v1.0.11)**
+
+§11「層5：ツール・マネジメント（アーキテクチャ品質）」の「クリーンアーキテクチャ層別ディレクトリ移行」候補の最初のステップとして選択。
+以下の理由で最優先とした:
+
+1. **依存方向の逆転を解消**: 現状 `config.py` の `AgentRole` と `agents/base.py` の `AgentStatus` / `Task` が分散しており、どちらが正規か不明。`bus.py` の `MessageType` / `Message` も同様に「通信インフラ」ファイルにドメイン型が混在している。`domain/` への集約で責務境界を明確にする。
+2. **他の移行の前提条件**: `infrastructure/`, `application/` 層への移行はいずれも `domain/` 型を参照する。`domain/` を先に確立しないと後続ステップの方向性が定まらない。
+3. **リスク最小**: 実装変更なし（型の移動＋シム re-export のみ）。既存テスト 1136 本が全て通れば移行成功の証明になる。
+
+**選択しなかった候補:**
+- `ProcessPort` 抽象インターフェース抽出: `ClaudeCodeAgent` の libtmux 依存排除は重要だが、`domain/` 確立後の方が設計が整合しやすい。
+- `UseCaseInteractor` 層の抽出: FastAPI ハンドラーからのビジネスロジック分離も重要だが、`domain/` 確立後に自然に次の候補となる。
+- `POST /workflows/clean-arch`: ワークフロー追加よりアーキテクチャ基盤の整備を優先。
+
+
+#### 調査結果 (Step 1 — Research)
+
+**Query 1**: "Python Clean Architecture domain layer pure types no external dependencies package structure 2024"
+
+主要知見:
+- ドメイン層はフレームワーク・アプリケーション非依存のコードのみで構成する。技術詳細はドメイン層の外で解決すべき (pcah/python-clean-architecture, PRINCIPLES.md)。
+- ドメインエンティティは「Plain Old Python Objects (POPO)」—外部依存なし。enum, dataclass は標準ライブラリの範囲で使用可 (python-clean-architecture PyPI)。
+- 典型構造: `domain/entities/`, `domain/value_objects/`, `domain/events/`, `domain/exceptions.py` (Raman Shaliamekh, Medium 2024)。
+
+**References**:
+- pcah, "python-clean-architecture / PRINCIPLES.md", GitHub, https://github.com/pcah/python-clean-architecture/blob/master/docs/PRINCIPLES.md
+- Raman Shaliamekh, "Clean Architecture with Python", Medium, https://medium.com/@shaliamekh/clean-architecture-with-python-d62712fd8d4f
+- Glukhov, "Python Design Patterns for Clean Architecture", 2025, https://www.glukhov.org/post/2025/11/python-design-patterns-for-clean-architecture/
+
+**Query 2**: "strangler fig pattern Python module restructuring backward compatible re-export shim"
+
+主要知見:
+- Strangler Fig パターン: 旧システムを即座に書き換えるのではなく、新機能を旧パスの「ファサード」背後に段階的に構築して移行する。Fowler (2004) が命名。
+- Python での具体的適用: 旧モジュールパス (`agents/base.py`) から `from tmux_orchestrator.domain.agent import AgentStatus` を re-export するシム（薄いファサードモジュール）を置くことで、既存 import を壊さずに型の移動が可能。
+- テスト可視性: 各移動を独立コミット単位にし、`pytest` が常にグリーンであることを確認しながら進める。
+
+**References**:
+- Fowler, "Strangler Fig Application", martinfowler.com (元論文 2004), https://swimm.io/learn/legacy-code/strangler-fig-pattern-modernizing-it-without-losing-it
+- Swimm, "Strangler Fig Pattern: Modernizing It Without Losing It", https://swimm.io/learn/legacy-code/strangler-fig-pattern-modernizing-it-without-losing-it
+
+**Query 3**: "domain-driven design entity extraction Python enum dataclass stdlib only clean layer"
+
+主要知見:
+- Cosmic Python (Percival & Gregory, O'Reilly 2020): ドメインモデルは `@dataclass(frozen=True)` の value objects と `__eq__`/`__hash__` を持つ entities で構成。外部依存なし。テストは高速でインフラ不要 (https://www.cosmicpython.com/book/chapter_01_domain_model.html)。
+- DDD における `str, Enum` の継承: `class AgentStatus(str, Enum)` パターンは `str` との比較互換を保ちながら型安全性を得る慣用的手法 (https://dddinpython.com/index.php/2022/07/22/entities/)。
+- 依存ルール (Dependency Rule): 内向きのみ。`domain/` は何も import しない (またはstdlibのみ)。`infrastructure/` が `domain/` を import するのは OK。逆はNG。
+
+**References**:
+- Percival & Gregory, "Architecture Patterns with Python (Cosmic Python)", O'Reilly, 2020, https://www.cosmicpython.com/book/chapter_01_domain_model.html
+- dddinpython.com, "Domain Entities in Python", 2022, https://dddinpython.com/index.php/2022/07/22/entities/
+- Glukhov, "Python Design Patterns for Clean Architecture", 2025, https://www.glukhov.org/post/2025/11/python-design-patterns-for-clean-architecture/
+
