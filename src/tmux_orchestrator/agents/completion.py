@@ -93,6 +93,7 @@ class _AgentLike(Protocol):
     _tmux: "TmuxInterface"
 
     async def handle_output(self, text: str) -> None: ...
+    async def notify_stdin(self, notification: str) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -282,11 +283,50 @@ class ExplicitSignalStrategy(CompletionStrategy):
     """
 
     async def wait(self, agent: _AgentLike, task: "Task") -> None:
-        """Spin until ``_current_task`` is cleared by an explicit signal."""
+        """Spin until ``_current_task`` is cleared by an explicit signal.
+
+        While waiting, the pane is polled to detect when the agent has gone
+        idle (output settled at a recognised prompt) without calling
+        ``/task-complete``.  In that case a single nudge message is injected
+        into the pane reminding the agent to call ``/task-complete`` if all
+        work is done, or to continue if not.
+
+        The nudge is sent **at most once per settle period**: after a nudge is
+        sent the flag is reset only if the pane becomes active again (output
+        changes), preventing repeated spamming.
+        """
+        settle = 0
+        prev = ""
+        nudge_sent = False
         while True:
             await asyncio.sleep(_POLL_INTERVAL)
             if agent._current_task is None or agent._current_task.id != task.id:
                 return
+            loop = asyncio.get_running_loop()
+            text = await loop.run_in_executor(
+                None, agent._tmux.capture_pane, agent.pane
+            )
+            if text != prev:
+                settle = 0
+                prev = text
+                nudge_sent = False  # agent became active again — reset nudge flag
+            else:
+                settle += 1
+            if settle >= _SETTLE_CYCLES and looks_done(text) and not nudge_sent:
+                nudge_sent = True
+                settle = 0  # reset so we don't re-nudge immediately
+                nudge = (
+                    f"__ORCHESTRATOR__: Your task is still open "
+                    f"(task_id={task.id[:8]}). "
+                    "If all work is complete and artefacts are committed, call:\n"
+                    "    /task-complete <one-line summary>\n"
+                    "If you still have work to do, please continue."
+                )
+                logger.info(
+                    "Agent %s: pane idle but task not complete — sending nudge",
+                    agent.id,
+                )
+                await agent.notify_stdin(nudge)
 
 
 # ---------------------------------------------------------------------------

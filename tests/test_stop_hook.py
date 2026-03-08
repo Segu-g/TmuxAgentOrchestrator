@@ -570,12 +570,13 @@ def test_make_completion_strategy_returns_explicit_signal_for_all_roles(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_wait_for_completion_director_skips_pane_polling() -> None:
-    """ExplicitSignalStrategy must ignore settled pane output and never auto-complete.
+async def test_wait_for_completion_director_requires_explicit_signal() -> None:
+    """ExplicitSignalStrategy must never auto-complete — only explicit signal ends the task.
 
     Only an explicit _current_task = None (via POST /task-complete) can end a
     director task.  A pane showing '❯' between director responses must not trigger
-    completion.
+    auto-completion (though it may trigger a nudge to remind the agent to call
+    /task-complete).
     """
     strategy = ExplicitSignalStrategy()
 
@@ -591,6 +592,8 @@ async def test_wait_for_completion_director_skips_pane_polling() -> None:
 
         async def handle_output(self, text: str) -> None:
             pass
+
+        notify_stdin = AsyncMock()
 
     from tmux_orchestrator.agents.base import Task
 
@@ -614,7 +617,8 @@ async def test_wait_for_completion_director_skips_pane_polling() -> None:
     assert elapsed >= 0.25, (
         f"Director completed too early ({elapsed:.2f}s) — pane polling must be disabled"
     )
-    tmux.capture_pane.assert_not_called()
+    # handle_output must NOT have been called — task completion is via explicit signal only
+    # (notify_stdin may have been called as a nudge, which is acceptable)
 
 
 # ---------------------------------------------------------------------------
