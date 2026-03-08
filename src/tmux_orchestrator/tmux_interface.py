@@ -91,27 +91,46 @@ class TmuxInterface:
                 pass
             self._session = None
 
-    def new_pane(self, agent_id: str = "") -> libtmux.Pane:
+    def new_pane(
+        self,
+        agent_id: str = "",
+        environment: dict[str, str] | None = None,
+    ) -> libtmux.Pane:
         """Spawn a new window for a top-level agent and return its first pane.
 
         In the session/window/pane hierarchy:
         - session  → project
         - window   → top-level agent (or agent group)
         - pane     → individual agent process
+
+        ``environment`` is forwarded to libtmux's ``new_window(environment=...)``
+        which maps to ``tmux new-window -e KEY=VALUE`` — pane-local, no race.
         """
         session = self.ensure_session()
-        window = session.new_window(window_name=agent_id or None, attach=False)
+        window = session.new_window(
+            window_name=agent_id or None,
+            attach=False,
+            environment=environment,
+        )
         return window.panes[0]
 
-    def new_subpane(self, parent_pane: libtmux.Pane, agent_id: str = "") -> libtmux.Pane:
+    def new_subpane(
+        self,
+        parent_pane: libtmux.Pane,
+        agent_id: str = "",
+        environment: dict[str, str] | None = None,
+    ) -> libtmux.Pane:
         """Split *parent_pane*'s window to create a pane for a sub-agent.
 
         Sub-agents are co-located in the same tmux window as their parent,
         maintaining the visual hierarchy: window = agent group, pane = agent.
         Returns the newly created pane.
+
+        ``environment`` is forwarded to libtmux's ``split(environment=...)``
+        which maps to ``tmux split-window -e KEY=VALUE`` — pane-local, no race.
         """
         window = parent_pane.window
-        new_pane = window.split(attach=False)
+        new_pane = window.split(attach=False, environment=environment)
         logger.debug("Created sub-pane %s for agent %s in window %s", new_pane.id, agent_id, window.id)
         return new_pane
 

@@ -108,20 +108,26 @@ class ClaudeCodeAgent(Agent):
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
-        # TMUX_ORCHESTRATOR_API_KEY is injected into the tmux session env (shared
-        # across all agents in the session; same value for all so no race).
-        # TMUX_ORCHESTRATOR_AGENT_ID and TMUX_ORCHESTRATOR_WEB_BASE_URL are
-        # per-agent and are embedded directly in the launch command via `env`
-        # so that concurrent agent starts cannot race on session-level variables.
-        await loop.run_in_executor(None, self._set_session_env_vars)
+        # Per-agent env vars are injected via libtmux's new_window/split
+        # ``environment`` parameter (maps to ``tmux new-window -e KEY=VALUE``).
+        # This is pane-local, so concurrent agent starts cannot race.
+        # The shared API key is also included here for convenience.
+        pane_env: dict[str, str] = {
+            "TMUX_ORCHESTRATOR_AGENT_ID": self.id,
+            "TMUX_ORCHESTRATOR_WEB_BASE_URL": self._web_base_url,
+        }
+        if self._api_key:
+            pane_env["TMUX_ORCHESTRATOR_API_KEY"] = self._api_key
         if self._parent_pane is not None:
             # Sub-agent: split the parent's window to stay in the same tmux window
             pane = await loop.run_in_executor(
-                None, self._tmux.new_subpane, self._parent_pane, self.id
+                None, self._tmux.new_subpane, self._parent_pane, self.id, pane_env
             )
         else:
             # Top-level agent: each gets its own tmux window
-            pane = await loop.run_in_executor(None, self._tmux.new_pane, self.id)
+            pane = await loop.run_in_executor(
+                None, self._tmux.new_pane, self.id, pane_env
+            )
         self.pane = pane
         cwd = await self._setup_worktree()
         self._cwd = cwd
@@ -145,16 +151,10 @@ class ClaudeCodeAgent(Agent):
         command = self._command
         if plugin_dir.is_dir():
             command = f"{command} --plugin-dir {shlex.quote(str(plugin_dir))}"
-        # Prepend per-agent env vars so concurrent agents don't race on the
-        # shared tmux session environment (which only supports one value per key).
-        env_prefix = (
-            f"env {shlex.quote(f'TMUX_ORCHESTRATOR_AGENT_ID={self.id}')}"
-            f" {shlex.quote(f'TMUX_ORCHESTRATOR_WEB_BASE_URL={self._web_base_url}')}"
-        )
         launch = (
-            f"cd {shlex.quote(str(cwd))} && {env_prefix} {command}"
+            f"cd {shlex.quote(str(cwd))} && {command}"
             if cwd
-            else f"{env_prefix} {command}"
+            else command
         )
         await loop.run_in_executor(None, self._tmux.send_keys, pane, launch)
         self._tmux.watch_pane(pane, self.id)
@@ -200,30 +200,6 @@ class ClaudeCodeAgent(Agent):
         finally:
             os.close(fd)
         logger.debug("Agent %s wrote API key file to %s", self.id, key_path)
-
-    def _set_session_env_vars(self) -> None:
-        """Inject TMUX_ORCHESTRATOR_API_KEY into the tmux session environment.
-
-        Only the API key is set here because it is the same for all agents in
-        the session.  Per-agent values (AGENT_ID, WEB_BASE_URL) are embedded
-        directly in the launch command via ``env VAR=value`` so concurrent
-        agent starts cannot overwrite each other's session-level variables.
-
-        References:
-          - libtmux docs: https://libtmux.readthedocs.io/en/latest/api.html
-          - DESIGN.md §3, §10.30 "API キー配送のセキュリティ方針"
-        """
-        if not self._api_key:
-            return
-        try:
-            session = self._tmux.ensure_session()
-            session.set_environment("TMUX_ORCHESTRATOR_API_KEY", self._api_key)
-            logger.debug("Agent %s set TMUX_ORCHESTRATOR_API_KEY on tmux session", self.id)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "Agent %s: could not set TMUX_ORCHESTRATOR_API_KEY on tmux session",
-                self.id, exc_info=True,
-            )
 
     # ------------------------------------------------------------------
     # Context localization — writes agent-specific files to worktree

@@ -557,40 +557,43 @@ async def test_worker_stop_calls_on_stop_strategy(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_set_session_env_vars_sets_only_api_key(tmp_path: Path) -> None:
-    """_set_session_env_vars() must set only the API key on the tmux session.
+async def test_start_passes_env_vars_to_new_pane(tmp_path: Path) -> None:
+    """start() must pass per-agent env vars via libtmux's environment parameter (not session env).
 
-    Per-agent values (AGENT_ID, WEB_BASE_URL) are embedded directly in the
-    launch command via ``env VAR=value`` so concurrent agent starts cannot
-    race on session-level variables.
+    Using libtmux's ``new_window(environment=...)`` / ``split(environment=...)``
+    sets pane-local env vars, avoiding races when multiple agents start concurrently.
     """
     from tmux_orchestrator.config import AgentRole
 
     bus = make_bus()
     tmux = make_tmux_mock()
-    mock_session = MagicMock()
-    tmux.ensure_session = MagicMock(return_value=mock_session)
+
+    wm = MagicMock()
+    wm.setup = MagicMock(return_value=tmp_path)
 
     agent = ClaudeCodeAgent(
         agent_id="env-test-agent",
         bus=bus,
         tmux=tmux,
+        worktree_manager=wm,
         web_base_url="http://localhost:9999",
         api_key="my-secret-key",
         role=AgentRole.WORKER,
     )
 
-    agent._set_session_env_vars()
+    with patch.object(agent, "_wait_for_ready", new_callable=AsyncMock):
+        await agent.start()
 
-    set_env_calls = {
-        call.args[0]: call.args[1]
-        for call in mock_session.set_environment.call_args_list
-    }
-    # Only API_KEY goes in the session environment (shared, same for all agents).
-    assert set_env_calls.get("TMUX_ORCHESTRATOR_API_KEY") == "my-secret-key"
-    # Per-agent vars must NOT be in the session env (race condition risk).
-    assert "TMUX_ORCHESTRATOR_AGENT_ID" not in set_env_calls
-    assert "TMUX_ORCHESTRATOR_WEB_BASE_URL" not in set_env_calls
+    # new_pane should have been called with environment dict containing per-agent vars.
+    tmux.new_pane.assert_called_once()
+    call_args = tmux.new_pane.call_args
+    pane_env = call_args.args[1] if len(call_args.args) > 1 else call_args.kwargs.get("environment")
+    assert pane_env is not None, "new_pane must receive pane-local environment dict"
+    assert pane_env.get("TMUX_ORCHESTRATOR_AGENT_ID") == "env-test-agent"
+    assert pane_env.get("TMUX_ORCHESTRATOR_WEB_BASE_URL") == "http://localhost:9999"
+    assert pane_env.get("TMUX_ORCHESTRATOR_API_KEY") == "my-secret-key"
+
+    await agent.stop()
 
 
 # ---------------------------------------------------------------------------
