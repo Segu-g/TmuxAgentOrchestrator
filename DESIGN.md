@@ -70,6 +70,28 @@ TmuxAgentOrchestrator/
 | `PEER_MSG` | エージェント間メッセージ（P2P） |
 | `CONTROL` | サブエージェント生成などの制御 |
 
+### ドメイン分離方針
+
+関心（ドメイン）ごとにファイル・フォルダを分離する。
+1つのファイルに複数のドメインの関心が混在する場合は分割を検討する。
+
+| ドメイン | 現在の主なファイル | 関心の範囲 |
+|---|---|---|
+| **tmux 操作** | `tmux_interface.py` | libtmux ラッパー、ペイン生成・監視、キー送信 |
+| **エージェント状態** | `agents/base.py`, `registry.py` | AgentStatus、ライフサイクル、タスク割り当て |
+| **Claude 駆動** | `agents/claude_code.py` | claude CLI 起動、ペイン出力解析、完了検出 |
+| **Claude Plugin** | `agent_plugin/` | スラッシュコマンド定義、SessionStart/Stop hook |
+| **タスク管理** | `orchestrator.py` | タスクキュー、ディスパッチ、P2P 制御、ウォッチドッグ |
+| **ワークフロー** | `workflow.py`, `web/app.py` | フェーズ定義、依存解決、`POST /workflows` |
+| **エージェントテンプレート** | `config.py`, `agent_plugin/commands/` | YAML ロール定義、system_prompt、context_files |
+| **通信バス** | `bus.py`, `messaging.py` | pub/sub、P2P メッセージ、メールボックス |
+| **Web/API** | `web/app.py`, `web/ws.py` | REST エンドポイント、WebSocket ハブ |
+
+**原則**:
+- ドメインをまたぐ依存は「外から中へ」（上位層が下位層を参照）。逆方向の依存は禁止。
+- 新機能を追加するとき、既存ファイルに混入させず、対応するドメインのファイルに追加する。
+- ドメインが明確に定まらない場合は、まず小さなモジュールとして切り出し、後から統合を判断する。
+
 ---
 
 ## 3. tmux 階層マッピング
