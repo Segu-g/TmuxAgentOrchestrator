@@ -65,22 +65,32 @@ class TmuxInterface:
         provided at construction time, the user is prompted for confirmation
         before the existing session is killed.  If the user declines, a
         ``RuntimeError`` is raised and the orchestrator does not start.
+
+        Thread-safe: uses ``_lock`` to prevent a TOCTOU race when multiple
+        agent-startup threads call ``new_pane()`` concurrently (web mode
+        fire-and-forget startup).  The double-checked locking pattern avoids
+        lock contention on the hot path (after the session is created).
         """
         if self._session is not None:
             return self._session
-        existing = self._server.sessions.get(session_name=self.session_name, default=None)
-        if existing:
-            if self._confirm_kill is not None and not self._confirm_kill(self.session_name):
-                raise RuntimeError(
-                    f"tmux session '{self.session_name}' already exists and was not replaced; aborting"
-                )
-            existing.kill()
-        self._session = self._server.new_session(session_name=self.session_name)
-        # Disable assume-paste-time so long prompts are never treated as
-        # bracket-paste by tmux (the default of 1ms causes Claude CLI to show
-        # "[Pasted text #N]" and swallow the subsequent Enter keypress).
-        self._session.set_option("assume-paste-time", "0")
-        return self._session
+        with self._lock:
+            # Re-check inside the lock: another thread may have created the
+            # session while we were waiting to acquire the lock.
+            if self._session is not None:
+                return self._session
+            existing = self._server.sessions.get(session_name=self.session_name, default=None)
+            if existing:
+                if self._confirm_kill is not None and not self._confirm_kill(self.session_name):
+                    raise RuntimeError(
+                        f"tmux session '{self.session_name}' already exists and was not replaced; aborting"
+                    )
+                existing.kill()
+            self._session = self._server.new_session(session_name=self.session_name)
+            # Disable assume-paste-time so long prompts are never treated as
+            # bracket-paste by tmux (the default of 1ms causes Claude CLI to show
+            # "[Pasted text #N]" and swallow the subsequent Enter keypress).
+            self._session.set_option("assume-paste-time", "0")
+            return self._session
 
     def kill_session(self) -> None:
         """Kill the managed tmux session (call during orchestrator shutdown)."""
