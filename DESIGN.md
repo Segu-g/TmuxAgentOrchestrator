@@ -696,7 +696,7 @@ AI エージェントにとって TDD は「ガードレール」として機能
 | 優先度 | 課題 | 根拠 |
 |--------|------|------|
 | **高** | **クリーンアーキテクチャ層別ディレクトリ移行** — 現在フラットな `tmux_orchestrator/` 以下のモジュールを `domain/` / `application/` / `infrastructure/` / `monitoring/` / `adapters/` に段階的に移動する。後方互換シム（旧パスからの re-export）を置き、テストを壊さずに移行する。移行順: ① `domain/` (AgentStatus, Task, MessageType 抽出), ② `infrastructure/` (tmux_interface, messaging, worktree 等), ③ `application/` (orchestrator, registry, bus), ④ `adapters/` (config, factory, schemas, web, tui)。各移動は独立したコミット単位で行い、`uv run pytest tests/ -x -q` が常にグリーンであることを確認する | §2「ドメイン分離方針」および「目標とするクリーンアーキテクチャ層構造」参照。Martin "Clean Architecture" (2017): 依存は常にドメイン中心に向かう（Dependency Rule）。現状は orchestrator.py が context_monitor / drift_monitor / result_store 等のインフラを直接 import しており、依存方向が逆転している。移行することで各層の単体テストが高速化・安定化する。 |
-| **高** | **`domain/` 純粋型の抽出** — `AgentStatus`, `AgentRole` (from config.py / agents/base.py)、`Task` (from agents/base.py)、`MessageType` / `Message` (from bus.py) を `domain/agent.py` / `domain/task.py` / `domain/message.py` に移動。既存モジュールは `from tmux_orchestrator.domain.agent import AgentStatus` を re-export するシムに書き換える。domain/ は外部ライブラリを一切 import しない | Clean Architecture の「Entity」層はフレームワーク非依存のビジネスルールのみを持つ。現状 `config.py` の `AgentRole` と `agents/base.py` の `AgentStatus` が分散しており、どちらが正規の場所か不明確。domain/ への集約で責務を明確化する。 |
+| ~~**高**~~ | ~~**`domain/` 純粋型の抽出** — `AgentStatus`, `AgentRole` (from config.py / agents/base.py)、`Task` (from agents/base.py)、`MessageType` / `Message` (from bus.py) を `domain/agent.py` / `domain/task.py` / `domain/message.py` に移動。既存モジュールは `from tmux_orchestrator.domain.agent import AgentStatus` を re-export するシムに書き換える。domain/ は外部ライブラリを一切 import しない~~ | ~~完了 v1.0.11 — 1156 tests 全通過。Strangler Fig パターンで後方互換性を保ちつつ型を集約。`test_domain_purity.py` 20 tests で純粋性を継続保証。14/15 デモ PASS。~~ |
 | **高** | **`orchestrator.py` のインフラ依存を依存注入（DI）に置き換える** — `Orchestrator.__init__` で直接 import している `ContextMonitor`, `DriftMonitor`, `ResultStore`, `CheckpointStore`, `Autoscaler`, `WebhookManager` を抽象 Protocol 型（または TypeVar Bound）として受け取るように変更し、具体実装は `factory.py` で注入する。`Orchestrator` が infrastructure モジュールを import しないようにする | 現状 orchestrator.py の import 行が最多（14 個のローカル import）。ContextMonitor / DriftMonitor がモニタリングインフラであるにもかかわらず business logic と同居している。DI 化により orchestrator の単体テストでモックが不要になる。 |
 | 高 | **OpenTelemetry GenAI Semantic Conventions 準拠トレース出力** — `gen_ai.*` 属性 (token counts, tool calls, agent spans) を既存 `trace_id` ベースの構造化ログに付加し、Datadog/Jaeger/OTLP エクスポーターへ送信できるようにする | OpenTelemetry "AI Agent Observability" (2025) が業界標準に収斂しつつあり、Datadog が GenAI Semantic Conventions にネイティブ対応済み。現状の `trace_id` は相関のみでスパン階層がない。[opentelemetry.io/blog/2025/ai-agent-observability](https://opentelemetry.io/blog/2025/ai-agent-observability/) |
 | ~~**高**~~ | ~~**エージェントドリフト検出 (Agent Stability Index)**~~ | ~~完了 v1.0.9 — `DriftMonitor` (role/idle/length 3サブスコア)、`agent_drift_warning` イベント。34テスト。17/17デモPASS。~~ |
@@ -783,4 +783,27 @@ AI エージェントにとって TDD は「ガードレール」として機能
 - Percival & Gregory, "Architecture Patterns with Python (Cosmic Python)", O'Reilly, 2020, https://www.cosmicpython.com/book/chapter_01_domain_model.html
 - dddinpython.com, "Domain Entities in Python", 2022, https://dddinpython.com/index.php/2022/07/22/entities/
 - Glukhov, "Python Design Patterns for Clean Architecture", 2025, https://www.glukhov.org/post/2025/11/python-design-patterns-for-clean-architecture/
+
+#### 実装結果 (v1.0.11)
+
+**デモ結果**: 14/15 checks PASSED (2026-03-09)
+
+**実装内容**:
+- `domain/agent.py` — `AgentStatus`, `AgentRole` (str+Enum)
+- `domain/task.py` — `Task` (dataclass)
+- `domain/message.py` — `MessageType`, `Message`, `BROADCAST`
+- `domain/__init__.py` — 全型を再エクスポート
+- 旧モジュール (`agents/base.py`, `config.py`, `bus.py`) に re-export シムを配置 (Strangler Fig)
+- `domain/` は外部ライブラリを一切 import しない（stdlib のみ）
+- `test_domain_purity.py` — 20 tests で純粋性を継続的に保証
+- `ensure_session()` スレッドセーフ修正
+- Stop hook を `type:http` → `type:command` (curl) に変更（環境変数展開の修正）
+- 総テスト数: **1156 tests** 全通過
+
+**デモパターン**: Pipeline — agent-writer → agent-verifier
+- agent-writer: `domain_usage.py` 作成・実行、`writer_report.md` 記述 (SUCCESS, "All types are identical objects: True")
+- agent-verifier: 独立検証し `verification_report.md` 記述 (VERDICT: PASS)
+
+**唯一の FAIL**: agent-verifier が作業完了後に `/task-complete` を呼ばず IDLE に戻らなかった（成果物は正常）。
+根本原因: エージェントが明示的完了シグナルを送り忘れるケース → スラッシュコマンド自動コピー (§11) で改善予定。
 
