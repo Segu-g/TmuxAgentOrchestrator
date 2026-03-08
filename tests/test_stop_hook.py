@@ -348,8 +348,13 @@ async def test_task_complete_endpoint_body_optional(client, mock_orchestrator) -
 
 
 @pytest.mark.asyncio
-async def test_start_writes_stop_hook_settings(tmp_path: Path) -> None:
-    """ClaudeCodeAgent.start() must write .claude/settings.local.json."""
+async def test_start_does_not_write_stop_hook_settings(tmp_path: Path) -> None:
+    """ClaudeCodeAgent.start() must NOT write .claude/settings.local.json.
+
+    All agents (Worker and Director) now use ExplicitSignalStrategy — they signal
+    task completion via /task-complete, not via the Stop hook.  The settings file
+    must not be created so that no stale hooks interfere with completion detection.
+    """
     bus = make_bus()
     tmux = make_tmux_mock()
 
@@ -368,21 +373,20 @@ async def test_start_writes_stop_hook_settings(tmp_path: Path) -> None:
         await agent.start()
 
     settings_path = tmp_path / ".claude" / "settings.local.json"
-    assert settings_path.exists(), "start() must write .claude/settings.local.json"
-
-    data = json.loads(settings_path.read_text())
-    handler = data["hooks"]["Stop"][0]["hooks"][0]
-    assert "hook-agent" in handler["url"]
+    assert not settings_path.exists(), (
+        "start() must NOT write .claude/settings.local.json — "
+        "ExplicitSignalStrategy does not use the Stop hook"
+    )
 
     await agent.stop()
 
 
 @pytest.mark.asyncio
-async def test_stop_removes_stop_hook_settings_file(tmp_path: Path) -> None:
-    """stop() must delete .claude/settings.local.json to avoid stale hooks.
+async def test_stop_hook_settings_absent_before_and_after_stop(tmp_path: Path) -> None:
+    """No Stop hook settings file should exist before or after stop().
 
-    This is critical for non-isolated agents (isolate=False) whose worktree
-    is the shared repo root and is NOT deleted by _teardown_worktree().
+    Since ExplicitSignalStrategy never writes .claude/settings.local.json,
+    neither start() nor stop() should create or remove it.
     """
     bus = make_bus()
     tmux = make_tmux_mock()
@@ -398,15 +402,16 @@ async def test_stop_removes_stop_hook_settings_file(tmp_path: Path) -> None:
         web_base_url="http://localhost:8000",
     )
 
+    settings_path = tmp_path / ".claude" / "settings.local.json"
+
     with patch.object(agent, "_wait_for_ready", new_callable=AsyncMock):
         await agent.start()
 
-    settings_path = tmp_path / ".claude" / "settings.local.json"
-    assert settings_path.exists(), "precondition: file must exist after start()"
+    assert not settings_path.exists(), "settings file must not exist after start()"
 
     await agent.stop()
 
-    assert not settings_path.exists(), "stop() must remove .claude/settings.local.json"
+    assert not settings_path.exists(), "settings file must not exist after stop()"
 
 
 # ---------------------------------------------------------------------------
@@ -540,23 +545,28 @@ async def test_task_complete_accepts_matching_task_id(client, mock_orchestrator)
 # ---------------------------------------------------------------------------
 
 
-def test_write_stop_hook_settings_skipped_for_director(tmp_path: Path) -> None:
-    """make_completion_strategy(DIRECTOR) returns ExplicitSignalStrategy with no-op on_start.
+def test_make_completion_strategy_returns_explicit_signal_for_all_roles(tmp_path: Path) -> None:
+    """make_completion_strategy() returns ExplicitSignalStrategy for all roles.
 
-    Directors signal task completion explicitly via POST /task-complete,
-    so the automatic stop hook must be disabled to avoid false completions
-    after every Claude response.
+    All agents — Workers and Directors alike — now signal task completion
+    explicitly via /task-complete.  The Stop hook is no longer used as a
+    completion trigger (it fires after every response turn, not on actual
+    task completion).  No .claude/settings.local.json must be written.
     """
     from tmux_orchestrator.config import AgentRole
 
-    strategy = make_completion_strategy(AgentRole.DIRECTOR, "agent-director", "http://localhost:9000")
-    assert isinstance(strategy, ExplicitSignalStrategy)
+    for role in (AgentRole.DIRECTOR, AgentRole.WORKER):
+        strategy = make_completion_strategy(role, "agent-x", "http://localhost:9000")
+        assert isinstance(strategy, ExplicitSignalStrategy), (
+            f"Expected ExplicitSignalStrategy for role={role}, got {type(strategy)}"
+        )
 
-    strategy.on_start(tmp_path)
-
-    assert not (tmp_path / ".claude" / "settings.local.json").exists(), (
-        "Director strategy must NOT create stop hook settings"
-    )
+        role_tmp = tmp_path / role.value
+        role_tmp.mkdir()
+        strategy.on_start(role_tmp)
+        assert not (role_tmp / ".claude" / "settings.local.json").exists(), (
+            f"ExplicitSignalStrategy must NOT create stop hook settings for role={role}"
+        )
 
 
 @pytest.mark.asyncio

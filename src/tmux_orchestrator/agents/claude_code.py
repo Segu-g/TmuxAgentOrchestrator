@@ -291,7 +291,12 @@ class ClaudeCodeAgent(Agent):
                 "- Implement tasks using TDD: write tests first, then implement\n"
                 "- Use `/plan` to break large tasks into steps before starting\n"
                 "- Report completion via `/progress` when done\n"
-                "- Spawn sub-agents via `/spawn-subagent` if the task is parallelisable"
+                "- Spawn sub-agents via `/spawn-subagent` if the task is parallelisable\n\n"
+                "### Task Completion (IMPORTANT)\n\n"
+                "When you have finished ALL work for your current task, signal completion by calling:\n\n"
+                "    /task-complete <one-line summary of what was accomplished>\n\n"
+                "Call this ONLY ONCE, after all files are committed and tests pass.\n"
+                "Do NOT call it mid-task or before your work is complete."
             ),
         }.get(self.role, f"You are a **{self.role.value}** agent.")
 
@@ -390,6 +395,7 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
 | `/progress` | `/progress <summary>` | Report progress to parent |
 | `/summarize` | `/summarize` | Compress context → NOTES.md |
 | `/delegate` | `/delegate <task>` | Spawn sub-agents and assign subtasks |
+| `/task-complete` | `/task-complete <summary>` | Signal task completion to orchestrator |
 """
         claude_md_path = cwd / "CLAUDE.md"
         claude_md_path.write_text(content)

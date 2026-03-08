@@ -5,12 +5,15 @@ worktree setup, and context engineering.
 
 Two strategies are provided:
 
-- ``StopHookStrategy``   — worker agents: write a Claude Code Stop hook that
-  fires an HTTP POST to the orchestrator after each Claude response.  Falls
-  back to pane-output polling if the hook doesn't fire.
-- ``ExplicitSignalStrategy`` — director agents: skip the Stop hook entirely
-  (it fires after every response, causing false positives for multi-turn work)
-  and wait for an explicit ``POST /agents/{id}/task-complete`` call instead.
+- ``StopHookStrategy``   — DEPRECATED (internal use / tests only).  Formerly
+  used for worker agents: writes a Claude Code Stop hook that fires an HTTP
+  POST to the orchestrator after each Claude response.  The Stop hook fires
+  after every *response turn*, not when all task work is done — using it as
+  a proxy for task completion was semantically incorrect.
+- ``ExplicitSignalStrategy`` — universal strategy for ALL agent roles.  The
+  agent must call ``POST /agents/{id}/task-complete`` (or the ``/task-complete``
+  slash command) explicitly once ALL task work is finished.  This correctly
+  handles multi-turn agents (Directors and Workers alike).
 
 Usage inside ``ClaudeCodeAgent``::
 
@@ -125,11 +128,20 @@ class CompletionStrategy(ABC):
 
 
 class StopHookStrategy(CompletionStrategy):
-    """Completion via Claude Code's Stop hook, with pane-polling as fallback.
+    """DEPRECATED — internal / test use only.  Not used by ``make_completion_strategy()``.
+
+    Completion via Claude Code's Stop hook, with pane-polling as fallback.
 
     Writes ``.claude/settings.local.json`` containing an HTTP Stop hook URL.
     The hook fires after every Claude response and notifies the orchestrator's
     ``POST /agents/{id}/task-complete`` endpoint.
+
+    **Why deprecated**: the Stop hook is a *response-level* event ("Claude
+    finished one response turn"), not a *task-level* event ("the agent has
+    finished all work").  Workers that need multiple response turns (tool calls,
+    multi-step implementation, etc.) would be incorrectly marked done after the
+    first response.  Use ``ExplicitSignalStrategy`` (via ``/task-complete``)
+    instead.
 
     A ``?task_id=<id>`` query parameter is added at dispatch time so that stop
     hooks fired by *previous* tasks carry a stale URL and are rejected by the
@@ -256,12 +268,17 @@ class StopHookStrategy(CompletionStrategy):
 class ExplicitSignalStrategy(CompletionStrategy):
     """Completion only via an explicit ``POST /agents/{id}/task-complete`` call.
 
-    Used for Director agents that coordinate across multiple Claude responses.
-    The Stop hook fires after every response — using it would mark the task
-    done after the first director response rather than after all workers finish.
+    Used for ALL agent roles (both Workers and Directors).  Agents must call
+    the ``/task-complete`` slash command (or the REST endpoint directly) once
+    ALL task work is finished and artefacts are committed.
 
-    Directors must call the task-complete endpoint themselves (e.g. via curl)
-    once they have confirmed all sub-agents are IDLE and artefacts are committed.
+    This is the correct semantic: task completion is a deliberate signal from
+    the agent, not an automatic side-effect of a Claude response ending.  A
+    worker may need multiple response turns (tool calls, multi-step
+    implementation) before its task is genuinely done.
+
+    The Stop hook (``StopHookStrategy``) is not used — it fires after every
+    response turn, which causes false completions for multi-turn work.
     """
 
     async def wait(self, agent: _AgentLike, task: "Task") -> None:
@@ -282,9 +299,12 @@ def make_completion_strategy(
     agent_id: str,
     web_base_url: str,
 ) -> CompletionStrategy:
-    """Return the appropriate ``CompletionStrategy`` for the given agent role."""
-    from tmux_orchestrator.config import AgentRole  # local import avoids cycles
+    """Return the appropriate ``CompletionStrategy`` for the given agent role.
 
-    if role == AgentRole.DIRECTOR:
-        return ExplicitSignalStrategy()
-    return StopHookStrategy(agent_id, web_base_url)
+    All roles — both WORKER and DIRECTOR — now use ``ExplicitSignalStrategy``.
+    Agents must call ``/task-complete`` explicitly when all task work is done.
+
+    ``StopHookStrategy`` is kept for backwards-compatibility and direct testing
+    but is no longer instantiated by this factory.
+    """
+    return ExplicitSignalStrategy()
