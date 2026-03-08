@@ -11,6 +11,12 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from tmux_orchestrator.agents.base import Agent, AgentStatus, Task
+from tmux_orchestrator.application.monitor_protocols import (  # noqa: F401 (re-exported)
+    ContextMonitorProtocol,
+    DriftMonitorProtocol,
+    NullContextMonitor,
+    NullDriftMonitor,
+)
 from tmux_orchestrator.bus import Bus, Message, MessageType
 from tmux_orchestrator.context_monitor import ContextMonitor
 from tmux_orchestrator.drift_monitor import DriftMonitor
@@ -30,98 +36,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Monitor Protocols — dependency-injection interfaces
-# ---------------------------------------------------------------------------
-
-
-@runtime_checkable
-class ContextMonitorProtocol(Protocol):
-    """Structural interface for context-window monitors injected into Orchestrator.
-
-    Any object that implements ``start()``, ``stop()``, ``get_stats()``, and
-    ``all_stats()`` satisfies this protocol — no inheritance required.
-
-    The real implementation is :class:`~tmux_orchestrator.context_monitor.ContextMonitor`.
-    Tests may inject a :class:`NullContextMonitor` or any other conforming object.
-
-    Reference: PEP 544 — Protocols: Structural subtyping (static duck typing).
-    DESIGN.md §10.N (v1.0.14 — orchestrator full DI).
-    """
-
-    def start(self) -> None: ...
-    def stop(self) -> None: ...
-    def get_stats(self, agent_id: str) -> "dict[str, Any] | None": ...
-    def all_stats(self) -> "list[dict[str, Any]]": ...
-
-
-@runtime_checkable
-class DriftMonitorProtocol(Protocol):
-    """Structural interface for behavioral-drift monitors injected into Orchestrator.
-
-    The real implementation is :class:`~tmux_orchestrator.drift_monitor.DriftMonitor`.
-    Tests may inject a :class:`NullDriftMonitor` or any other conforming object.
-
-    Reference: PEP 544 — Protocols: Structural subtyping (static duck typing).
-    DESIGN.md §10.N (v1.0.14 — orchestrator full DI).
-    """
-
-    def start(self) -> None: ...
-    def stop(self) -> None: ...
-    def get_drift_stats(self, agent_id: str) -> "dict[str, Any] | None": ...
-    def all_drift_stats(self) -> "list[dict[str, Any]]": ...
-
-
-# ---------------------------------------------------------------------------
-# Null Object implementations (Null Object Pattern)
-# ---------------------------------------------------------------------------
-
-
-class NullContextMonitor:
-    """No-op context monitor for use in unit tests.
-
-    Satisfies :class:`ContextMonitorProtocol` without requiring tmux or
-    filesystem access.  All query methods return empty results.
-
-    Reference: Fowler "Refactoring" (1999) — Null Object pattern;
-    DESIGN.md §10.N (v1.0.14 — orchestrator full DI).
-    """
-
-    def start(self) -> None:  # noqa: D401
-        """No-op."""
-
-    def stop(self) -> None:  # noqa: D401
-        """No-op."""
-
-    def get_stats(self, agent_id: str) -> "dict[str, Any] | None":
-        return None
-
-    def all_stats(self) -> "list[dict[str, Any]]":
-        return []
-
-
-class NullDriftMonitor:
-    """No-op drift monitor for use in unit tests.
-
-    Satisfies :class:`DriftMonitorProtocol` without requiring tmux or
-    filesystem access.  All query methods return empty results.
-
-    Reference: Fowler "Refactoring" (1999) — Null Object pattern;
-    DESIGN.md §10.N (v1.0.14 — orchestrator full DI).
-    """
-
-    def start(self) -> None:  # noqa: D401
-        """No-op."""
-
-    def stop(self) -> None:  # noqa: D401
-        """No-op."""
-
-    def get_drift_stats(self, agent_id: str) -> "dict[str, Any] | None":
-        return None
-
-    def all_drift_stats(self) -> "list[dict[str, Any]]":
-        return []
+# ContextMonitorProtocol, DriftMonitorProtocol, NullContextMonitor, NullDriftMonitor
+# are now defined in tmux_orchestrator.application.monitor_protocols and imported above.
+# They are re-exported from this module for backward compatibility.
+# DESIGN.md §10.N (v1.0.15 — application/ layer extraction, Strangler Fig pattern).
 
 
 class Orchestrator:
