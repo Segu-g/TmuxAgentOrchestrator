@@ -1283,25 +1283,26 @@ def create_app(
 
     @app.post(
         "/agents/{agent_id}/task-complete",
-        summary="Signal that an agent's current task is complete (called by Stop hook)",
+        summary="Signal task completion (explicit) or nudge agent (Stop hook)",
         dependencies=[Depends(auth)],
     )
     async def agent_task_complete(agent_id: str, request: Request, task_id: str | None = None) -> dict:
-        """Receive task-complete notification from Claude Code's Stop hook.
+        """Handle task-complete signal from agent or Stop hook nudge from Claude Code.
 
-        This endpoint is called by the ``Stop`` hook configured in
-        ``.claude/settings.local.json`` when Claude finishes responding.  It
-        provides deterministic completion detection as an alternative to the
-        500 ms output-polling fallback.
+        Two call sources are distinguished by the request body:
 
-        Request body (optional JSON):
-        ``{"output": "...", "exit_code": 0}``
+        **Explicit** ``/task-complete`` slash command (body has no ``stop_hook_active`` key):
+        - Completes the current task via ``handle_output()``.
+        - Returns ``{"status": "ok"}``.
+        - Body: ``{"output": "<one-line summary>"}``
 
-        The ``output`` field is passed to :meth:`~Agent.handle_output` which
-        publishes a RESULT message on the bus and transitions the agent to IDLE.
-
-        Returns:
-        ``{"status": "ok"}``
+        **Claude Code Stop hook** (body contains ``stop_hook_active`` key):
+        - ``stop_hook_active=True``: Claude is mid-tool-call continuation — skip entirely.
+          Returns ``{"status": "skipped", "reason": "stop_hook_active"}``.
+        - ``stop_hook_active=False``: Claude finished a response turn but the agent has
+          not called ``/task-complete`` → send a nudge via ``notify_stdin``.
+          Returns ``{"status": "nudged"}``.
+          The task remains open; only an explicit call can complete it.
 
         HTTP error codes:
         - 404: agent not found
@@ -1309,7 +1310,7 @@ def create_app(
 
         Design references:
         - Claude Code Hooks Reference https://code.claude.com/docs/en/hooks (2025)
-        - DESIGN.md §10.12 (v0.38.0)
+        - DESIGN.md §10.latest (v1.0.x Stop hook / NudgingStrategy)
         """
         from tmux_orchestrator.agents.base import AgentStatus
 
@@ -1337,27 +1338,55 @@ def create_app(
             )
             return {"status": "skipped", "reason": "task_id_mismatch"}
 
-        # Parse optional body sent by the Stop hook.
-        # Claude Code sends: {"stop_hook_active": bool, "last_assistant_message": str, ...}
+        # Parse optional body.
+        # Claude Code Stop hook sends: {"stop_hook_active": bool, "last_assistant_message": str, ...}
+        # Explicit /task-complete slash command sends: {"output": "<summary>"}
+        #
+        # The presence of the "stop_hook_active" key distinguishes the two sources:
+        #   - Key present  → came from Stop hook → nudge the agent (never complete the task).
+        #   - Key absent   → explicit /task-complete call → complete the task.
+        #
+        # This ensures the Stop hook is purely a nudge trigger, never a task-completion trigger.
+        # Reference: DESIGN.md §10.latest (v1.0.x Stop hook / NudgingStrategy)
+        nudge_requested = False
         output = ""
         try:
             body = await request.json()
-            # stop_hook_active=true means Claude is in a hook-initiated continuation
-            # (not a genuine task completion) — skip to avoid false completions.
-            if body.get("stop_hook_active"):
-                return {"status": "skipped", "reason": "stop_hook_active"}
-            # Prefer the authoritative last_assistant_message over pane-scraped output.
-            output = (
-                body.get("last_assistant_message")
-                or body.get("output")
-                or ""
-            )
+            if "stop_hook_active" in body:
+                # Came from Stop hook.
+                if body.get("stop_hook_active"):
+                    # stop_hook_active=True → Claude is mid-tool-call continuation → skip entirely.
+                    return {"status": "skipped", "reason": "stop_hook_active"}
+                # stop_hook_active=False → Claude finished a response turn but task still open.
+                nudge_requested = True
+            else:
+                # Explicit /task-complete call.
+                output = (
+                    body.get("last_assistant_message")
+                    or body.get("output")
+                    or ""
+                )
         except Exception:  # noqa: BLE001
-            pass  # body is optional; empty output is fine
+            pass  # body is optional; treat as explicit call with empty output
+
+        if nudge_requested:
+            task_id_prefix = agent._current_task.id[:8] if agent._current_task else "?"
+            nudge = (
+                f"__ORCHESTRATOR__: Your task is still open (task_id={task_id_prefix}). "
+                "If all work is complete and artefacts are committed, call:\n"
+                "    /task-complete <one-line summary>\n"
+                "If you still have work to do, please continue."
+            )
+            await agent.notify_stdin(nudge)
+            logger.info(
+                "Agent %s: Stop hook fired — nudge sent (task still open)",
+                agent_id,
+            )
+            return {"status": "nudged"}
 
         await agent.handle_output(output)
         logger.info(
-            "Agent %s task-complete received via Stop hook (task_id=%s)",
+            "Agent %s task-complete received via explicit signal (task_id=%s)",
             agent_id,
             agent._current_task.id if agent._current_task else "unknown",
         )

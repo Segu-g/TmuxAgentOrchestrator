@@ -5,15 +5,18 @@ worktree setup, and context engineering.
 
 Two strategies are provided:
 
-- ``StopHookStrategy``   — DEPRECATED (internal use / tests only).  Formerly
-  used for worker agents: writes a Claude Code Stop hook that fires an HTTP
-  POST to the orchestrator after each Claude response.  The Stop hook fires
-  after every *response turn*, not when all task work is done — using it as
-  a proxy for task completion was semantically incorrect.
-- ``ExplicitSignalStrategy`` — universal strategy for ALL agent roles.  The
-  agent must call ``POST /agents/{id}/task-complete`` (or the ``/task-complete``
-  slash command) explicitly once ALL task work is finished.  This correctly
-  handles multi-turn agents (Directors and Workers alike).
+- ``StopHookStrategy``      — DEPRECATED (internal use / tests only).  Writes a
+  Claude Code Stop hook; formerly used as a completion trigger which was
+  semantically wrong (fires after every response turn, not on task completion).
+- ``NudgingStrategy``       — WORKER strategy.  Writes the Stop hook so the
+  endpoint receives a callback when Claude finishes each response turn.  The
+  endpoint detects the Stop hook source by the presence of ``stop_hook_active``
+  in the request body and sends a nudge via ``notify_stdin`` instead of
+  completing the task.  Task completion still requires an explicit
+  ``/task-complete`` call.
+- ``ExplicitSignalStrategy`` — DIRECTOR strategy.  No Stop hook is written.
+  The task ends only when the agent calls ``POST /agents/{id}/task-complete``
+  with a body that does **not** contain ``stop_hook_active``.
 
 Usage inside ``ClaudeCodeAgent``::
 
@@ -269,14 +272,12 @@ class StopHookStrategy(CompletionStrategy):
 class ExplicitSignalStrategy(CompletionStrategy):
     """Completion only via an explicit ``POST /agents/{id}/task-complete`` call.
 
-    Used for ALL agent roles (both Workers and Directors).  Agents must call
-    the ``/task-complete`` slash command (or the REST endpoint directly) once
-    ALL task work is finished and artefacts are committed.
+    Used for DIRECTOR agents.  Directors must call the ``/task-complete``
+    slash command (or the REST endpoint directly) once ALL task work is
+    finished and artefacts are committed.
 
     This is the correct semantic: task completion is a deliberate signal from
-    the agent, not an automatic side-effect of a Claude response ending.  A
-    worker may need multiple response turns (tool calls, multi-step
-    implementation) before its task is genuinely done.
+    the agent, not an automatic side-effect of a Claude response ending.
 
     The Stop hook (``StopHookStrategy``) is not used — it fires after every
     response turn, which causes false completions for multi-turn work.
@@ -285,48 +286,61 @@ class ExplicitSignalStrategy(CompletionStrategy):
     async def wait(self, agent: _AgentLike, task: "Task") -> None:
         """Spin until ``_current_task`` is cleared by an explicit signal.
 
-        While waiting, the pane is polled to detect when the agent has gone
-        idle (output settled at a recognised prompt) without calling
-        ``/task-complete``.  In that case a single nudge message is injected
-        into the pane reminding the agent to call ``/task-complete`` if all
-        work is done, or to continue if not.
-
-        The nudge is sent **at most once per settle period**: after a nudge is
-        sent the flag is reset only if the pane becomes active again (output
-        changes), preventing repeated spamming.
+        This is a pure spin-wait: no pane polling, no nudge injection.
+        The task ends only when ``POST /agents/{id}/task-complete`` is called
+        without a ``stop_hook_active`` key in the request body.
         """
-        settle = 0
-        prev = ""
-        nudge_sent = False
         while True:
             await asyncio.sleep(_POLL_INTERVAL)
             if agent._current_task is None or agent._current_task.id != task.id:
                 return
-            loop = asyncio.get_running_loop()
-            text = await loop.run_in_executor(
-                None, agent._tmux.capture_pane, agent.pane
-            )
-            if text != prev:
-                settle = 0
-                prev = text
-                nudge_sent = False  # agent became active again — reset nudge flag
-            else:
-                settle += 1
-            if settle >= _SETTLE_CYCLES and looks_done(text) and not nudge_sent:
-                nudge_sent = True
-                settle = 0  # reset so we don't re-nudge immediately
-                nudge = (
-                    f"__ORCHESTRATOR__: Your task is still open "
-                    f"(task_id={task.id[:8]}). "
-                    "If all work is complete and artefacts are committed, call:\n"
-                    "    /task-complete <one-line summary>\n"
-                    "If you still have work to do, please continue."
-                )
-                logger.info(
-                    "Agent %s: pane idle but task not complete — sending nudge",
-                    agent.id,
-                )
-                await agent.notify_stdin(nudge)
+
+
+# ---------------------------------------------------------------------------
+# Worker strategy: Stop hook as nudge trigger + explicit signal for completion
+# ---------------------------------------------------------------------------
+
+
+class NudgingStrategy(CompletionStrategy):
+    """Completion via explicit ``/task-complete``; Stop hook used as a nudge trigger.
+
+    Used for WORKER agents.  Writes ``.claude/settings.local.json`` so the
+    Stop hook fires when Claude finishes a response turn.  The web endpoint
+    (``POST /agents/{id}/task-complete``) detects Stop hook calls by the
+    presence of ``stop_hook_active`` in the request body and sends a nudge
+    via ``notify_stdin`` instead of completing the task.
+
+    Task completion only happens when the agent explicitly calls
+    ``/task-complete`` — i.e., when the endpoint receives a request body that
+    does **not** contain the ``stop_hook_active`` key.
+
+    The ``wait()`` method is a pure spin-wait, identical to
+    ``ExplicitSignalStrategy``.  All nudge logic lives in the web endpoint.
+    """
+
+    def __init__(self, agent_id: str, web_base_url: str) -> None:
+        self._hook = StopHookStrategy(agent_id, web_base_url)
+
+    def on_start(self, cwd: Path) -> None:
+        self._hook.on_start(cwd)
+
+    def on_task_dispatch(self, cwd: Path, task_id: str) -> None:
+        self._hook.on_task_dispatch(cwd, task_id)
+
+    def on_stop(self, cwd: Path) -> None:
+        self._hook.on_stop(cwd)
+
+    async def wait(self, agent: _AgentLike, task: "Task") -> None:
+        """Spin until ``_current_task`` is cleared by an explicit signal.
+
+        The Stop hook fires when Claude finishes a response; this is handled
+        by the web endpoint which sends a nudge.  This method simply waits for
+        the explicit ``/task-complete`` signal.
+        """
+        while True:
+            await asyncio.sleep(_POLL_INTERVAL)
+            if agent._current_task is None or agent._current_task.id != task.id:
+                return
 
 
 # ---------------------------------------------------------------------------
@@ -341,10 +355,18 @@ def make_completion_strategy(
 ) -> CompletionStrategy:
     """Return the appropriate ``CompletionStrategy`` for the given agent role.
 
-    All roles — both WORKER and DIRECTOR — now use ``ExplicitSignalStrategy``.
-    Agents must call ``/task-complete`` explicitly when all task work is done.
+    - **WORKER** → ``NudgingStrategy``: writes the Stop hook so the endpoint
+      can nudge the agent when Claude goes idle without calling ``/task-complete``.
+    - **DIRECTOR** → ``ExplicitSignalStrategy``: no Stop hook; completion is
+      purely via the explicit ``/task-complete`` slash command.
 
-    ``StopHookStrategy`` is kept for backwards-compatibility and direct testing
-    but is no longer instantiated by this factory.
+    In both cases the Stop hook is **never** used to complete a task — it only
+    triggers a nudge (for workers).  Task completion always requires an
+    explicit ``POST /agents/{id}/task-complete`` call whose body does not
+    contain the ``stop_hook_active`` key.
     """
+    from tmux_orchestrator.config import AgentRole
+
+    if role == AgentRole.WORKER:
+        return NudgingStrategy(agent_id, web_base_url)
     return ExplicitSignalStrategy()

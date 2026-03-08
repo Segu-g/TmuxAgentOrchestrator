@@ -23,6 +23,7 @@ import pytest
 from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent
 from tmux_orchestrator.agents.completion import (
     ExplicitSignalStrategy,
+    NudgingStrategy,
     StopHookStrategy,
     make_completion_strategy,
 )
@@ -348,13 +349,15 @@ async def test_task_complete_endpoint_body_optional(client, mock_orchestrator) -
 
 
 @pytest.mark.asyncio
-async def test_start_does_not_write_stop_hook_settings(tmp_path: Path) -> None:
-    """ClaudeCodeAgent.start() must NOT write .claude/settings.local.json.
+async def test_worker_start_writes_stop_hook_settings(tmp_path: Path) -> None:
+    """ClaudeCodeAgent (WORKER role) start() must write .claude/settings.local.json.
 
-    All agents (Worker and Director) now use ExplicitSignalStrategy — they signal
-    task completion via /task-complete, not via the Stop hook.  The settings file
-    must not be created so that no stale hooks interfere with completion detection.
+    WORKER agents use NudgingStrategy, which writes the Stop hook so the
+    endpoint can nudge the agent when Claude finishes a response turn without
+    calling /task-complete.
     """
+    from tmux_orchestrator.config import AgentRole
+
     bus = make_bus()
     tmux = make_tmux_mock()
 
@@ -367,6 +370,42 @@ async def test_start_does_not_write_stop_hook_settings(tmp_path: Path) -> None:
         tmux=tmux,
         worktree_manager=wm,
         web_base_url="http://localhost:8000",
+        role=AgentRole.WORKER,
+    )
+
+    with patch.object(agent, "_wait_for_ready", new_callable=AsyncMock):
+        await agent.start()
+
+    settings_path = tmp_path / ".claude" / "settings.local.json"
+    assert settings_path.exists(), (
+        "start() must write .claude/settings.local.json for WORKER — "
+        "NudgingStrategy uses the Stop hook as a nudge trigger"
+    )
+
+    await agent.stop()
+
+
+@pytest.mark.asyncio
+async def test_director_start_does_not_write_stop_hook_settings(tmp_path: Path) -> None:
+    """ClaudeCodeAgent (DIRECTOR role) start() must NOT write .claude/settings.local.json.
+
+    DIRECTOR agents use ExplicitSignalStrategy — no Stop hook is registered.
+    """
+    from tmux_orchestrator.config import AgentRole
+
+    bus = make_bus()
+    tmux = make_tmux_mock()
+
+    wm = MagicMock()
+    wm.setup = MagicMock(return_value=tmp_path)
+
+    agent = ClaudeCodeAgent(
+        agent_id="director-agent",
+        bus=bus,
+        tmux=tmux,
+        worktree_manager=wm,
+        web_base_url="http://localhost:8000",
+        role=AgentRole.DIRECTOR,
     )
 
     with patch.object(agent, "_wait_for_ready", new_callable=AsyncMock):
@@ -374,7 +413,7 @@ async def test_start_does_not_write_stop_hook_settings(tmp_path: Path) -> None:
 
     settings_path = tmp_path / ".claude" / "settings.local.json"
     assert not settings_path.exists(), (
-        "start() must NOT write .claude/settings.local.json — "
+        "start() must NOT write .claude/settings.local.json for DIRECTOR — "
         "ExplicitSignalStrategy does not use the Stop hook"
     )
 
@@ -382,12 +421,10 @@ async def test_start_does_not_write_stop_hook_settings(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_stop_hook_settings_absent_before_and_after_stop(tmp_path: Path) -> None:
-    """No Stop hook settings file should exist before or after stop().
+async def test_worker_stop_removes_stop_hook_settings(tmp_path: Path) -> None:
+    """WORKER stop() must remove .claude/settings.local.json written by start()."""
+    from tmux_orchestrator.config import AgentRole
 
-    Since ExplicitSignalStrategy never writes .claude/settings.local.json,
-    neither start() nor stop() should create or remove it.
-    """
     bus = make_bus()
     tmux = make_tmux_mock()
 
@@ -400,6 +437,7 @@ async def test_stop_hook_settings_absent_before_and_after_stop(tmp_path: Path) -
         tmux=tmux,
         worktree_manager=wm,
         web_base_url="http://localhost:8000",
+        role=AgentRole.WORKER,
     )
 
     settings_path = tmp_path / ".claude" / "settings.local.json"
@@ -407,11 +445,11 @@ async def test_stop_hook_settings_absent_before_and_after_stop(tmp_path: Path) -
     with patch.object(agent, "_wait_for_ready", new_callable=AsyncMock):
         await agent.start()
 
-    assert not settings_path.exists(), "settings file must not exist after start()"
+    assert settings_path.exists(), "settings file must exist after start()"
 
     await agent.stop()
 
-    assert not settings_path.exists(), "settings file must not exist after stop()"
+    assert not settings_path.exists(), "stop() must remove settings file"
 
 
 # ---------------------------------------------------------------------------
@@ -444,18 +482,21 @@ async def test_task_complete_skips_when_stop_hook_active(
     mock_agent.handle_output.assert_not_awaited()
 
 
-async def test_task_complete_uses_last_assistant_message(
+async def test_task_complete_stop_hook_false_sends_nudge(
     client, mock_orchestrator
 ) -> None:
-    """last_assistant_message must be preferred over 'output' field."""
+    """stop_hook_active=False means Claude finished a response turn — must send nudge, NOT complete."""
     from tmux_orchestrator.agents.base import AgentStatus
 
     mock_agent = MagicMock()
     mock_agent.status = AgentStatus.BUSY
-    mock_agent._current_task = MagicMock(id="task-y")
+    mock_task = MagicMock()
+    mock_task.id = "task-y-1234abcd"
+    mock_agent._current_task = mock_task
     mock_agent.id = "worker-msg"
     mock_agent.bus = mock_orchestrator.bus
     mock_agent.handle_output = AsyncMock()
+    mock_agent.notify_stdin = AsyncMock()
     mock_orchestrator._agents["worker-msg"] = mock_agent
 
     resp = await client.post(
@@ -464,11 +505,41 @@ async def test_task_complete_uses_last_assistant_message(
         json={
             "stop_hook_active": False,
             "last_assistant_message": "Here is the result.",
-            "output": "should be ignored",
         },
     )
     assert resp.status_code == 200
-    mock_agent.handle_output.assert_awaited_once_with("Here is the result.")
+    data = resp.json()
+    assert data["status"] == "nudged"
+    # Must send nudge, NOT complete the task
+    mock_agent.notify_stdin.assert_awaited_once()
+    nudge_text = mock_agent.notify_stdin.call_args[0][0]
+    assert "__ORCHESTRATOR__" in nudge_text
+    assert "/task-complete" in nudge_text
+    mock_agent.handle_output.assert_not_awaited()
+
+
+async def test_task_complete_explicit_uses_output_field(
+    client, mock_orchestrator
+) -> None:
+    """Explicit /task-complete (no stop_hook_active key) must use 'output' field."""
+    from tmux_orchestrator.agents.base import AgentStatus
+
+    mock_agent = MagicMock()
+    mock_agent.status = AgentStatus.BUSY
+    mock_agent._current_task = MagicMock(id="task-y")
+    mock_agent.id = "worker-explicit"
+    mock_agent.bus = mock_orchestrator.bus
+    mock_agent.handle_output = AsyncMock()
+    mock_orchestrator._agents["worker-explicit"] = mock_agent
+
+    resp = await client.post(
+        "/agents/worker-explicit/task-complete",
+        headers={"X-API-Key": _API_KEY},
+        json={"output": "Task finished successfully."},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+    mock_agent.handle_output.assert_awaited_once_with("Task finished successfully.")
 
 
 async def test_task_complete_falls_back_to_output_field(
@@ -545,28 +616,37 @@ async def test_task_complete_accepts_matching_task_id(client, mock_orchestrator)
 # ---------------------------------------------------------------------------
 
 
-def test_make_completion_strategy_returns_explicit_signal_for_all_roles(tmp_path: Path) -> None:
-    """make_completion_strategy() returns ExplicitSignalStrategy for all roles.
+def test_make_completion_strategy_returns_correct_strategy_per_role(tmp_path: Path) -> None:
+    """make_completion_strategy() returns NudgingStrategy for WORKER, ExplicitSignalStrategy for DIRECTOR.
 
-    All agents — Workers and Directors alike — now signal task completion
-    explicitly via /task-complete.  The Stop hook is no longer used as a
-    completion trigger (it fires after every response turn, not on actual
-    task completion).  No .claude/settings.local.json must be written.
+    - WORKER: NudgingStrategy writes .claude/settings.local.json (Stop hook as nudge trigger).
+    - DIRECTOR: ExplicitSignalStrategy — no settings file written; purely explicit signal.
     """
     from tmux_orchestrator.config import AgentRole
 
-    for role in (AgentRole.DIRECTOR, AgentRole.WORKER):
-        strategy = make_completion_strategy(role, "agent-x", "http://localhost:9000")
-        assert isinstance(strategy, ExplicitSignalStrategy), (
-            f"Expected ExplicitSignalStrategy for role={role}, got {type(strategy)}"
-        )
+    worker_strategy = make_completion_strategy(AgentRole.WORKER, "agent-w", "http://localhost:9000")
+    assert isinstance(worker_strategy, NudgingStrategy), (
+        f"Expected NudgingStrategy for WORKER, got {type(worker_strategy)}"
+    )
 
-        role_tmp = tmp_path / role.value
-        role_tmp.mkdir()
-        strategy.on_start(role_tmp)
-        assert not (role_tmp / ".claude" / "settings.local.json").exists(), (
-            f"ExplicitSignalStrategy must NOT create stop hook settings for role={role}"
-        )
+    worker_tmp = tmp_path / "worker"
+    worker_tmp.mkdir()
+    worker_strategy.on_start(worker_tmp)
+    assert (worker_tmp / ".claude" / "settings.local.json").exists(), (
+        "NudgingStrategy must write Stop hook settings for WORKER role"
+    )
+
+    director_strategy = make_completion_strategy(AgentRole.DIRECTOR, "agent-d", "http://localhost:9000")
+    assert isinstance(director_strategy, ExplicitSignalStrategy), (
+        f"Expected ExplicitSignalStrategy for DIRECTOR, got {type(director_strategy)}"
+    )
+
+    director_tmp = tmp_path / "director"
+    director_tmp.mkdir()
+    director_strategy.on_start(director_tmp)
+    assert not (director_tmp / ".claude" / "settings.local.json").exists(), (
+        "ExplicitSignalStrategy must NOT write Stop hook settings for DIRECTOR role"
+    )
 
 
 @pytest.mark.asyncio

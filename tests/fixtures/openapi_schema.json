@@ -1649,7 +1649,7 @@
     },
     "/agents/{agent_id}/task-complete": {
       "post": {
-        "description": "Receive task-complete notification from Claude Code's Stop hook.\n\nThis endpoint is called by the ``Stop`` hook configured in\n``.claude/settings.local.json`` when Claude finishes responding.  It\nprovides deterministic completion detection as an alternative to the\n500 ms output-polling fallback.\n\nRequest body (optional JSON):\n``{\"output\": \"...\", \"exit_code\": 0}``\n\nThe ``output`` field is passed to :meth:`~Agent.handle_output` which\npublishes a RESULT message on the bus and transitions the agent to IDLE.\n\nReturns:\n``{\"status\": \"ok\"}``\n\nHTTP error codes:\n- 404: agent not found\n- 409: agent is not in BUSY state (no active task to complete)\n\nDesign references:\n- Claude Code Hooks Reference https://code.claude.com/docs/en/hooks (2025)\n- DESIGN.md \u00a710.12 (v0.38.0)",
+        "description": "Handle task-complete signal from agent or Stop hook nudge from Claude Code.\n\nTwo call sources are distinguished by the request body:\n\n**Explicit** ``/task-complete`` slash command (body has no ``stop_hook_active`` key):\n- Completes the current task via ``handle_output()``.\n- Returns ``{\"status\": \"ok\"}``.\n- Body: ``{\"output\": \"<one-line summary>\"}``\n\n**Claude Code Stop hook** (body contains ``stop_hook_active`` key):\n- ``stop_hook_active=True``: Claude is mid-tool-call continuation \u2014 skip entirely.\n  Returns ``{\"status\": \"skipped\", \"reason\": \"stop_hook_active\"}``.\n- ``stop_hook_active=False``: Claude finished a response turn but the agent has\n  not called ``/task-complete`` \u2192 send a nudge via ``notify_stdin``.\n  Returns ``{\"status\": \"nudged\"}``.\n  The task remains open; only an explicit call can complete it.\n\nHTTP error codes:\n- 404: agent not found\n- 409: agent is not in BUSY state (no active task to complete)\n\nDesign references:\n- Claude Code Hooks Reference https://code.claude.com/docs/en/hooks (2025)\n- DESIGN.md \u00a710.latest (v1.0.x Stop hook / NudgingStrategy)",
         "operationId": "agent_task_complete_agents__agent_id__task_complete_post",
         "parameters": [
           {
@@ -1702,7 +1702,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Signal that an agent's current task is complete (called by Stop hook)"
+        "summary": "Signal task completion (explicit) or nudge agent (Stop hook)"
       }
     },
     "/agents/{agent_id}/worktree-status": {
