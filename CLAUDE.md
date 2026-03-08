@@ -70,7 +70,7 @@ pytest
 
 - **Bus** (`bus.py`): async pub/sub; `to_id="*"` = broadcast; `broadcast=True` subscriber receives all messages regardless of `to_id`. Used by web hub and TUI.
 - **Orchestrator** (`orchestrator.py`): `asyncio.PriorityQueue` for tasks; polls for idle agents every 0.2 s; P2P permission table is a `Set[frozenset[str]]`.
-- **ClaudeCodeAgent**: launches `claude --dangerously-skip-permissions` (with `CLAUDECODE` stripped so it works inside a Claude Code session); waits for the initial `❯` prompt (`_wait_for_ready`) before marking IDLE; sends task via `send_keys`; polls pane output every 500 ms; declares completion when output settles for 3 consecutive cycles and matches a prompt pattern (`❯`, `$`, `>`, or `Human:`).
+- **ClaudeCodeAgent**: launches `claude --dangerously-skip-permissions` (with `CLAUDECODE` stripped so it works inside a Claude Code session); waits for the initial `❯` prompt (`_wait_for_ready`) before marking IDLE; sends task via `send_keys`; completion is explicit — Worker agents call `/task-complete` (Stop hook fires on each response turn and nudges if not called); Director agents call `POST /agents/{id}/task-complete` directly.
 - **Web UI**: single-page HTML served from `GET /`; auto-reconnecting WebSocket at `ws://host/ws`; polls REST endpoints every 3 s for agent/task table refresh.
 
 ## Autonomous Development Loop
@@ -414,14 +414,26 @@ Retrieve it with `/check-inbox` → `/read-message`, then delegate with `/send-m
 
 ### Task Completion
 
-The orchestrator detects task completion by polling your pane output. It declares you done when the output **has not changed for 3 consecutive 500 ms polls** and the last line matches one of:
+Task completion is **always explicit** — the orchestrator never auto-detects it from pane output.
 
-- `❯` — Claude interactive prompt (current default)
-- `$` — shell prompt (any trailing whitespace is tolerated)
-- `>` — bare prompt (older Claude versions)
-- `Human:` — Claude conversation prompt
+**Worker agents** must call `/task-complete` once all work is done:
 
-Ensure your final output settles at a recognisable prompt. Do not leave the pane in the middle of streaming output when you are finished.
+```
+/task-complete <one-line summary of what was accomplished>
+```
+
+The orchestrator's Stop hook fires after each Claude response turn. If you have not called `/task-complete` by then, the orchestrator sends a nudge reminding you to either continue or signal completion. The task remains open until you explicitly call `/task-complete`.
+
+**Director agents** must call the equivalent REST endpoint:
+
+```bash
+curl -s -X POST $web_base_url/agents/$agent_id/task-complete \
+  -H "X-Api-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"output": "<one-line summary>"}'
+```
+
+In both cases, the request body must **not** contain a `stop_hook_active` key (that key is reserved for the Stop hook; its presence signals a nudge, not completion).
 
 ### Worktree Isolation
 

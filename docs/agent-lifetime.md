@@ -45,7 +45,7 @@ The orchestrator manages a registry of agents, a priority queue of pending tasks
 |---|---|---|
 | `STOPPED` | `IDLE` | `start()` completes successfully (`_wait_for_ready()` returns) |
 | `IDLE` | `BUSY` | `_run_loop()` dequeues a task and calls `_set_busy(task)` |
-| `BUSY` | `IDLE` | `handle_output()` is called (Stop hook fires or polling detects completion) → `_set_idle()` |
+| `BUSY` | `IDLE` | `handle_output()` is called (agent sends explicit `/task-complete` signal) → `_set_idle()` |
 | `BUSY` | `IDLE` | Task timeout fires → `_handle_task_timeout()` → `_set_idle()` |
 | `BUSY` | `ERROR` | Unhandled exception in `_dispatch_task()` |
 | `BUSY` | `DRAINING` | `drain_agent()` called while agent is busy |
@@ -69,7 +69,7 @@ stateDiagram-v2
     IDLE --> BUSY : _run_loop() dequeues task\n_set_busy(task)
     IDLE --> STOPPED : stop() called\n(drain or orchestrator shutdown)
 
-    BUSY --> IDLE : handle_output() → _set_idle()\n(Stop hook or polling detects done)
+    BUSY --> IDLE : handle_output() → _set_idle()\n(explicit /task-complete signal)
     BUSY --> IDLE : task timeout → _handle_task_timeout() → _set_idle()
     BUSY --> ERROR : unhandled exception in _dispatch_task()
     BUSY --> DRAINING : drain_agent() called while busy
@@ -117,7 +117,7 @@ After the worktree path is established (`cwd`), the following files are written 
 | `NOTES.md` | `_write_notes_template(cwd)` | Always, unless file already exists | Structured note-taking template. Not overwritten if the agent is being recovered/restarted into an existing worktree. |
 | context files | `_copy_context_files(cwd)` | If `context_files` is non-empty | Copies literal file paths from `context_files_root` into the worktree, preserving relative directory structure. |
 | context spec files | `_copy_context_spec_files(cwd)` | If `context_spec_files` is non-empty | Copies files matching glob patterns from `context_spec_files_root` (cold-memory specification documents). |
-| `.claude/settings.local.json` | `completion.on_start(cwd)` | Worker agents only (`StopHookStrategy`) | Stop hook configuration pointing at `POST /agents/{id}/task-complete`. Not written for Director agents (`ExplicitSignalStrategy` no-op). |
+| `.claude/settings.local.json` | `completion.on_start(cwd)` | Worker agents only (`NudgingStrategy`) | Stop hook configuration pointing at `POST /agents/{id}/task-complete`. When Claude finishes a response turn without calling `/task-complete`, the endpoint sends a nudge via `notify_stdin`. Not written for Director agents (`ExplicitSignalStrategy` — no-op). |
 | `.claude/commands/*.md` | `_copy_slash_commands(cwd)` | Always (if `src/tmux_orchestrator/commands/` exists) | Copies all bundled slash commands into `{cwd}/.claude/commands/` so they are discoverable by Claude Code in the worktree. |
 
 The Stop hook JSON written to `.claude/settings.local.json` looks like this:
@@ -221,34 +221,56 @@ async def _dispatch_task(self, task: Task) -> None:
     await self._completion.wait(self, task)
 ```
 
-`on_task_dispatch()` for `StopHookStrategy` rewrites `.claude/settings.local.json` with a task-scoped URL:
+`on_task_dispatch()` for `NudgingStrategy` rewrites `.claude/settings.local.json` with a task-scoped URL:
 
 ```
 http://localhost:8000/agents/{agent_id}/task-complete?task_id={task_id}
 ```
 
-This URL includes the `task_id` query parameter so that a stale Stop hook fired from a *previous* task carries the wrong `task_id` and is rejected by the endpoint — preventing spurious completions.
+This URL includes the `task_id` query parameter so that a stale Stop hook fired from a *previous* task carries the wrong `task_id` and is rejected by the endpoint — preventing spurious nudges.
 
 ### 4.4 Completion detection strategies
 
-Two strategies implement `CompletionStrategy.wait()`:
+Three `CompletionStrategy` classes exist. The factory `make_completion_strategy(role, ...)` selects the correct one:
 
-#### StopHookStrategy (Worker agents)
+| Role | Strategy | Stop hook written? | How task completes |
+|---|---|---|---|
+| `WORKER` | `NudgingStrategy` | Yes | Explicit `/task-complete` call only |
+| `DIRECTOR` | `ExplicitSignalStrategy` | No | Explicit `/task-complete` call only |
+| (deprecated) | `StopHookStrategy` | Yes | Polling fallback (not used in production) |
+
+Both production strategies use an identical pure spin-wait:
 
 ```
 while True:
     sleep 0.5s
-    if _current_task is None or changed:  return   # hook already fired
-    text = capture_pane()
-    if text unchanged for 3 polls AND looks_done(text):
-        # fallback: Stop hook did not fire
-        await handle_output(text)
-        return
+    if _current_task is None or changed:  return
 ```
 
-The primary path is the Stop hook. When Claude finishes a turn, Claude Code POSTs to `POST /agents/{agent_id}/task-complete?task_id={task_id}`. The REST endpoint (`agent_task_complete`) verifies the `task_id` matches `agent._current_task.id`, parses the optional `output` field from the Stop hook body, then calls `await agent.handle_output(output)`.
+No pane output is captured inside `wait()`. Task completion is **always** an explicit deliberate act by the agent.
 
-If the Stop hook never fires (server unreachable, wrong API key, misconfigured `web_base_url`), the polling fallback detects settled output matching a prompt pattern and calls `handle_output()` directly, emitting a warning.
+#### NudgingStrategy (Worker agents)
+
+`NudgingStrategy` writes `.claude/settings.local.json` so the Claude Code Stop hook fires when Claude finishes each response turn. The Stop hook POSTs to `POST /agents/{agent_id}/task-complete?task_id={task_id}` with a body that includes the `stop_hook_active` key.
+
+The endpoint (`agent_task_complete`) distinguishes call sources by the **presence** of `stop_hook_active` in the request body:
+
+| Body | Meaning | Endpoint action |
+|---|---|---|
+| `stop_hook_active=True` | Claude mid-tool-call continuation | Skip (no-op) |
+| `stop_hook_active=False` | Claude finished a response turn | **Nudge** — `notify_stdin(...)` |
+| No `stop_hook_active` key | Explicit `/task-complete` slash command | **Complete** — `handle_output(output)` |
+
+The nudge message injected into the pane:
+
+```
+__ORCHESTRATOR__: Your task is still open (task_id=<prefix>).
+If all work is complete and artefacts are committed, call:
+    /task-complete <one-line summary>
+If you still have work to do, please continue.
+```
+
+The task only completes when the agent calls the `/task-complete` slash command, which sends a POST body **without** the `stop_hook_active` key.
 
 `handle_output()` publishes a `MessageType.RESULT` on the bus and calls `_set_idle()`:
 
@@ -262,13 +284,7 @@ async def handle_output(self, text: str) -> None:
 
 #### ExplicitSignalStrategy (Director agents)
 
-```
-while True:
-    sleep 0.5s
-    if _current_task is None or changed:  return
-```
-
-No Stop hook is written; no pane polling is performed for completion. The only way to complete the task is for the Director itself to call:
+No Stop hook is written. No nudge mechanism. The only way to complete the task is for the Director to call the `/task-complete` slash command (or equivalent curl):
 
 ```bash
 curl -s -X POST http://localhost:8000/agents/{agent_id}/task-complete \
@@ -296,10 +312,18 @@ sequenceDiagram
     A->>A: _set_busy(task)
     A->>B: STATUS agent_busy
     A->>A: _dispatch_task(task)
-    A->>A: completion.on_task_dispatch(cwd, task_id)\n[updates Stop hook URL]
+    A->>A: NudgingStrategy.on_task_dispatch(cwd, task_id)\n[rewrites Stop hook URL with task_id]
     A->>P: send_keys(sanitized prompt)
-    Note over P: Claude processes task...
-    P->>W: POST /agents/{id}/task-complete?task_id={id}\n[Stop hook fires]
+    Note over P: Claude processes task (may take multiple turns)...
+
+    alt Claude finishes a turn without /task-complete
+        P->>W: POST /task-complete?task_id={id}\nbody: {stop_hook_active: false, ...}
+        W->>A: notify_stdin(nudge message)
+        Note over P: Agent reads nudge, continues or calls /task-complete
+    end
+
+    Note over P: Agent calls /task-complete slash command
+    P->>W: POST /task-complete\nbody: {output: "summary"}\n[no stop_hook_active key]
     W->>A: handle_output(output)
     A->>B: RESULT {task_id, output}
     A->>A: _set_idle()
@@ -408,7 +432,7 @@ if self.worktree_path is not None:
     self._completion.on_stop(self.worktree_path)
 ```
 
-`StopHookStrategy.on_stop(cwd)` deletes `.claude/settings.local.json` so that any in-flight Stop hook fired after shutdown does not reach a stale endpoint. `ExplicitSignalStrategy.on_stop()` is a no-op.
+`NudgingStrategy.on_stop(cwd)` (Worker) deletes `.claude/settings.local.json` so that any in-flight Stop hook fired after shutdown does not reach a stale endpoint. `ExplicitSignalStrategy.on_stop()` (Director) is a no-op.
 
 ### 7.7 Worktree teardown
 
@@ -431,9 +455,10 @@ A Director agent is created with `role=AgentRole.DIRECTOR` in `AgentConfig`. Thi
 
 ### Completion strategy
 
-`make_completion_strategy(AgentRole.DIRECTOR, ...)` returns `ExplicitSignalStrategy` instead of `StopHookStrategy`:
+`make_completion_strategy(AgentRole.DIRECTOR, ...)` returns `ExplicitSignalStrategy` instead of `NudgingStrategy`:
 - No `.claude/settings.local.json` Stop hook is written at startup.
-- Completion polling only checks whether `_current_task` has been cleared; it does not poll pane output.
+- No nudge mechanism — the Director is expected to call `/task-complete` without prompting.
+- `wait()` spins until `_current_task` is cleared; no pane output polling.
 
 ### CLAUDE.md content
 
@@ -524,7 +549,7 @@ The following `AgentConfig` fields directly affect an agent's lifetime behavior:
 | `merge_on_stop` | `bool` | `False` | When `True` and `isolate=True`: squash-merges the agent's branch into the main repo at teardown. Commits made by the agent persist after it stops. |
 | `merge_target` | `str \| None` | `None` | Branch to merge into when `merge_on_stop=True`. `None` = current HEAD. |
 | `task_timeout` | `int \| None` | `None` | Per-agent task timeout in seconds. Overrides `OrchestratorConfig.task_timeout` when set. `None` inherits the orchestrator-level default. |
-| `role` | `AgentRole` | `WORKER` | `WORKER`: uses `StopHookStrategy` (Stop hook + polling fallback). `DIRECTOR`: uses `ExplicitSignalStrategy` (explicit curl required). Also changes `CLAUDE.md` content. |
+| `role` | `AgentRole` | `WORKER` | `WORKER`: uses `NudgingStrategy` (Stop hook as nudge trigger; task completes via explicit `/task-complete`). `DIRECTOR`: uses `ExplicitSignalStrategy` (no Stop hook; explicit `/task-complete` required). Also changes `CLAUDE.md` content. |
 | `system_prompt` | `str \| None` | `None` | Additional instructions appended as a "Role-Specific Instructions" section in `CLAUDE.md`. |
 | `context_files` | `list[str]` | `[]` | Relative file paths copied from `context_files_root` into the worktree at startup. |
 | `context_spec_files` | `list[str]` | `[]` | Glob patterns expanded from `context_spec_files_root` and copied into the worktree at startup (cold-memory spec documents). |
