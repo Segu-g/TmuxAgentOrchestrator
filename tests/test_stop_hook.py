@@ -62,20 +62,20 @@ def make_tmux_mock():
 # ---------------------------------------------------------------------------
 
 
-def test_nudging_strategy_on_start_is_noop(tmp_path: Path) -> None:
-    """NudgingStrategy.on_start() must not write any files (startup is separate)."""
+def test_nudging_strategy_on_start_writes_stop_hook(tmp_path: Path) -> None:
+    """NudgingStrategy.on_start() must write settings.local.json with the Stop hook.
+
+    v1.0.26 fix: Stop hook must be written before the claude process launches so it
+    is included in Claude Code's startup snapshot.  Writing it in on_task_dispatch()
+    has no effect because Claude Code ignores settings file changes after startup.
+    """
     strategy = NudgingStrategy("worker-1", "http://localhost:9000")
     strategy.on_start(tmp_path)
-    assert not (tmp_path / ".claude" / "settings.local.json").exists()
-
-
-def test_nudging_strategy_on_task_dispatch_writes_stop_hook(tmp_path: Path) -> None:
-    """NudgingStrategy.on_task_dispatch() must write the Stop hook settings file."""
-    strategy = NudgingStrategy("worker-1", "http://localhost:9000")
-    strategy.on_task_dispatch(tmp_path, "task-abc")
 
     settings_path = tmp_path / ".claude" / "settings.local.json"
-    assert settings_path.exists()
+    assert settings_path.exists(), (
+        "on_start() must write settings.local.json so Stop hook is in the startup snapshot"
+    )
     data = json.loads(settings_path.read_text())
     assert "Stop" in data["hooks"]
 
@@ -83,7 +83,24 @@ def test_nudging_strategy_on_task_dispatch_writes_stop_hook(tmp_path: Path) -> N
     assert handler["type"] == "command"
     assert "worker-1" in handler["command"]
     assert "task-complete" in handler["command"]
-    assert "task_id=task-abc" in handler["command"]
+    # No task_id in URL — task ID unknown at startup; endpoint handles missing task_id
+    assert "task_id=" not in handler["command"]
+
+
+def test_nudging_strategy_on_task_dispatch_is_noop(tmp_path: Path) -> None:
+    """NudgingStrategy.on_task_dispatch() must not write/overwrite settings.local.json.
+
+    v1.0.26 fix: Claude Code snapshots hooks at startup and ignores subsequent
+    changes to settings files.  on_task_dispatch() writing to settings.local.json
+    after the session started had no effect.  It is now a no-op (log-only).
+    The Stop hook is written in on_start() before the claude process is launched.
+    """
+    strategy = NudgingStrategy("worker-1", "http://localhost:9000")
+    # No prior on_start() call — settings file should NOT be created by on_task_dispatch
+    strategy.on_task_dispatch(tmp_path, "task-abc")
+    assert not (tmp_path / ".claude" / "settings.local.json").exists(), (
+        "on_task_dispatch() must be a no-op (Stop hook written at on_start, not per-task)"
+    )
 
 
 def test_nudging_strategy_stop_hook_includes_api_key_in_command(tmp_path: Path) -> None:
@@ -93,7 +110,7 @@ def test_nudging_strategy_stop_hook_includes_api_key_in_command(tmp_path: Path) 
     expanded by the shell — where it is guaranteed to be present — rather than by
     Claude Code's internal HTTP hook runner which may not see pane-local env vars.
     """
-    NudgingStrategy("worker-1", "http://localhost:8000").on_task_dispatch(tmp_path, "t-1")
+    NudgingStrategy("worker-1", "http://localhost:8000").on_start(tmp_path)
     data = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
     handler = data["hooks"]["Stop"][0]["hooks"][0]
     assert handler["type"] == "command"
@@ -105,22 +122,22 @@ def test_nudging_strategy_stop_hook_includes_api_key_in_command(tmp_path: Path) 
 
 def test_nudging_strategy_stop_hook_has_timeout(tmp_path: Path) -> None:
     """Stop hook handler must include a positive integer timeout."""
-    NudgingStrategy("worker-1", "http://localhost:8000").on_task_dispatch(tmp_path, "t-1")
+    NudgingStrategy("worker-1", "http://localhost:8000").on_start(tmp_path)
     data = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
     handler = data["hooks"]["Stop"][0]["hooks"][0]
     assert isinstance(handler.get("timeout"), int) and handler["timeout"] > 0
 
 
 def test_nudging_strategy_skipped_when_no_web_base_url(tmp_path: Path) -> None:
-    """When web_base_url is empty, on_task_dispatch must not write any file."""
-    NudgingStrategy("worker-1", "").on_task_dispatch(tmp_path, "t-1")
+    """When web_base_url is empty, on_start must not write any file."""
+    NudgingStrategy("worker-1", "").on_start(tmp_path)
     assert not (tmp_path / ".claude" / "settings.local.json").exists()
 
 
 def test_nudging_strategy_on_stop_removes_settings_file(tmp_path: Path) -> None:
     """NudgingStrategy.on_stop() must remove settings.local.json."""
     strategy = NudgingStrategy("worker-1", "http://localhost:8000")
-    strategy.on_task_dispatch(tmp_path, "t-1")
+    strategy.on_start(tmp_path)
     assert (tmp_path / ".claude" / "settings.local.json").exists()
     strategy.on_stop(tmp_path)
     assert not (tmp_path / ".claude" / "settings.local.json").exists()
@@ -551,10 +568,11 @@ async def test_worker_stop_calls_on_stop_strategy(tmp_path: Path) -> None:
     with patch.object(agent, "_wait_for_ready", new_callable=AsyncMock):
         await agent.start()
 
-    # Write a fake settings.local.json as if on_task_dispatch was called
+    # on_start() now writes settings.local.json (v1.0.26 fix)
     settings_path = tmp_path / ".claude" / "settings.local.json"
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text("{}")
+    assert settings_path.exists(), (
+        "start() must write settings.local.json via NudgingStrategy.on_start()"
+    )
 
     await agent.stop()
 
@@ -835,3 +853,105 @@ async def test_wait_for_completion_returns_when_task_cleared() -> None:
 
     await asyncio.wait_for(strategy.wait(agent, task), timeout=3.0)
     agent.handle_output.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# v1.0.26 — Stop hook snapshot fix: on_start writes the file, on_task_dispatch is no-op
+# ---------------------------------------------------------------------------
+
+
+def test_stop_hook_written_in_on_start_not_on_task_dispatch(tmp_path: Path) -> None:
+    """Stop hook must be written in on_start() (before claude launches), not on_task_dispatch().
+
+    Root cause (v1.0.26): Claude Code snapshots hooks at startup and ignores subsequent
+    changes to settings files for the lifetime of the session.  Writing the Stop hook
+    in on_task_dispatch() — after claude is already running — has no effect.
+    """
+    strategy = NudgingStrategy("worker-snap", "http://localhost:8000")
+
+    settings_path = tmp_path / ".claude" / "settings.local.json"
+
+    # Before on_start: no settings file
+    assert not settings_path.exists()
+
+    # on_start writes the Stop hook (must happen before claude launches)
+    strategy.on_start(tmp_path)
+    assert settings_path.exists(), "on_start() must write settings.local.json"
+
+    data = json.loads(settings_path.read_text())
+    assert "Stop" in data["hooks"], "Stop hook must be present after on_start()"
+
+    # on_task_dispatch must NOT overwrite the file (it's already snapshotted by claude)
+    mtime_before = settings_path.stat().st_mtime
+    strategy.on_task_dispatch(tmp_path, "task-xyz")
+    mtime_after = settings_path.stat().st_mtime
+    assert mtime_after == mtime_before, (
+        "on_task_dispatch() must not modify settings.local.json "
+        "(Claude Code already snapshotted it at startup)"
+    )
+
+
+def test_stop_hook_url_has_no_task_id_query_param(tmp_path: Path) -> None:
+    """Stop hook URL written at on_start() must NOT include ?task_id=.
+
+    At on_start() time the task ID is unknown.  The endpoint already handles
+    missing task_id gracefully (skips the stale-hook check).  The stop_hook_active
+    flag in the request body is sufficient to distinguish Stop hook calls from
+    explicit /task-complete calls.
+    """
+    strategy = NudgingStrategy("worker-url", "http://localhost:8000")
+    strategy.on_start(tmp_path)
+
+    data = json.loads((tmp_path / ".claude" / "settings.local.json").read_text())
+    handler = data["hooks"]["Stop"][0]["hooks"][0]
+    command = handler["command"]
+
+    assert "task_id=" not in command, (
+        f"Stop hook URL must not include ?task_id= at startup (task unknown); got: {command!r}"
+    )
+    assert "worker-url" in command
+    assert "task-complete" in command
+
+
+@pytest.mark.asyncio
+async def test_worker_start_writes_stop_hook_settings_in_worktree(tmp_path: Path) -> None:
+    """ClaudeCodeAgent.start() must write settings.local.json in the worktree via on_start().
+
+    Verifies the end-to-end path: start() calls on_start(cwd) which writes
+    {worktree}/.claude/settings.local.json before the claude process is launched.
+    This ensures the Stop hook is included in Claude Code's startup snapshot.
+    """
+    from tmux_orchestrator.config import AgentRole
+
+    bus = make_bus()
+    tmux = make_tmux_mock()
+
+    wm = MagicMock()
+    wm.setup = MagicMock(return_value=tmp_path)
+
+    agent = ClaudeCodeAgent(
+        agent_id="snapshot-test-agent",
+        bus=bus,
+        tmux=tmux,
+        worktree_manager=wm,
+        web_base_url="http://localhost:8000",
+        role=AgentRole.WORKER,
+    )
+
+    with patch.object(agent, "_wait_for_ready", new_callable=AsyncMock):
+        await agent.start()
+
+    settings_path = tmp_path / ".claude" / "settings.local.json"
+    assert settings_path.exists(), (
+        "start() must write settings.local.json in the worktree before launching claude"
+    )
+
+    data = json.loads(settings_path.read_text())
+    assert "Stop" in data["hooks"], "Stop hook must be in settings.local.json after start()"
+    handler = data["hooks"]["Stop"][0]["hooks"][0]
+    assert handler["type"] == "command"
+    assert "snapshot-test-agent" in handler["command"]
+    assert "task-complete" in handler["command"]
+    assert "task_id=" not in handler["command"]
+
+    await agent.stop()

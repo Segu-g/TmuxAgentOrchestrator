@@ -728,6 +728,59 @@ AI エージェントにとって TDD は「ガードレール」として機能
 
 ## 10. 調査記録
 
+### 10.25 v1.0.26 — Stop Hook 不発火の根本原因調査・修正
+
+#### 選定理由
+
+**選択: Stop Hook 不発火の根本原因調査・修正 (v1.0.26)**
+
+v1.0.23 以降、デモで Stop Hook が間欠的に不発火となり、エージェントが watchdog タイムアウトまで `❯` プロンプトで停止し続ける問題が継続している。v1.0.24 および v1.0.25 では「手動 nudge」ワークアラウンドで回避していたが、根本原因を修正しないと信頼性の低いデモが続く。本イテレーションでこの問題を確実に解決する。
+
+**選択しなかった候補:**
+- チェックポイント永続化 (SQLite): 実装規模が大きく本イテレーションには不適。
+- `ProcessPort` 抽象インターフェース: テスト基盤の全面改修が必要で規模が大きい。
+- OpenTelemetry GenAI Semantic Conventions: 外部インフラ依存が増えデモが複雑化する。
+
+#### 根本原因 (確定)
+
+**Claude Code はセッション起動時にフックのスナップショットを取り、セッション中は外部からの設定ファイル変更を無視する。**
+
+公式ドキュメント (hooks reference, 2025) の明言:
+> "Direct edits to hooks in settings files don't take effect immediately. Claude Code captures a snapshot of hooks at startup and uses it throughout the session. This prevents malicious or accidental hook modifications from taking effect mid-session without your review."
+
+現状の `NudgingStrategy.on_task_dispatch()` は `settings.local.json` を claude プロセス起動後に書き込んでいたため、スナップショット後の変更として無視されていた。
+
+#### 修正方針
+
+Stop hook 設定を `on_start()` (claude プロセス起動前) に書き込むよう変更。task_id は URL に含めず (起動前は不明のため)、エンドポイント側の既存 null 許容処理で対応。`on_task_dispatch()` は no-op (ログのみ) とする。
+
+**References**:
+- "Hooks reference - Claude Code Docs", https://code.claude.com/docs/en/hooks (2025)
+- "Stop hook not fired when Claude stalls mid-turn after tool result", anthropics/claude-code Issue #29881, https://github.com/anthropics/claude-code/issues/29881
+- "Stop hook crashes in git worktrees: transcript path not found", thedotmack/claude-mem Issue #1234, https://github.com/thedotmack/claude-mem/issues/1234
+
+#### 実装結果 (v1.0.26)
+
+**デモ結果**: 15/15 checks PASSED (2026-03-09)
+
+**実装内容**:
+- `NudgingStrategy.on_start()`: Stop hook を claude 起動前に書き込む（スナップショット前）
+- `NudgingStrategy.on_task_dispatch()`: no-op（ログのみ）— スナップショット後の変更は無効
+- `tests/test_stop_hook.py` — 3新規テスト追加、既存テスト2件を修正
+- 総テスト数: **1444 tests** 全通過
+
+**デモパターン**: 並列2エージェント — agent-a と agent-b が独立してファイルを書き、Stop hook → nudge → `/task-complete` で完了
+- agent-a: 15.7s で完了 (watchdog 900s 以内)
+- agent-b: 21.8s で完了 (watchdog 900s 以内)
+- 手動 nudge ワークアラウンド不要 — Stop hook が自律的に発火
+
+**デモの主な知見**:
+- `task-complete received via explicit signal (task_id=unknown)` ログは期待動作。Stop hook URL に task_id なしのため、endpoint 側で `stop_hook_active=False` → nudge → explicit `/task-complete` の正常パス。
+- task_id スコーピング（`?task_id=<id>`）は廃止されたが、`stop_hook_active` フラグによる区別で代替。
+- "silent tool stop" (Issue #29881) は本修正の対象外。watchdog による回収で対処。
+
+---
+
 ### 10.24 v1.0.25 — POST /workflows/socratic — ソクラテス的対話ワークフロー
 
 #### 選定理由

@@ -186,9 +186,9 @@ def _write_settings(cwd: Path, settings: dict) -> None:
 class NudgingStrategy(CompletionStrategy):
     """Completion via explicit ``/task-complete``; Stop hook used as a nudge trigger.
 
-    Used for WORKER agents.  On task dispatch, writes
-    ``.claude/settings.local.json`` so the Stop hook fires when Claude
-    finishes a response turn.  The web endpoint
+    Used for WORKER agents.  On agent **start** (before the ``claude`` process
+    is launched), writes ``.claude/settings.local.json`` so that Claude Code
+    includes the Stop hook in its startup snapshot.  The web endpoint
     (``POST /agents/{id}/task-complete``) detects Stop hook calls by the
     presence of ``stop_hook_active`` in the request body and sends a nudge
     via ``notify_stdin`` instead of completing the task.
@@ -197,9 +197,27 @@ class NudgingStrategy(CompletionStrategy):
     ``/task-complete`` — i.e., when the endpoint receives a request body that
     does **not** contain the ``stop_hook_active`` key.
 
+    **Why on_start() instead of on_task_dispatch()** (v1.0.26 fix):
+    Claude Code captures a snapshot of all hooks in ``settings.local.json`` at
+    session startup and ignores subsequent changes to that file for the
+    lifetime of the session (security measure documented in the official hooks
+    reference: "Direct edits to hooks in settings files don't take effect
+    immediately.  Claude Code captures a snapshot of hooks at startup and uses
+    it throughout the session.").  Writing the Stop hook in ``on_task_dispatch()``
+    — after ``claude`` is already running — therefore has no effect.  The hook
+    must be written before the ``claude`` process is launched so it is included
+    in the startup snapshot.
+
+    Because ``on_start()`` is called before the first task is dispatched, the
+    Stop hook URL cannot include a ``?task_id=`` parameter (the task ID is not
+    yet known).  The ``/agents/{id}/task-complete`` endpoint gracefully handles
+    calls without a ``task_id`` query parameter by skipping the stale-hook check,
+    which is acceptable because the ``stop_hook_active`` flag in the request body
+    already ensures the Stop hook path (nudge-only) is correctly distinguished
+    from the explicit ``/task-complete`` path (task completion).
+
     Note: startup detection is handled separately via the ``SessionStart``
-    hook written by ``ClaudeCodeAgent._write_startup_hook()``, not here.
-    ``on_start()`` is therefore a no-op.
+    hook in the agent plugin loaded via ``--plugin-dir``, not here.
 
     The ``wait()`` method is a pure spin-wait, identical to
     ``ExplicitSignalStrategy``.  All nudge logic lives in the web endpoint.
@@ -209,22 +227,35 @@ class NudgingStrategy(CompletionStrategy):
         self._agent_id = agent_id
         self._web_base_url = web_base_url
 
-    def on_task_dispatch(self, cwd: Path, task_id: str) -> None:
-        """Write Stop hook settings with a task-scoped URL.
+    def on_start(self, cwd: Path) -> None:
+        """Write Stop hook settings before the ``claude`` process is launched.
 
-        The ``?task_id=<id>`` parameter ensures stale hooks from a previous
-        task are rejected by the endpoint.
+        Writing here ensures the Stop hook is included in Claude Code's startup
+        snapshot, so it fires correctly when Claude finishes each response turn.
+        The URL does not include ``?task_id=`` because the task ID is unknown at
+        startup; the endpoint handles missing task_id by skipping the stale-hook
+        check and distinguishing Stop hook calls via the ``stop_hook_active`` field.
         """
         if not self._web_base_url:
             return
-        url = (
-            f"{self._web_base_url}/agents/{self._agent_id}"
-            f"/task-complete?task_id={task_id}"
-        )
+        url = f"{self._web_base_url}/agents/{self._agent_id}/task-complete"
         _write_settings(cwd, _build_stop_hook_settings(url))
         logger.debug(
-            "Agent %s: wrote Stop hook for task %s → %s",
-            self._agent_id, task_id, cwd / ".claude" / "settings.local.json",
+            "Agent %s: wrote Stop hook (startup) → %s",
+            self._agent_id, cwd / ".claude" / "settings.local.json",
+        )
+
+    def on_task_dispatch(self, cwd: Path, task_id: str) -> None:
+        """No-op: Stop hook was already written in on_start() before claude launched.
+
+        Claude Code snapshots hooks at session startup and ignores subsequent
+        changes to settings files.  Writing here would have no effect.
+        The task_id is tracked server-side via the agent's current task, not
+        by rewriting the hook URL.
+        """
+        logger.debug(
+            "Agent %s: on_task_dispatch no-op (Stop hook already snapshotted at startup, task=%s)",
+            self._agent_id, task_id,
         )
 
     def on_stop(self, cwd: Path) -> None:
