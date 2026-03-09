@@ -13,8 +13,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 
 from tmux_orchestrator.agents.base import Task
+from tmux_orchestrator.application.context_compression import TfIdfContextCompressor
 from tmux_orchestrator.bus import Message, MessageType
 from tmux_orchestrator.config import AgentRole
 from tmux_orchestrator.web.schemas import (
@@ -28,6 +30,45 @@ from tmux_orchestrator.web.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Module-level schemas for context compression endpoints
+# (must be module-level for FastAPI/Pydantic to correctly bind request body)
+# ---------------------------------------------------------------------------
+
+
+class CompressContextRequest(BaseModel):
+    """Request body for POST /agents/{agent_id}/compress-context."""
+
+    task_query: str = Field(
+        default="",
+        alias="query",
+        description=(
+            "Task prompt used as the relevance reference.  Lines most "
+            "similar to this text are retained.  Empty string → "
+            "query-agnostic compression."
+        ),
+    )
+    drop_percentile: float = Field(
+        default=0.40,
+        ge=0.0,
+        lt=1.0,
+        description=(
+            "Fraction of content lines to drop by ascending relevance "
+            "score.  Default 0.40 removes the least-relevant 40 %."
+        ),
+    )
+    reorder: bool = Field(
+        default=False,
+        description=(
+            "When True, surviving lines are reordered so the "
+            "highest-scoring lines appear first, mitigating the "
+            "'Lost in the Middle' effect (Liu et al. TACL 2024)."
+        ),
+    )
+
+    model_config = {"populate_by_name": True}
 
 
 def _build_agent_tree(agents: list[dict]) -> list[dict]:
@@ -812,4 +853,154 @@ def build_agents_router(
     # Shared scratchpad — key/value store for inter-agent data sharing
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Context compression — TF-IDF extractive compression
+    # (DESIGN.md §10.36 v1.1.11)
+    # ------------------------------------------------------------------
+
+    # Per-agent cumulative compression stats (in-process, reset on restart).
+    _compression_stats: dict[str, dict] = {}
+
+    @router.post(
+        "/agents/{agent_id}/compress-context",
+        summary="Compress agent pane context via TF-IDF relevance scoring",
+        dependencies=[Depends(auth)],
+    )
+    async def compress_agent_context(
+        agent_id: str, body: CompressContextRequest
+    ) -> dict:
+        """Capture the agent's pane output and compress it with TF-IDF.
+
+        Returns compression statistics and the compressed text.  Does NOT
+        alter the agent's running Claude session — the compressed text is
+        returned for the caller to use (e.g. to write to NOTES.md).
+
+        Algorithm:
+        1. Capture the current tmux pane output.
+        2. Tokenise each line and build a TF-IDF matrix (no external deps).
+        3. Score each line by cosine similarity to *query*.
+        4. Drop lines whose score is in the bottom *drop_percentile*.
+        5. Optionally reorder surviving lines (highest score first).
+
+        Design reference: Liu et al. "Lost in the Middle" TACL 2024;
+        DESIGN.md §10.36 v1.1.11.
+        """
+        agent = orchestrator.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
+
+        pane = agent.pane
+        if pane is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Agent {agent_id!r} has no active tmux pane",
+            )
+
+        # Capture pane text in executor to avoid blocking event loop
+        loop = asyncio.get_running_loop()
+        try:
+            tmux = orchestrator.tmux
+            pane_text: str = await loop.run_in_executor(
+                None, _capture_pane_text, tmux, pane
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("compress-context: pane capture failed for %s: %s", agent_id, exc)
+            raise HTTPException(
+                status_code=500, detail=f"Failed to capture pane: {exc}"
+            ) from exc
+
+        compressor = TfIdfContextCompressor(
+            drop_percentile=body.drop_percentile,
+            reorder=body.reorder,
+        )
+        result = compressor.compress(pane_text, query=body.task_query)
+        ratio = compressor.compression_ratio(result)
+
+        # Accumulate cumulative stats
+        entry = _compression_stats.setdefault(
+            agent_id,
+            {
+                "agent_id": agent_id,
+                "total_compressions": 0,
+                "total_lines_dropped": 0,
+                "total_chars_saved": 0,
+                "_ratio_sum": 0.0,
+            },
+        )
+        entry["total_compressions"] += 1
+        entry["total_lines_dropped"] += result.dropped_lines
+        entry["total_chars_saved"] += result.original_chars - result.compressed_chars
+        entry["_ratio_sum"] += ratio
+
+        return {
+            "agent_id": agent_id,
+            "original_lines": result.original_lines,
+            "kept_lines": result.kept_lines,
+            "dropped_lines": result.dropped_lines,
+            "original_chars": result.original_chars,
+            "compressed_chars": result.compressed_chars,
+            "compression_ratio": round(ratio, 4),
+            "drop_percentile": result.drop_percentile,
+            "reordered": result.reordered,
+            "query": body.task_query,
+            "compressed_text": result.compressed_text,
+        }
+
+    @router.get(
+        "/agents/{agent_id}/compression-stats",
+        summary="Cumulative context compression statistics for an agent",
+        dependencies=[Depends(auth)],
+    )
+    async def agent_compression_stats(agent_id: str) -> dict:
+        """Return cumulative context compression statistics for *agent_id*.
+
+        Fields:
+        - ``agent_id``: the agent identifier.
+        - ``total_compressions``: number of POST /compress-context calls.
+        - ``total_lines_dropped``: cumulative lines removed across all calls.
+        - ``total_chars_saved``: cumulative characters removed.
+        - ``avg_compression_ratio``: average char-level compression ratio.
+
+        Returns 404 if the agent does not exist.  Returns zeroed stats if the
+        agent exists but has not had any compression passes yet.
+
+        Design reference: DESIGN.md §10.36 v1.1.11.
+        """
+        agent = orchestrator.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
+
+        entry = _compression_stats.get(agent_id)
+        if entry is None:
+            return {
+                "agent_id": agent_id,
+                "total_compressions": 0,
+                "total_lines_dropped": 0,
+                "total_chars_saved": 0,
+                "avg_compression_ratio": 0.0,
+            }
+
+        n = entry["total_compressions"]
+        avg_ratio = (entry["_ratio_sum"] / n) if n > 0 else 0.0
+        return {
+            "agent_id": agent_id,
+            "total_compressions": n,
+            "total_lines_dropped": entry["total_lines_dropped"],
+            "total_chars_saved": entry["total_chars_saved"],
+            "avg_compression_ratio": round(avg_ratio, 4),
+        }
+
     return router
+
+
+# ---------------------------------------------------------------------------
+# Module-level helper (patchable in tests)
+# ---------------------------------------------------------------------------
+
+
+def _capture_pane_text(tmux: Any, pane: Any) -> str:
+    """Capture and return text from *pane* via *tmux*.
+
+    Separated from the router closure so tests can monkeypatch it.
+    """
+    return tmux.capture_pane(pane)

@@ -351,6 +351,33 @@
         "title": "CompetitionWorkflowSubmit",
         "type": "object"
       },
+      "CompressContextRequest": {
+        "description": "Request body for POST /agents/{agent_id}/compress-context.",
+        "properties": {
+          "drop_percentile": {
+            "default": 0.4,
+            "description": "Fraction of content lines to drop by ascending relevance score.  Default 0.40 removes the least-relevant 40 %.",
+            "exclusiveMaximum": 1.0,
+            "minimum": 0.0,
+            "title": "Drop Percentile",
+            "type": "number"
+          },
+          "query": {
+            "default": "",
+            "description": "Task prompt used as the relevance reference.  Lines most similar to this text are retained.  Empty string \u2192 query-agnostic compression.",
+            "title": "Query",
+            "type": "string"
+          },
+          "reorder": {
+            "default": false,
+            "description": "When True, surviving lines are reordered so the highest-scoring lines appear first, mitigating the 'Lost in the Middle' effect (Liu et al. TACL 2024).",
+            "title": "Reorder",
+            "type": "boolean"
+          }
+        },
+        "title": "CompressContextRequest",
+        "type": "object"
+      },
       "DDDWorkflowSubmit": {
         "description": "Request body for POST /workflows/ddd \u2014 DDD Bounded Context decomposition.\n\nSubmits a 3-phase workflow DAG using Domain-Driven Design patterns:\n\n  Phase 1 (sequential):\n    ``context-mapper``: performs EventStorming analysis; identifies Bounded\n    Contexts and their Ubiquitous Language; writes ``EVENTSTORMING.md`` and\n    ``BOUNDED_CONTEXTS.md``; stores context list in scratchpad.\n\n  Phase 2 (parallel, one agent per Bounded Context):\n    ``domain-expert-{context}``: reads ``BOUNDED_CONTEXTS.md``; designs domain\n    model (Entities, Aggregates, Value Objects, Domain Services) for its\n    assigned context; writes ``DOMAIN_{CONTEXT}.md`` and stores in scratchpad.\n\n  Phase 3 (sequential, depends on ALL domain-expert tasks):\n    ``integration-designer``: reads all domain models; produces\n    ``CONTEXT_MAP.md`` with explicit context-mapping patterns (Shared Kernel,\n    Customer\u2013Supplier, Anti-Corruption Layer) between every pair of contexts.\n\nAll handoffs use the shared scratchpad (Blackboard pattern).\nScratchpad keys use underscores (not slashes) as namespace separator.\n\nThe ``contexts`` field is optional. When omitted the context-mapper agent\ndiscovers and names the Bounded Contexts autonomously from the feature\ndescription. When provided (e.g. ``[\"Orders\", \"Inventory\", \"Shipping\"]``),\nthose names are used directly.\n\nDesign references:\n- Evans, \"Domain-Driven Design\" (2003): Bounded Context + Ubiquitous Language\n  as the core strategic-design patterns.\n- Brandolini, \"Introducing EventStorming\" (2021): discovery workshop technique.\n- IJCSE V12I3P102, \"Designing Scalable Multi-Agent AI Systems using EventStorming\n  and DDD\" (2025): EventStorming maps directly to agent communication protocols.\n- Russ Miles, \"Domain-Driven Agent Design\", Engineering Agents Substack, 2025:\n  DICE framework \u2014 Bounded Context as LLM agent context constraint.\n- Bakthavachalu, \"Applying DDD for Agentic Applications\", Medium, 2025:\n  Risk / Regulatory / Validation bounded-context decomposition case study.\n- DESIGN.md \u00a710.31 (v1.0.31)",
         "properties": {
@@ -1978,6 +2005,100 @@
           }
         },
         "summary": "Request an autonomous strategy change for the agent's current phase"
+      }
+    },
+    "/agents/{agent_id}/compress-context": {
+      "post": {
+        "description": "Capture the agent's pane output and compress it with TF-IDF.\n\nReturns compression statistics and the compressed text.  Does NOT\nalter the agent's running Claude session \u2014 the compressed text is\nreturned for the caller to use (e.g. to write to NOTES.md).\n\nAlgorithm:\n1. Capture the current tmux pane output.\n2. Tokenise each line and build a TF-IDF matrix (no external deps).\n3. Score each line by cosine similarity to *query*.\n4. Drop lines whose score is in the bottom *drop_percentile*.\n5. Optionally reorder surviving lines (highest score first).\n\nDesign reference: Liu et al. \"Lost in the Middle\" TACL 2024;\nDESIGN.md \u00a710.36 v1.1.11.",
+        "operationId": "compress_agent_context_agents__agent_id__compress_context_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompressContextRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Compress Agent Context Agents  Agent Id  Compress Context Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Compress agent pane context via TF-IDF relevance scoring"
+      }
+    },
+    "/agents/{agent_id}/compression-stats": {
+      "get": {
+        "description": "Return cumulative context compression statistics for *agent_id*.\n\nFields:\n- ``agent_id``: the agent identifier.\n- ``total_compressions``: number of POST /compress-context calls.\n- ``total_lines_dropped``: cumulative lines removed across all calls.\n- ``total_chars_saved``: cumulative characters removed.\n- ``avg_compression_ratio``: average char-level compression ratio.\n\nReturns 404 if the agent does not exist.  Returns zeroed stats if the\nagent exists but has not had any compression passes yet.\n\nDesign reference: DESIGN.md \u00a710.36 v1.1.11.",
+        "operationId": "agent_compression_stats_agents__agent_id__compression_stats_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Agent Compression Stats Agents  Agent Id  Compression Stats Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cumulative context compression statistics for an agent"
       }
     },
     "/agents/{agent_id}/drain": {

@@ -728,6 +728,94 @@ AI エージェントにとって TDD は「ガードレール」として機能
 
 ## 10. 調査記録
 
+### 10.36 v1.1.11 — スライディングウィンドウ + 重要度スコアによるコンテキスト圧縮
+
+#### 選定理由
+
+**選択: スライディングウィンドウ + 重要度スコアによるコンテキスト圧縮 (v1.1.11)**
+
+§11「層4：コンテキスト伝達（改善）」の**中**優先度候補。高優先度項目（チェックポイント永続化・ProcessPort・OpenTelemetry）はすべて実装済み（v1.0.35・v1.0.34・v1.1.10）。次に優先度が高く、実装コストと研究的裏付けのバランスが最も良い候補として選択した。
+
+**選択理由:**
+
+1. **「高」優先度がすべて完了**: §11「層5」の高優先度候補（チェックポイント永続化・ProcessPort・OpenTelemetry GenAI）はすべて実装済み。「機能・ワークフロー」の高優先度候補（スラッシュコマンド自動コピー・system_prompt_file）も実装済み。残る未実装の最優先候補は「中」優先度の改善項目となった。
+2. **研究的裏付けが強い**: Liu et al. "Lost in the Middle" (TACL 2024) は LLM が長いコンテキストの中央部情報を忘却することを実証し、重要度ベースの選択が有効であることを示した。JetBrains Research "Cutting Through the Noise" (2025-12) は重要度スコアリングによるコスト削減を実証。現行の `/summarize` はタスクプロンプトとの関連度を考慮しない一律圧縮であり、改善余地が明確。
+3. **既存基盤を活用できる**: `ContextMonitor`（v1.0.9 以前から存在）の `context_warning` イベントを既に利用しており、圧縮トリガーの仕組みが整っている。TF-IDF は Python 標準ライブラリ相当の計算で実現でき（`sklearn.feature_extraction.text.TfidfVectorizer` または NumPy のみで自前実装）、外部 API 依存を追加しない。
+4. **エージェント品質への直接貢献**: 長時間タスクでのコンテキスト劣化は v1.0.8 build-log で「Director polling が遅い」の根本要因の一つとして記録されている。圧縮品質の向上は直接的にエージェントの応答精度を改善する。
+
+**非選択候補:**
+
+- **DriftMonitor セマンティック類似度**: `sentence-transformers` (22MB モデル) の追加依存が重い。TF-IDF ベースの圧縮が完成してから相乗効果を評価したい。
+- **Director の agent_drift_warning 購読による自動 re-brief**: Director エージェントへの bus 購読機能が未完成。スコープが大きい。
+- **P2P 許可テーブルの TLA+ 形式仕様化**: TLA+ ツールチェーンのセットアップが必要。コードの品質ではなく仕様検証であり、ユーザー向け価値が間接的。
+- **コンテキスト4戦略ガイド**: 実装なしのドキュメント追加のみ。単独デモが難しい。
+
+**実装スコープ:**
+
+1. `application/context_compression.py` — `TfIdfContextCompressor` クラス。タスクプロンプトとの TF-IDF コサイン類似度で各行をスコアリングし、スコア下位 N% を削除するスライディングウィンドウ圧縮を実装。
+2. `ContextMonitor` が `context_warn_threshold` を超えたとき、`_compress_context()` を呼び出して TF-IDF ベース圧縮を注入する（現行の `/summarize` 注入の上位互換）。
+3. `POST /agents/{id}/compress-context` REST エンドポイント — 手動トリガー対応。
+4. `/compress-context` スラッシュコマンド — `agent_plugin/commands/compress-context.md` として追加。
+5. `GET /agents/{id}/compression-stats` — 圧縮前後のトークン数・削除行数・類似度スコア分布を返す。
+
+#### リサーチ（Step 1 — Research）
+
+**Query 1**: "TF-IDF context compression LLM long context summarization sliding window importance scoring 2024 2025"
+
+主要知見:
+- **JetBrains Research "Cutting Through the Noise: Smarter Context Management for LLM-Powered Agents" NeurIPS DL4Code workshop 2025** (blog.jetbrains.com/research/2025/12/efficient-context-management/):
+  「効率指向のエージェントコンテキスト管理手法は、下流タスク性能をほとんど低下させずにコストを約50%削減できる。LLM-Summarization は単純な Observation Masking ベースラインを一貫して上回ることはできない。しかし両者の組み合わせは LLM-Summary 単独比 7%・Observation Masking 単独比 11% のコスト削減を達成した。」
+  実装参考リポジトリ: https://github.com/JetBrains-Research/the-complexity-trap
+- **CCF: A Context Compression Framework for Efficient Long-Sequence Language Modeling (arXiv:2509.09199, 2025)**:
+  コンテキスト圧縮フレームワークとして attention-based token selection・multi-document comprehension・structured knowledge integration を挙げる。extractive 手法（文を元のまま選択）が abstractive 手法（要約生成）より多くのベンチマークで優る実証結果あり。
+- **ACON: Optimizing Context Compression for LLM Agents (OpenReview 2024)**:
+  タスク関連性スコアリング（クエリとコンテキスト行のコサイン類似度）による選択的保持が最も cost-effective であることを示す。
+
+**Query 2**: "LLMLingua prompt compression token selection importance score Python implementation 2024"
+
+主要知見:
+- **LLMLingua (EMNLP 2023) / LLMLingua-2 (ACL 2024)** (llmlingua.com, github.com/microsoft/LLMLingua):
+  小型 LM の perplexity で各トークンの重要度を計算し、perplexity 閾値以下のトークンを削除。最大 20x 圧縮で性能低下1.5%以内を達成。ただし推論のため GPT-2/LLaMA 等の追加モデルが必要で、外部依存なしの実装には不適。
+  本プロジェクトの方針（外部 API 依存を追加しない）から、LLMLingua 自体は採用しないが、「重要度スコアによる行削除」のアーキテクチャ原則を TF-IDF で代替する。
+- **DataCamp "Prompt Compression: A Guide With Python Examples" (2025)**:
+  extractive reranker-based compression が +7.89 F1 points の改善を達成し、abstractive compression は同圧縮率で性能低下を示した（extractive の優位性を実証）。
+
+**Query 3**: ""lost in the middle" LLM context importance scoring extractive compression agent context management 2024 2025"
+
+主要知見:
+- **Liu et al. "Lost in the Middle: How Language Models Use Long Contexts" TACL 2024** (aclanthology.org/2024.tacl-1.9/):
+  LLM はコンテキストの先頭と末尾の情報を優先し、中央部を忘却する。関連情報が中央に位置するとき性能が有意に低下する（長文コンテキスト対応モデルでも同様）。この "recency + primacy bias" は RoPE の長距離減衰効果に起因する。
+  → 重要行を先頭に再配置する「重要度ベース再ソート」が直接的な改善策。
+- **"Characterizing Prompt Compression Methods for Long Context Inference" (OpenReview 2024)**:
+  extractive 圧縮は小さな圧縮比で不要情報を除去することで、中央部忘却効果を緩和しつつ精度を向上させる。抽出的手法の優位性を多数のベンチマークで実証。
+- **"Advanced RAG Techniques for Long-Context LLMs" (getmaxim.ai 2025)**:
+  reranking model で最関連コンテキストをコンテキストウィンドウの最適位置（先頭）に再配置することで "Lost in the Middle" 問題を緩和するのが現代的ベストプラクティス。
+
+**Query 4**: "TF-IDF sentence importance ranking extractive summarization Python scikit-learn cosine similarity 2024"
+
+主要知見:
+- **Mishra "Mastering Extractive Summarization: TF-IDF and TextRank" (Medium 2024)**:
+  TF-IDF + cosine 類似度ベースの extractive summarization の Python 実装。`TfidfVectorizer` で文をベクトル化し、コサイン類似度行列から各文のグローバル重要度スコアを算出。スコア上位 K% の文を保持するのが標準的アプローチ。
+- **Hutabarat "Comparing Text Documents Using TF-IDF and Cosine Similarity in Python" (Medium 2024)**:
+  `sklearn.feature_extraction.text.TfidfVectorizer` + `sklearn.metrics.pairwise.cosine_similarity` を使ったシンプルな実装パターン。クエリ文とコーパス文のコサイン類似度を計算し、類似度スコアでランキング。scikit-learn のみで完結する（外部 API 不要）。
+
+**実装方針（リサーチ結果を踏まえた決定）:**
+
+1. **アルゴリズム選択**: LLMLingua（外部 LM 依存）ではなく、TF-IDF + cosine 類似度ベースの extractive 手法を採用。`scikit-learn` は既存依存（pyproject.toml に含まれているか確認要）または `numpy` のみで自前実装。外部 API 不要。
+2. **重要度スコア計算**: タスクプロンプト（クエリ）と各コンテキスト行のコサイン類似度をスコアとし、スコア下位 40% の行を削除（JetBrains 研究: 50% コスト削減の実績に対して保守的な設定）。
+3. **再配置**: Liu et al. (2024) の "Lost in the Middle" 知見を活かし、重要行を圧縮後コンテキストの先頭に配置する `reorder=True` オプションを追加。
+4. **エンドポイント**: `POST /agents/{id}/compress-context` + `/compress-context` スラッシュコマンド + `GET /agents/{id}/compression-stats`。
+5. **ContextMonitor 統合**: `context_warn_threshold` 到達時に `/summarize` の代わりに TF-IDF 圧縮を自動注入するオプション（`compression_strategy: tfidf | summarize` 設定項目）。
+
+**参考文献:**
+- Liu, Nelson F., et al. "Lost in the Middle: How Language Models Use Long Contexts." *TACL*, 2024. https://aclanthology.org/2024.tacl-1.9/
+- Lindenbauer, Tobias et al. "The Complexity Trap: Simple Observation Masking Is as Efficient as LLM Summarization for Agent Context Management." *NeurIPS DL4Code Workshop*, 2025. https://github.com/JetBrains-Research/the-complexity-trap
+- Pan, Yucheng, et al. "CCF: A Context Compression Framework for Efficient Long-Sequence Language Modeling." arXiv:2509.09199, 2025. https://arxiv.org/html/2509.09199v1
+- Jiang, Huiqiang, et al. "LLMLingua: Compressing Prompts for Accelerated Inference of Large Language Models." *EMNLP*, 2023. https://arxiv.org/abs/2310.05736
+- Mishra, Varun. "Mastering Extractive Summarization: A Theoretical and Practical Guide to TF-IDF and TextRank." Medium, 2024. https://medium.com/@varun_mishra/text-summarization-with-tf-idf-and-textrank-a-deep-dive-into-the-code-and-theory-4cc76c285e28
+
+---
+
 ### 10.35 v1.0.35 — `orchestrator.py` 残りインフラ依存 DI 整理（ResultStore / CheckpointStore / AutoScaler / WorkflowManager / GroupManager）
 
 #### 選定理由
