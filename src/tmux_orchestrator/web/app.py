@@ -1677,7 +1677,7 @@ def create_app(
         - GitLab "Repository checks": https://docs.gitlab.com/ee/administration/repository_checks.html
         - DESIGN.md §10.17 (v0.43.0)
         """
-        from tmux_orchestrator.worktree_integrity import WorktreeIntegrityChecker
+        from tmux_orchestrator.infrastructure.worktree_integrity import WorktreeIntegrityChecker
 
         agent = orchestrator.get_agent(agent_id)
         if agent is None:
@@ -1696,7 +1696,7 @@ def create_app(
 
         if worktree_path is None:
             # Agent uses isolate=False (shared repo) — return a stub status.
-            from tmux_orchestrator.worktree_integrity import WorktreeStatus
+            from tmux_orchestrator.infrastructure.worktree_integrity import WorktreeStatus
             status = WorktreeStatus(agent_id=agent_id, path=None)
             return status.to_dict()
 
