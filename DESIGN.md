@@ -3643,3 +3643,30 @@ implementer → reviewer → revisor
 
 ### Step 2 — 実装サマリー
 
+**実装ファイル**:
+- `src/tmux_orchestrator/web/routers/workflows.py` — mob-review required_tags バグ修正 + `POST /workflows/iterative-review` エンドポイント
+- `src/tmux_orchestrator/web/schemas.py` — `IterativeReviewWorkflowSubmit` Pydantic v2 モデル
+- `examples/workflows/mob-review.yaml` — タグルーティングガイダンス更新
+- `examples/workflows/iterative-review.yaml` — 新ワークフローの自己完結 YAML テンプレート
+- `tests/test_workflow_mob_review.py` — required_tags バグ修正テスト +5
+- `tests/test_workflow_iterative_review.py` — 新ワークフローテスト (37テスト)
+- `tests/fixtures/openapi_schema.json` — OpenAPI スナップショット更新
+- `pyproject.toml` — version 1.1.20 → 1.1.21
+
+**テスト数**: 2410 → 2452 (+42 テスト)
+
+**バージョン**: 1.1.21
+
+**E2E デモ** (`~/Demonstration/v1.1.21-iterative-review/`):
+- 3 実エージェント (`implementer`, `reviewer`, `revisor`) が独立ワークツリーで直列動作
+- タスク: `merge_sorted_lists()` 関数を実装 → レビュー → 修正の3段階パイプライン
+- implementer: ~33秒で実装完了 (975文字)、reviewer: ~45秒でレビュー完了 (2708文字)、revisor: ~30秒で修正完了 (1345文字)
+- 合計 3分以内に完了
+- **29/29 チェック PASSED**
+
+**デバッグ**: 1回目の実行で revisor エージェントが trust dialog に引っかかり dead-letter。
+根本原因: `pre_trust_worktree()` が dialog を抑制できなかった（known bug）。
+修正: demo.py にサーバー起動後5秒待機してから全 tmux pane に Enter を送信するステップを追加。
+
+**29/29 チェック PASSED**
+
