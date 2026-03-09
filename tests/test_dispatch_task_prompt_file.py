@@ -104,9 +104,12 @@ async def test_dispatch_task_sends_trigger_not_prompt(tmp_path: Path) -> None:
     task = Task(id="t1", prompt=long_prompt)
     await agent._dispatch_task(task)
 
-    send_keys_call = process.send_keys.call_args
-    assert send_keys_call is not None
-    sent_text = send_keys_call[0][0]  # first positional arg
+    # Check the FIRST send_keys call — the trigger.
+    # v1.1.3 may add a second call (Enter "") if the prompt file isn't consumed within 3s,
+    # so we use call_args_list[0] rather than call_args (the last call).
+    assert process.send_keys.call_args_list, "send_keys must have been called"
+    first_call = process.send_keys.call_args_list[0]
+    sent_text = first_call[0][0]  # first positional arg of the first call
     # Must NOT send the full prompt
     assert sent_text != long_prompt, "Full prompt must not be sent via send_keys"
     # Must send the short trigger

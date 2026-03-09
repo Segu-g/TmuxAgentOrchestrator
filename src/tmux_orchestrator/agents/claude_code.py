@@ -348,6 +348,40 @@ class ClaudeCodeAgent(Agent):
             else ""
         )
 
+        # Context Engineering Strategies section (Part B, v1.1.3)
+        # Reference: DESIGN.md §10.39; Zilliz/LangChain 4-strategy framework (2025)
+        role_strategy_hint = (
+            "**Recommended sequence (Worker)**: Write (NOTES.md/PLAN.md) → "
+            "Select (read context_files + NOTES.md at task start) → "
+            "Compress (/summarize when context > 60%) → "
+            "Isolate (/spawn-subagent for large sub-tasks)"
+            if self.role == AgentRole.WORKER
+            else "**Recommended sequence (Director)**: Write (PLAN.md + scratchpad) → "
+            "Select (read worker results) → "
+            "Isolate (spawn sub-agents per phase, each with its own worktree)"
+        )
+        context_strategies_section = f"""
+## Context Engineering Strategies
+
+> Reference: Zilliz "Context Engineering for AI Agents" (2025);
+> LangChain "Context Engineering for Agents" (2025);
+> Algomatic Tech "AIエージェントを支える技術" (2025)
+
+Use these four strategies to keep your context window focused and avoid context rot:
+
+| Strategy | When to use | How |
+|----------|-------------|-----|
+| **Write** | Produce output for future reference | Update NOTES.md, write PLAN.md, `PUT /scratchpad/key` |
+| **Select** | Pull relevant information in | Read `context_files`, re-read NOTES.md at task start |
+| **Compress** | Reduce token count | Call `/summarize` when context > 60% full |
+| **Isolate** | Split into independent sub-contexts | `/spawn-subagent` + each sub-agent gets its own worktree |
+
+{role_strategy_hint}
+
+**Signs of context rot**: repeating yourself, forgetting earlier decisions, missing files
+you already created. If you notice these, run `/summarize` immediately.
+"""
+
         content = f"""\
 # Agent: {self.id}
 
@@ -413,7 +447,7 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
 - Notes file: `NOTES.md` (your structured scratchpad — keep it updated)
 - Plan file: `PLAN.md` (created by `/plan`, deleted when task is done)
 - Slash commands: available in `.claude/commands/` — use plain `/task-complete` etc.
-{context_files_section}{custom_section}
+{context_files_section}{custom_section}{context_strategies_section}
 ## Slash Command Reference
 
 Slash commands are copied into `.claude/commands/` at agent startup so you can
@@ -689,7 +723,54 @@ use the plain form without a namespace prefix.
         # Use ProcessPort instead of self._tmux.send_keys(self.pane, ...)
         # Reference: DESIGN.md §10.34 (v1.0.34 — ProcessPort canonical interface).
         await loop.run_in_executor(None, self.process.send_keys, keys_to_send)
+
+        # File-existence check: confirm UserPromptSubmit hook fired.
+        # The hook deletes the prompt file after reading it, so a missing file means
+        # the hook fired and the prompt was delivered.  If the file persists after 3s,
+        # a paste-preview dialog is likely blocking input — send Enter to dismiss it.
+        # Reference: DESIGN.md §10.39 (v1.1.3 — file-existence paste detection)
+        if self._cwd is not None and keys_to_send == self._TASK_TRIGGER:
+            await self._wait_for_prompt_file_consumed(prompt_file)
+
         await self._completion.wait(self, task)
+
+    async def _wait_for_prompt_file_consumed(self, prompt_file: Path) -> None:
+        """Poll for prompt file deletion to confirm UserPromptSubmit hook fired.
+
+        After sending the ``__TASK__`` trigger, the ``UserPromptSubmit`` hook reads
+        and deletes the prompt file.  Polling for file absence is a race-free way to
+        confirm that the hook fired and the task prompt was delivered to Claude.
+
+        If the file is still present after 3 seconds (30 × 100 ms), a paste-preview
+        dialog may be blocking the input.  Sending Enter dismisses the dialog and
+        re-triggers the hook.
+
+        This replaces the pane-output regex polling used in v1.1.1, which was
+        fragile against timing variations and terminal state differences.
+
+        Reference: DESIGN.md §10.39 (v1.1.3)
+        """
+        for _ in range(30):  # 30 × 100 ms = 3 s
+            await asyncio.sleep(0.1)
+            if not prompt_file.exists():
+                return  # Hook fired, prompt delivered
+        # File still exists — paste-preview likely blocking
+        logger.debug(
+            "Agent %s: prompt file still present after 3 s — sending Enter to dismiss paste-preview",
+            self.id,
+        )
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self.process.send_keys, "")
+        # Wait again for hook to fire after Enter
+        for _ in range(30):
+            await asyncio.sleep(0.1)
+            if not prompt_file.exists():
+                return  # Hook fired after Enter
+        logger.warning(
+            "Agent %s: prompt file still present after Enter retry — "
+            "UserPromptSubmit hook may not have fired",
+            self.id,
+        )
 
     async def _wait_for_ready(self) -> None:
         """Wait for claude to signal readiness via the ``SessionStart`` hook.

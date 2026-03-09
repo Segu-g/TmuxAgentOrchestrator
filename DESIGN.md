@@ -1910,3 +1910,112 @@ egghead.io のレッスン "Rewrite Prompts on the Fly with UserPromptSubmit Hoo
 - `test_user_prompt_submit_hook.py`: フックスクリプトの動作単体テスト
 - `test_dispatch_task_prompt_file.py` または既存テストへの追加: `_dispatch_task` がファイルを書き込み短いトリガーを送信することを検証
 - 全既存テスト (1827+) が green であること
+
+---
+
+## §10.39 — v1.1.3: ファイル存在チェックによるペースト確認検出 + コンテキスト4戦略ガイド
+
+**選択日**: 2026-03-09
+
+### 選択理由
+
+#### Part A: ファイル存在チェックによる配送確認 (v1.1.2 精化)
+
+**選択: ファイル存在ポーリングによる UserPromptSubmit 発火検出**
+
+v1.1.2 で実装した `UserPromptSubmit` フックは `__task_prompt__*.txt` を読み込んで削除する。
+この「削除」という副作用を逆用して、プロンプトが Claude に届いたかどうかを確認できる:
+
+- ファイルが消えた → フックが発火した → プロンプト配送成功
+- 3秒後もファイルが残る → フックが未発火 → paste-preview がブロック中 → Enter 送信でリトライ
+
+v1.1.1 のペーンアウトプットポーリング (`capture_pane` + regex) より決定論的で信頼性が高い。
+
+**選択しなかった候補**:
+- pane output ポーリング (v1.1.1): `capture_pane` の regex マッチはタイミング依存でフラジャイル
+- watchdog / aionotify: 外部ライブラリ依存、100ms ポーリングで十分
+
+#### Part B: コンテキスト4戦略ガイド (§11 層4)
+
+**選択: 書き込み・選択・圧縮・分離の4戦略チートシートを CLAUDE.md に追記**
+
+§11「層4：コンテキスト伝達（改善）」の未実装候補。実装コストが最も低く（コード変更なし、ドキュメント追記のみ）、全エージェントへ即座に恩恵が届く。
+スライディングウィンドウ圧縮 (TF-IDF) は外部ライブラリ依存が大きく単独イテレーションとして分離が必要なため見送り。
+
+**選択しなかった候補**:
+- スライディングウィンドウ + TF-IDF コンテキスト圧縮: scikit-learn 依存、規模大
+- `/deliberate` スラッシュコマンド: 設計検討が必要
+
+### Research
+
+#### Query 1: Claude Code hooks UserPromptSubmit file deletion detection
+
+**検索**: "Claude Code hooks UserPromptSubmit file deletion detection 2026"
+
+- 公式ドキュメント (https://code.claude.com/docs/en/hooks): `UserPromptSubmit` はプロンプト送信時に発火し、stdout を `additionalContext` として追加できる。ファイル削除は Python フックスクリプト側で実施 (`Path.unlink()`)。
+- Claude Code Hooks Complete Guide (https://smartscope.blog/en/generative-ai/claude/claude-code-hooks-guide/): UserPromptSubmit フックの適用例として「プロンプト送信前にファイル読み込み」パターンが示されている。
+
+**結論**: フックが発火すれば `unlink()` が呼ばれるので、ファイルの存在有無でフック発火を間接的に検出できる。
+
+**References**:
+- Hooks reference: https://code.claude.com/docs/en/hooks
+- Claude Code Hooks Complete Guide (February 2026): https://smartscope.blog/en/generative-ai/claude/claude-code-hooks-guide/
+- aiorg.dev Claude Code Hooks Guide 2026: https://aiorg.dev/blog/claude-code-hooks
+
+#### Query 2: asyncio file existence polling delivery confirmation
+
+**検索**: "asyncio file existence polling task delivery confirmation pattern 2025"
+
+- Python docs `asyncio-task.html` (https://docs.python.org/3/library/asyncio-task.html): `asyncio.sleep()` を使ったポーリングループが標準パターン。
+- SuperFastPython "How to Check Asyncio Task Status" (https://superfastpython.com/asyncio-task-status/): タスクが短時間で完了するケースでは 100ms × N 回の busy-wait が適切。
+- Inngest Blog "What Python's asyncio primitives get wrong about shared state" (https://www.inngest.com/blog/no-lost-updates-python-asyncio): ファイルベースの共有状態変化をポーリングで検出するパターンは race-free で信頼性が高い。
+
+**結論**: `asyncio.sleep(0.1)` × 30 回 (3秒) のポーリングは標準的なパターン。ファイル存在チェック (`Path.exists()`) は原子的で race 条件が発生しない。
+
+**References**:
+- Python asyncio tasks: https://docs.python.org/3/library/asyncio-task.html
+- SuperFastPython asyncio task status: https://superfastpython.com/asyncio-task-status/
+- Inngest asyncio shared state: https://www.inngest.com/blog/no-lost-updates-python-asyncio
+
+#### Query 3: context engineering 4 strategies write select compress isolate agents
+
+**検索**: "context engineering 4 strategies write select compress isolate AI agents CLAUDE.md 2025 2026"
+
+- Zilliz Blog "Context Engineering Strategies for AI Agents" (https://zilliz.com/blog/context-engineering-for-ai-agents): Write / Select / Compress / Isolate の4戦略フレームワークを詳説。エージェントの役割ごとに適切な戦略の組み合わせが異なる。
+- LangChain Blog "Context Engineering for Agents" (https://blog.langchain.com/context-engineering-for-agents/): 「Write: 外部保存 → Select: 引き込み → Compress: 削減 → Isolate: 分割」が業界標準として定着。
+- Context Engineering for Agents (https://rlancemartin.github.io/2025/06/23/context_engineering/): CLAUDE.md / NOTES.md / worktree を使った具体的な「Isolate」パターンを解説。
+
+**結論**: 4戦略チートシートを `_write_agent_claude_md()` で生成する CLAUDE.md に追記することで、全エージェントが戦略を参照できるようになる。
+
+**References**:
+- Zilliz context engineering: https://zilliz.com/blog/context-engineering-for-ai-agents
+- LangChain context engineering: https://blog.langchain.com/context-engineering-for-agents/
+- R Lance Martin context engineering: https://rlancemartin.github.io/2025/06/23/context_engineering/
+
+### 実装方針
+
+#### Part A: `_dispatch_task()` にファイル存在チェックを追加
+
+`ClaudeCodeAgent._dispatch_task()` でトリガー送信後、最大 3秒間 `prompt_file.exists()` をポーリングする:
+1. ファイルが消えた → フック発火 → 配送成功 → そのまま継続
+2. 3秒後もファイルが残る → paste-preview ブロック中 → `send_keys("", enter=True)` で Enter を送信
+3. Enter 送信後さらに 3秒ポーリング → ファイル消滅を確認
+
+フォールバック (`_cwd is None`) パスには影響なし。
+
+#### Part B: `_write_agent_claude_md()` にコンテキスト4戦略セクションを追加
+
+`ClaudeCodeAgent._write_agent_claude_md()` が生成する CLAUDE.md の「Context Management」セクション直下に
+「## Context Engineering Strategies」セクションを追加する。
+書き込み・選択・圧縮・分離の4戦略をロール別推奨組み合わせ付きで記載する。
+
+### テスト方針
+
+- `test_dispatch_task_file_existence_check.py`:
+  - ファイルが即削除される場合: Enter 送信なし
+  - ファイルが 3秒残る場合: Enter 送信あり
+  - Enter 送信後にファイル削除: 続行
+- `test_agent_claude_md_context_strategies.py`:
+  - `_write_agent_claude_md()` が「Context Engineering Strategies」セクションを含む CLAUDE.md を生成することを検証
+  - 4戦略 (Write / Select / Compress / Isolate) が全て記載されていることを検証
+- 全既存テスト (1852+) が green であること
