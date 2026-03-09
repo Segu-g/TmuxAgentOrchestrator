@@ -3897,3 +3897,65 @@ References:
 - AWS Prescriptive Guidance, "Strangler fig pattern", https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/strangler-fig.html (2025)
 - future-processing, "What is the Strangler Fig Pattern?", https://www.future-processing.com/blog/strangler-fig-pattern/ (2025)
 
+## §10.57 — v1.1.25: Clean Architecture Migration Phase 3 — infrastructure stores + application monitors
+
+### Step 0 — 選択理由
+
+**選択した機能**: Clean Architecture Migration Phase 3 — インフラ層ストア (`result_store`, `checkpoint_store`, `episode_store`) + アプリケーション層モニター (`autoscaler`, `context_monitor`, `drift_monitor`) の移動
+
+**理由**:
+- Phase 1/2 完了後、domain/ と application/ の bus/registry/workflow_manager は全て移動済み。
+- 残る ROOT レベルファイルのうち、`result_store.py` / `checkpoint_store.py` / `episode_store.py` の3つは filesystem/SQLite I/O を直接扱う典型的なインフラ層責任を持つ。
+- `autoscaler.py` / `context_monitor.py` / `drift_monitor.py` の3つは外部 I/O を持たず、asyncio ループと pub/sub バスを使う application layer の責任を持つ。
+- 既存の全テストを Strangler Fig パターンで green に保ちながら段階的に移行可能。
+- `orchestrator.py` は依存関係が複雑すぎるため Phase 4 に延期 (同ファイル内に dispatch loop, P2P routing, watchdog 等が混在)。
+
+**選択しなかった候補と理由**:
+- `orchestrator.py` の移動: 4000行超の God Object であり、適切な層分離のためには先に interface 抽出が必要 → Phase 4 に予約。
+- `config.py` の移動: OrchestratorConfig は YAML パースと dataclass 定義の境界にあり、移動コストに対して利益が小さい → 今回対象外。
+- `factory.py` の移動: orchestrator.py に強依存するため orchestrator.py 移動後に実施。
+
+### Step 1 — 調査記録
+
+**Query 1**: "Clean Architecture infrastructure layer file I/O JSONL SQLite Python best practices 2025"
+
+主要知見:
+- Infrastructure layer はデータベース・ファイルシステム・外部 API などの I/O 詳細を担う最外層 (Martin, "Clean Architecture" 2017, Ch.22)。
+- Repository パターン: domain layer で定義したインターフェースを infrastructure layer で実装する — SQLite や JSONL ファイルは純粋な実装詳細。
+- CQRS (Greg Young, 2010): write path (append) と read path (query) を分離することで書き込みの低レイテンシを確保しつつ、読み取りは複雑なクエリをサポートできる。
+- "Clean Architecture with Python" (Keen, Packt 2025): SOLID 原則、テストパターン、オブザーバビリティ、リファクタリングを包括的に網羅。
+
+References:
+- cdddg/py-clean-arch, "A Python implementation of Clean Architecture", https://github.com/cdddg/py-clean-arch (2025)
+- Shaliamekh, "Clean Architecture with Python", Medium, https://medium.com/@shaliamekh/clean-architecture-with-python-d62712fd8d4f (2025)
+- Keen, "Clean Architecture with Python", O'Reilly, https://www.oreilly.com/library/view/clean-architecture-with/9781836642893/ (2025)
+- Glukhov, "Python Design Patterns for Clean Architecture", https://www.glukhov.org/post/2025/11/python-design-patterns-for-clean-architecture/ (2025)
+
+**Query 2**: "application layer autoscaler context monitor Python clean architecture 2025"
+
+主要知見:
+- Autoscaler はキュー深度に応じてエージェントプールを動的に拡縮する Application Service — domain の business rule を変更しない点で application layer が適切。
+- Ray Serve の Application-level Autoscaler パターン: infrastructure (cluster) の上で application logic (demand-based scaling) を実装する層分離モデルが参考になる。
+- Context Monitor / Drift Monitor は観測・イベント発行を行う Application Service — pure asyncio で external dep なし。bus (application/bus.py) に依存するため application layer が正しい位置。
+- "fast-clean-architecture" フレームワーク (PyPI 2025): Domain/Application/Infrastructure/Presentation の4層モデルを Python で実装するリファレンス実装。
+
+References:
+- Ray Serve Autoscaling guide, https://docs.ray.io/en/latest/serve/autoscaling-guide.html (2025)
+- pcah/python-clean-architecture, https://github.com/pcah/python-clean-architecture (2025)
+- fast-clean-architecture, https://pypi.org/project/fast-clean-architecture/ (2025)
+- ThinhDA, "Crafting Maintainable Python Applications with Domain-Driven Design and Clean Architecture", https://thinhdanggroup.github.io/python-code-structure/ (2025)
+
+**Query 3**: "Strangler Fig shim Python module migration infrastructure layer re-export 2025"
+
+主要知見:
+- Strangler Fig パターン: 旧モジュールを re-export shim に変換し、新しい canonical 場所に実装を移動する (Fowler 2004)。既存 import パスを破壊しない。
+- Intercepting Facade (AWS Prescriptive Guidance): facade が旧実装と新実装の両方を支える — Python の `from new_location import *` がこの役割を果たす。
+- "Deconstructing the Monolith" (4geeks, 2025): 段階的移行はリスクを最小化し、いつでもロールバック可能にする。テストが常に green であることが安全網。
+- Laminas Project (2025): Strangler Fig は MVC → Middleware 移行にも有効 — 既存の public API (import path) を保持しながら内部実装を刷新する。
+
+References:
+- Fowler, "Strangler Fig Application", https://martinfowler.com/bliki/StranglerFigApplication.html (2004)
+- AWS Prescriptive Guidance, "Strangler fig pattern", https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/strangler-fig.html (2025)
+- 4geeks, "Deconstructing the Monolith: Implementing the Strangler Fig Pattern", https://blog.4geeks.io/deconstructing-the-monolith-implementing-the-strangler-fig-pattern-for-high-availability-migrations/ (2025)
+- Laminas Project, "The Strangler Fig Pattern: A Viable Approach for Migrating MVC to Middleware", https://getlaminas.org/blog/2025-08-06-strangler-fig-pattern.html (2025)
+
