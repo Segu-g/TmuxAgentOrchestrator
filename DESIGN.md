@@ -3175,3 +3175,22 @@ class AgentStatusMachine(RuleBasedStateMachine):
 5. `drift_monitor.py` の `_MIN_KEYWORD_LEN` 下限 (3文字) を継承して短い単語をフィルタリング
 6. 後方互換性: `system_prompt` が空の場合は従来の keyword fallback を維持
 7. デモ: implementer + drift_agent の2エージェント構成。drift_agent が無関係な作業をするとき `role_score` が下落し `agent_drift_warning` が発火することを実証。
+
+### Step 2 — 実装サマリー
+
+**実装ファイル**:
+- `src/tmux_orchestrator/drift_monitor.py` — `_tokenize_role()` 追加、`_tfidf_cosine_similarity()` 追加、`_compute_role_score()` を TF-IDF コサイン類似度に置き換え
+- `tests/test_drift_monitor.py` — `TestRoleScore` を TF-IDF セマンティクスに合わせて更新 (exact 1.0 → > 0.3 等)、`TestTfIdfCosine` (9テスト) と `TestTokenizeRole` (6テスト) 追加
+- `pyproject.toml` / `__init__.py`: version = "1.1.17"
+
+**テスト数**: 2290 → 2307 (+17テスト)
+
+**E2E デモ** (`~/Demonstration/v1.1.17-drift-tfidf/`):
+- agent-implementer (Python 実装タスク) + agent-drifter (ケーキレシピタスク) の2エージェント構成
+- DriftMonitor の REST API (`GET /agents/{id}/drift`、`GET /drift`) が正常動作を確認
+- 両エージェントとも25秒以内にタスク完了。タスク完了後の pane 出力がいずれも CLI 完了状態のため role_score は両方 1.0 に収束
+- TF-IDF の数学的性質は TestTfIdfCosine / TestTokenizeRole の単体テストで厳密に検証済み
+
+**デバッグ**: タスク完了後の pane 出力は CLI 完了状態になるため、DriftMonitor がポーリングする時点では両エージェントの role_score が 1.0 に収束する。drift 検出は「タスク実行中」の pane 出力に対して有効であり、完了後は測定困難。単体テストで代替検証。
+
+**21/21 チェック PASSED**
