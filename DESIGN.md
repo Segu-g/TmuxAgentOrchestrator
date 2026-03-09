@@ -3394,3 +3394,110 @@ v1.1.18 までに §11 の主要フィーチャーはほぼ実装済みとなっ
 **デバッグ**: `GET /scratchpad/` の戻り値が `{"key": "value", ...}` 形式（"keys" フィールドなし）。isinstance(sl_data, dict) ブランチを追加して修正。初回 27/29→再実行 29/29。
 
 **29/29 チェック PASSED**
+
+---
+
+## §10.52 — v1.1.20: `POST /workflows/mob-review` — Mob Code Review ワークフロー
+
+### Step 0 — 選定理由
+
+**選択: `POST /workflows/mob-review` — N並列コードレビュー + シンセサイザーDAG**
+
+**§11 残存未実装候補の精査:**
+
+| 候補 | 状態 | 判定 |
+|------|------|------|
+| スラッシュコマンド自動コピー（高） | v1.0.12 で `_copy_commands()` 実装済み。§11 strikethrough 漏れ | スキップ（既完了） |
+| チェックポイント永続化（高） | v0.45.0 + v1.0.35 で SQLite CheckpointStore + DI 対応済み。§11 strikethrough 漏れ | スキップ（既完了） |
+| DriftMonitor セマンティック類似度（中） | v1.1.17 で TF-IDF コサイン類似度に置き換え済み | スキップ（既完了） |
+| P2P 許可テーブル TLA+ 形式仕様化（中） | TLC model checker の外部ツールチェーン依存が大きく、CI統合が困難 | スキップ（ROI低） |
+| Trace Replay CLI（低） | ResultStore JSONL の拡張が必要。低優先度 | スキップ（低優先度） |
+| DECISION.md 標準フォーマット（低） | ドキュメント追記のみ。デモで実証困難 | スキップ（低価値） |
+| `POST /workflows/mob-review`（新規） | 「競合」パターンの特殊化として N 並列専門レビュアー + シンセサイザーを実装可能。既存 competition/debate インフラを再利用。実証容易 | **選択** |
+
+**何を選択したか・理由:**
+
+`POST /workflows/mob-review` — **Mob Code Review ワークフロー**を v1.1.20 として実装する。
+
+§11 の既存カテゴリー「ワークフローテンプレート」の自然な拡張。Mob Programming（全員が同時に一つの作業を行う開発手法）の「コードレビュー版」として、N 名の専門レビュアーエージェントが並列で同一コードを異なる観点（セキュリティ・パフォーマンス・保守性・テスト適切性）からレビューし、シンセサイザーエージェントが全レビューを統合して構造化レビューレポートを生成するパターン。
+
+**competition との違い**: competition は「勝者を選ぶ」（best-of-N）。mob-review は「全レビューを統合する」（N-to-1 synthesis）。既存 tdd/pair/adr/spec-first ワークフローとは「N並列 → 統合」という新しい DAG 形状を提供する。
+
+**実装コストが低い理由**:
+1. 既存 `WorkflowRun` + `PhaseSpec(parallel)` + `PhaseSpec(single)` で DAG を宣言的に表現できる
+2. `examples/workflows/` に YAML テンプレートを追加するだけでユーザーが即利用可能
+3. 役割テンプレート (`.claude/prompts/roles/`) に `mob-reviewer.md` を1本追加
+
+**選択しなかった候補と理由:**
+- P2P TLA+ 形式仕様化: `tla2tools.jar` の外部依存が必要で CI 統合が困難。ROI が低い。
+- Trace Replay CLI: §11 の「低」優先度。ResultStore 拡張が別イテレーション規模。
+- DECISION.md 標準フォーマット: ドキュメントのみでデモ実証が困難。単独イテレーションとして価値が低い。
+
+**実装スコープ:**
+1. `web/schemas.py` — `MobReviewWorkflowSubmit` Pydantic v2 モデル
+2. `web/routers/workflows.py` — `submit_mob_review_workflow()` エンドポイント
+3. `.claude/prompts/roles/mob-reviewer.md` — 専門レビュアーロールテンプレート
+4. `examples/workflows/mob-review.yaml` — YAML テンプレート
+5. `tests/test_workflow_mob_review.py` — ユニットテスト (目標 +35 テスト)
+6. `tests/fixtures/openapi_schema.json` — OpenAPI スナップショット更新
+7. バージョン 1.1.19 → 1.1.20
+
+**スクラッチパッドキー:**
+- `{prefix}_review_{aspect}` — 各レビュアーの観点別レビュー（security/performance/maintainability/testing）
+- `{prefix}_synthesis` — シンセサイザーが統合した最終レビューレポート
+
+### Step 1 — Research
+
+**Query 1**: "mob programming code review multi-agent LLM parallel review synthesis 2025"
+
+主要知見:
+- **ACM TOSEM 2025 — LLM-Based Multi-Agent Systems for Software Engineering**: マルチエージェント LLM システムにおける cross-examination（相互検査）は、コードレビューと類似した構造を持ち、複数エージェントがデバッグ・検証・バリデーションを並列実行することでより正確・堅牢なソリューションに収束することを示している。
+- **MapCoder (2025)**: 4エージェント構成（例思い出し・計画・コーディング・デバッグ）で協調。各エージェントが専門フェーズを担当し、順次ハンドオフする。「専門化 + シーケンシャル統合」パターンの代表例。
+- **Code in Harmony: Evaluating Multi-Agent Frameworks (OpenReview 2025)**: 並列エージェントが協調してコード品質を評価するフレームワークを評価。ヒエラルキー構造が最も resilience が高い（障害エージェント存在時の性能低下が 5.5% と最小）。
+
+**References**:
+- ACM TOSEM LLM-MAS SE: https://dl.acm.org/doi/10.1145/3712003
+- Code in Harmony OpenReview 2025: https://openreview.net/pdf?id=URUMBfrHFy
+- Survey on Code Generation with LLM Agents (arXiv:2508.00083): https://arxiv.org/html/2508.00083v1
+
+**Query 2**: "multi-agent code review perspectives security performance maintainability parallel LLM 2025"
+
+主要知見:
+- **Multi-Agent LLM Environment for Software Design and Refactoring (ResearchGate 2025)**: 専門エージェント（パフォーマンス最適化・セキュリティ強化・保守性・UX）が協調または競合的に動作し、コンセンサスまたはオークション機構で協調するアーキテクチャを提案。
+- **Designing LLM-based Multi-Agent Systems for Software Engineering Tasks (arXiv:2511.08475)**: コード品質に関して「セキュリティ・保守性・パフォーマンス・コンプライアンス・UX」の多次元品質評価アプローチを推奨。単一エージェントのレビューでは論理的欠陥・パフォーマンス落とし穴・セキュリティ脆弱性を見逃しやすい。
+- **MAGIS (NeurIPS 2024)**: GitHub Issue 解決の LLM マルチエージェントフレームワーク。Manager→Analyst→Developer→QA Engineer の役割分担が有効。QA エージェントがタイムリーなフィードバックを提供するパターン。
+
+**References**:
+- Multi-Agent LLM SE Refactoring: https://www.researchgate.net/publication/391205436_A_Multi-Agent_LLM_Environment_for_Software_Design_and_Refactoring_A_Conceptual_Framework
+- Designing LLM-MAS for SE (arXiv:2511.08475): https://arxiv.org/html/2511.08475v1
+- MAGIS NeurIPS 2024: https://papers.nips.cc/paper_files/paper/2024/file/5d1f02132ef51602adf07000ca5b6138-Paper-Conference.pdf
+
+**Query 3**: "LLM agent ensemble code review synthesis aggregation best practices 2025 arXiv"
+
+主要知見:
+- **Agent-as-a-Judge (arXiv:2508.02994, 2025)**: 独立した判断を集約することでバリアンスとエラーを削減し、投票委員会と同様の効果を得られる。集約手法には「明示的な討論 + 反論」と「並列評価 + 集計」の2系統があり、どちらもモデルの多様性から恩恵を受ける。
+- **ChatEval — Multi-Agent Debate Evaluation (ICLR 2024 / arXiv:2308.07201)**: 各エージェントに固有のペルソナ（役割）を与え、異なる観点を担当させることが必須。同一の役割プロンプトを複数エージェントに使用すると性能が劣化する。**→ mob-review における各レビュアーへの異なる専門観点割り当ての根拠**。
+
+**References**:
+- Agent-as-a-Judge (arXiv:2508.02994): https://arxiv.org/html/2508.02994v1
+- ChatEval (arXiv:2308.07201): https://arxiv.org/pdf/2308.07201
+
+**Query 4**: "multi-perspective code review security performance maintainability agent specialization ChatEval 2024"
+
+主要知見:
+- **ChatEval**: 各エージェントに固有ペルソナを付与し特定の専門性または観点に集中させる設計が、多様な役割プロンプトのない場合と比較して判断品質を大幅に改善することを実証。
+- **Multi-AI code review 実践 (2025)**: セキュリティ・パフォーマンス・保守性・正確性・スタイルの5次元分析に LLM-as-judge のコンセンサスとスコアリングを組み合わせる実践的アプローチ。GitHub PR への自動コメント投稿パイプラインとして実用化。
+
+**References**:
+- ChatEval ICLR 2024: https://arxiv.org/pdf/2308.07201
+- Best Agent Skills for AI Code Review (tessl.io 2025): https://tessl.io/blog/best-agent-skills-for-ai-code-review-8-evaluated-skills-for-dev-workflows/
+- Multi-AI code review skills: https://playbooks.com/skills/adaptationio/skrillz/multi-ai-code-review
+
+**実装への示唆**:
+1. 各レビュアーエージェントに **明確に異なる専門観点**（security/performance/maintainability/testing）を割り当てる（ChatEval の知見）
+2. 全レビューを並列実行し、シンセサイザーが集約（Agent-as-a-Judge の集約パターン）
+3. スクラッチパッドに `{prefix}_review_{aspect}` で各観点レビューを書き込み、シンセサイザーが Select 戦略で読み込む（Anthropic 4戦略 + Blackboard パターン）
+4. 最終レポートは structured format（REVIEW_SUMMARY, CRITICAL_FINDINGS, RECOMMENDATIONS セクション）で出力
+
+### Step 2 — 実装サマリー
+

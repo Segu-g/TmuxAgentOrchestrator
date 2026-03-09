@@ -1082,3 +1082,87 @@ class CompetitionWorkflowSubmit(BaseModel):
             if not str(s).strip():
                 raise ValueError("strategy names must not be blank")
         return v
+
+
+# ---------------------------------------------------------------------------
+# Mob Code Review Workflow
+# ---------------------------------------------------------------------------
+
+_DEFAULT_MOB_ASPECTS = ["security", "performance", "maintainability", "testing"]
+
+
+class MobReviewWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/mob-review — Mob Code Review.
+
+    Submits an (N+1)-agent workflow DAG where N reviewer agents each examine the
+    same code artefact from a **distinct quality dimension** in parallel, then a
+    single synthesizer agent reads all reviews from the scratchpad and produces a
+    unified ``MOB_REVIEW.md`` report.
+
+    Workflow topology::
+
+        reviewer_security       ──┐
+        reviewer_performance    ──┼─→ synthesizer
+        reviewer_maintainability──┤
+        reviewer_testing        ──┘
+
+    **Phase 1 — Parallel Reviewers** (``depends_on=[]``, all start simultaneously):
+      One reviewer per aspect in ``aspects``.  Each reviewer writes its findings to
+      a file ``review_{aspect}.md`` and stores it in the shared scratchpad under the
+      key ``{prefix}_review_{aspect}``.
+
+    **Phase 2 — Synthesizer** (``depends_on=all reviewer task IDs``):
+      Reads every ``{prefix}_review_{aspect}`` key from the scratchpad, merges them
+      into a structured ``MOB_REVIEW.md``, and stores the result under
+      ``{prefix}_synthesis``.
+
+    Scratchpad keys (Blackboard pattern):
+    - ``{prefix}_review_{aspect}`` : per-aspect review findings (one per reviewer)
+    - ``{prefix}_synthesis``       : synthesizer's ``MOB_REVIEW.md`` content
+
+    Artefacts produced by agents:
+    - ``review_{aspect}.md``  — each reviewer's aspect-specific findings
+    - ``MOB_REVIEW.md``       — synthesized review report
+
+    Design references:
+    - ChatEval (arXiv:2308.07201, ICLR 2024): unique reviewer personas eliminate
+      performance degradation caused by role-prompt homogeneity.
+    - Agent-as-a-Judge (arXiv:2508.02994, 2025): aggregating independent judgements
+      reduces variance akin to a voting committee.
+    - Code in Harmony (OpenReview 2025): parallel multi-agent code quality evaluation
+      outperforms sequential review when dimensions are orthogonal.
+    - Multi-Agent LLM SE Refactoring (ResearchGate 2025): specialised agents for
+      security, performance, and maintainability improve multi-dimensional code quality.
+    - DESIGN.md §10.52 (v1.1.20)
+    """
+
+    # The code (or path description) to review
+    code: str
+    # Language or framework context (e.g. "Python FastAPI", "TypeScript React")
+    language: str = "Python"
+    # Aspects to review; default: security, performance, maintainability, testing
+    aspects: list[str] = _DEFAULT_MOB_ASPECTS
+    # Optional routing tags for reviewer and synthesizer agents
+    reviewer_tags: list[str] = []
+    synthesizer_tags: list[str] = []
+    # When set, the synthesizer RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    @field_validator("code")
+    @classmethod
+    def code_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("code must not be empty")
+        return v
+
+    @field_validator("aspects")
+    @classmethod
+    def aspects_must_have_two_to_eight(cls, v: list) -> list:
+        if len(v) < 2:
+            raise ValueError("aspects must have at least 2 entries")
+        if len(v) > 8:
+            raise ValueError("aspects must have at most 8 entries")
+        for a in v:
+            if not str(a).strip():
+                raise ValueError("aspect names must not be blank")
+        return v

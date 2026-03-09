@@ -1,0 +1,65 @@
+# Mob Code Review Workflow Template
+# ==================================
+# N specialist reviewers examine the same code in parallel from distinct quality
+# dimensions, then a synthesizer merges all findings into MOB_REVIEW.md.
+#
+# Pipeline:
+#   reviewer_security       ──┐
+#   reviewer_performance    ──┼─→ synthesizer
+#   reviewer_maintainability──┤
+#   reviewer_testing        ──┘
+#
+# Scratchpad keys (written by agents):
+#   {prefix}_review_{aspect}  — each reviewer's aspect-specific findings
+#   {prefix}_synthesis        — synthesizer's MOB_REVIEW.md content
+#
+# Output files:
+#   review_{aspect}.md  — per-reviewer findings
+#   MOB_REVIEW.md       — unified review report with severity table + recommendations
+#
+# Endpoint: POST /workflows/mob-review
+# Reference: ChatEval arXiv:2308.07201 (ICLR 2024);
+#            Agent-as-a-Judge arXiv:2508.02994 (2025);
+#            Code in Harmony (OpenReview 2025)
+
+workflow:
+  endpoint: /workflows/mob-review
+
+# --- Required fields ---
+
+# The code to review (paste the full source here)
+code: |
+  def get_user(user_id: str, db_conn):
+      query = "SELECT * FROM users WHERE id = " + user_id
+      result = db_conn.execute(query)
+      return result.fetchone()
+
+# Language / framework context shown to all agents
+language: "Python"
+
+# --- Optional fields ---
+
+# Aspects to review (2-8); each maps to a specialist reviewer agent.
+# Default: security, performance, maintainability, testing
+aspects:
+  - security
+  - performance
+  - maintainability
+  - testing
+
+# Agent capability routing (empty = any available agent)
+reviewer_tags: []
+synthesizer_tags: []
+
+# If set, the synthesizer's RESULT is delivered to this agent's mailbox
+reply_to: null
+
+# --- Curl example ---
+# curl -s -X POST http://localhost:8000/workflows/mob-review \
+#   -H "Content-Type: application/json" \
+#   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+#   -d '{
+#     "code": "def get_user(user_id, db):\n    return db.execute(\"SELECT * FROM users WHERE id = \" + user_id).fetchone()",
+#     "language": "Python",
+#     "aspects": ["security", "performance", "maintainability", "testing"]
+#   }'

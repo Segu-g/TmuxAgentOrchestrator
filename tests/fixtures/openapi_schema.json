@@ -886,6 +886,65 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "MobReviewWorkflowSubmit": {
+        "description": "Request body for POST /workflows/mob-review \u2014 Mob Code Review.\n\nSubmits an (N+1)-agent workflow DAG where N reviewer agents each examine the\nsame code artefact from a **distinct quality dimension** in parallel, then a\nsingle synthesizer agent reads all reviews from the scratchpad and produces a\nunified ``MOB_REVIEW.md`` report.\n\nWorkflow topology::\n\n    reviewer_security       \u2500\u2500\u2510\n    reviewer_performance    \u2500\u2500\u253c\u2500\u2192 synthesizer\n    reviewer_maintainability\u2500\u2500\u2524\n    reviewer_testing        \u2500\u2500\u2518\n\n**Phase 1 \u2014 Parallel Reviewers** (``depends_on=[]``, all start simultaneously):\n  One reviewer per aspect in ``aspects``.  Each reviewer writes its findings to\n  a file ``review_{aspect}.md`` and stores it in the shared scratchpad under the\n  key ``{prefix}_review_{aspect}``.\n\n**Phase 2 \u2014 Synthesizer** (``depends_on=all reviewer task IDs``):\n  Reads every ``{prefix}_review_{aspect}`` key from the scratchpad, merges them\n  into a structured ``MOB_REVIEW.md``, and stores the result under\n  ``{prefix}_synthesis``.\n\nScratchpad keys (Blackboard pattern):\n- ``{prefix}_review_{aspect}`` : per-aspect review findings (one per reviewer)\n- ``{prefix}_synthesis``       : synthesizer's ``MOB_REVIEW.md`` content\n\nArtefacts produced by agents:\n- ``review_{aspect}.md``  \u2014 each reviewer's aspect-specific findings\n- ``MOB_REVIEW.md``       \u2014 synthesized review report\n\nDesign references:\n- ChatEval (arXiv:2308.07201, ICLR 2024): unique reviewer personas eliminate\n  performance degradation caused by role-prompt homogeneity.\n- Agent-as-a-Judge (arXiv:2508.02994, 2025): aggregating independent judgements\n  reduces variance akin to a voting committee.\n- Code in Harmony (OpenReview 2025): parallel multi-agent code quality evaluation\n  outperforms sequential review when dimensions are orthogonal.\n- Multi-Agent LLM SE Refactoring (ResearchGate 2025): specialised agents for\n  security, performance, and maintainability improve multi-dimensional code quality.\n- DESIGN.md \u00a710.52 (v1.1.20)",
+        "properties": {
+          "aspects": {
+            "default": [
+              "security",
+              "performance",
+              "maintainability",
+              "testing"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "title": "Aspects",
+            "type": "array"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "language": {
+            "default": "Python",
+            "title": "Language",
+            "type": "string"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "reviewer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Reviewer Tags",
+            "type": "array"
+          },
+          "synthesizer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Synthesizer Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "MobReviewWorkflowSubmit",
+        "type": "object"
+      },
       "PairWorkflowSubmit": {
         "description": "Request body for POST /workflows/pair \u2014 PairCoder (Navigator + Driver) workflow.\n\nSubmits a 2-agent Pair Programming Workflow DAG modelled on the Navigator /\nDriver pattern from Extreme Programming (Beck & Fowler 1999):\n\n  - **navigator**: reads the task description, produces a structured\n    ``PLAN.md`` (architecture, interfaces, acceptance criteria, step-by-step\n    implementation guide) and stores it in the shared scratchpad.\n  - **driver**: reads the navigator's PLAN.md, implements the code, writes\n    tests, runs them, and stores the implementation summary in the scratchpad.\n\nScratchpad keys (Blackboard pattern):\n\n- ``{scratchpad_prefix}_plan``   : navigator's PLAN.md content\n- ``{scratchpad_prefix}_result`` : driver's implementation summary\n\nArtifacts produced by agents:\n\n- ``PLAN.md``           \u2014 navigator's structured plan (in navigator worktree)\n- ``<impl_file>.py``    \u2014 driver's implementation (in driver worktree)\n- ``test_<impl>.py``    \u2014 driver's tests (in driver worktree)\n- ``driver_summary.md`` \u2014 driver's completion summary (in driver worktree)\n\nDesign references:\n- Beck & Fowler \"Extreme Programming Explained\" (1999): Navigator/Driver roles.\n- FlowHunt \"TDD with AI Agents\" (2025): PairCoder improves code quality vs\n  single-agent baseline.\n- Tweag \"Agentic Coding Handbook \u2014 TDD\" (2025): context-separated pair\n  programming approach.\n- DESIGN.md \u00a710.27 (v1.0.27)",
         "properties": {
@@ -4562,6 +4621,47 @@
           }
         },
         "summary": "Submit a 5-agent Full Software Development Lifecycle workflow"
+      }
+    },
+    "/workflows/mob-review": {
+      "post": {
+        "description": "Submit a Mob Code Review Workflow DAG.\n\nSpawns N reviewer agents in **parallel** (all ``depends_on=[]``), each\nexamining the same code from a distinct quality dimension (e.g. security,\nperformance, maintainability, testing).  After all reviewers complete, a\n**synthesizer** agent reads every aspect review from the shared scratchpad\nand produces a unified ``MOB_REVIEW.md`` report.\n\nWorkflow topology::\n\n    reviewer_security       \u2500\u2500\u2510\n    reviewer_performance    \u2500\u2500\u253c\u2500\u2192 synthesizer\n    reviewer_maintainability\u2500\u2500\u2524\n    reviewer_testing        \u2500\u2500\u2518\n\nReturns:\n- ``workflow_id``: workflow run UUID for status polling\n- ``name``: human-readable name (``mob-review/<language>``)\n- ``task_ids``: dict with keys ``reviewer_{aspect}`` (one per aspect)\n  and ``synthesizer``, mapping to global task IDs\n- ``scratchpad_prefix``: scratchpad namespace for this run\n  (e.g. ``mobreview_{run_id[:8]}``)\n\nDesign references:\n- ChatEval (arXiv:2308.07201, ICLR 2024): unique reviewer personas are\n  essential \u2014 homogeneous role prompts degrade multi-agent evaluation quality.\n- Agent-as-a-Judge (arXiv:2508.02994, 2025): aggregating independent\n  judgements reduces variance akin to a voting committee.\n- Code in Harmony (OpenReview 2025): parallel multi-agent evaluation with\n  orthogonal quality dimensions outperforms sequential review.\n- DESIGN.md \u00a710.52 (v1.1.20)",
+        "operationId": "submit_mob_review_workflow_workflows_mob_review_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MobReviewWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Mob Review Workflow Workflows Mob Review Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit an N-reviewer + synthesizer Mob Code Review workflow"
       }
     },
     "/workflows/pair": {

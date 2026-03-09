@@ -19,6 +19,7 @@ from tmux_orchestrator.web.schemas import (
     DebateWorkflowSubmit,
     DelphiWorkflowSubmit,
     FulldevWorkflowSubmit,
+    MobReviewWorkflowSubmit,
     PairWorkflowSubmit,
     RedBlueWorkflowSubmit,
     SpecFirstWorkflowSubmit,
@@ -3174,6 +3175,254 @@ def build_workflows_router(
             "spec_writer": spec_writer_task.id,
             "implementer": implementer_task.id,
         }
+
+        all_task_ids = list(task_ids_map.values())
+        run = wm.submit(name=wf_name, task_ids=all_task_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids_map,
+            "scratchpad_prefix": scratchpad_prefix,
+        }
+
+    @router.post(
+        "/workflows/mob-review",
+        summary="Submit an N-reviewer + synthesizer Mob Code Review workflow",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_mob_review_workflow(body: MobReviewWorkflowSubmit) -> dict:
+        """Submit a Mob Code Review Workflow DAG.
+
+        Spawns N reviewer agents in **parallel** (all ``depends_on=[]``), each
+        examining the same code from a distinct quality dimension (e.g. security,
+        performance, maintainability, testing).  After all reviewers complete, a
+        **synthesizer** agent reads every aspect review from the shared scratchpad
+        and produces a unified ``MOB_REVIEW.md`` report.
+
+        Workflow topology::
+
+            reviewer_security       ──┐
+            reviewer_performance    ──┼─→ synthesizer
+            reviewer_maintainability──┤
+            reviewer_testing        ──┘
+
+        Returns:
+        - ``workflow_id``: workflow run UUID for status polling
+        - ``name``: human-readable name (``mob-review/<language>``)
+        - ``task_ids``: dict with keys ``reviewer_{aspect}`` (one per aspect)
+          and ``synthesizer``, mapping to global task IDs
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+          (e.g. ``mobreview_{run_id[:8]}``)
+
+        Design references:
+        - ChatEval (arXiv:2308.07201, ICLR 2024): unique reviewer personas are
+          essential — homogeneous role prompts degrade multi-agent evaluation quality.
+        - Agent-as-a-Judge (arXiv:2508.02994, 2025): aggregating independent
+          judgements reduces variance akin to a voting committee.
+        - Code in Harmony (OpenReview 2025): parallel multi-agent evaluation with
+          orthogonal quality dimensions outperforms sequential review.
+        - DESIGN.md §10.52 (v1.1.20)
+        """
+        wm = orchestrator.get_workflow_manager()
+        lang_slug = body.language[:30].strip().replace(" ", "_")
+        wf_name = f"mob-review/{lang_slug}"
+
+        pre_run_id = str(uuid.uuid4())
+        scratchpad_prefix = f"mobreview_{pre_run_id[:8]}"
+
+        # Shared snippet for reading orchestrator context + API key
+        _ctx_snippet = (
+            "WEB_BASE_URL=$(python3 -c \""
+            "import json; d=json.load(open('__orchestrator_context__.json')); "
+            "print(d['web_base_url'])\")\n"
+            "   API_KEY=$(cat __orchestrator_api_key__ 2>/dev/null || "
+            "echo \"$TMUX_ORCHESTRATOR_API_KEY\")"
+        )
+
+        def _write_snippet(key: str, filename: str) -> str:
+            """Python3-based scratchpad write snippet (handles quotes/newlines)."""
+            return (
+                f"   python3 -c \"\n"
+                f"import json, urllib.request, os\n"
+                f"content = open('{filename}', 'r', errors='replace').read()\n"
+                f"payload = json.dumps({{'value': content}}).encode()\n"
+                f"api_key = os.environ.get('TMUX_ORCHESTRATOR_API_KEY', '')\n"
+                f"if not api_key:\n"
+                f"    try: api_key = open('__orchestrator_api_key__').read().strip()\n"
+                f"    except: pass\n"
+                f"ctx = json.load(open('__orchestrator_context__.json'))\n"
+                f"base_url = ctx['web_base_url']\n"
+                f"req = urllib.request.Request(base_url + '/scratchpad/{key}', data=payload, method='PUT')\n"
+                f"req.add_header('Content-Type', 'application/json')\n"
+                f"req.add_header('X-API-Key', api_key)\n"
+                f"urllib.request.urlopen(req, timeout=15)\n"
+                f"print('Stored to scratchpad: {key}')\n"
+                f"\"  "
+            )
+
+        task_ids_map: dict[str, str] = {}
+        reviewer_task_ids: list[str] = []
+
+        # ---------- Phase 1: N parallel reviewers ----------------------------
+        for aspect in body.aspects:
+            safe_aspect = aspect.strip().lower().replace(" ", "_").replace("/", "_")
+            review_key = f"{scratchpad_prefix}_review_{safe_aspect}"
+            review_filename = f"review_{safe_aspect}.md"
+
+            # Aspect-specific guidance to ensure persona diversity (ChatEval insight)
+            aspect_guidance: dict[str, str] = {
+                "security": (
+                    "Focus EXCLUSIVELY on security. Look for: injection vulnerabilities "
+                    "(SQL/command/template), authentication/authorisation flaws, insecure "
+                    "data handling, missing input validation, hard-coded credentials, "
+                    "unsafe deserialization, information disclosure, and OWASP Top 10 issues."
+                ),
+                "performance": (
+                    "Focus EXCLUSIVELY on performance. Look for: O(n²) or worse algorithms, "
+                    "unnecessary database queries inside loops (N+1 problem), missing "
+                    "caching opportunities, synchronous I/O in async paths, memory leaks, "
+                    "large data structure copies, and unoptimised string operations."
+                ),
+                "maintainability": (
+                    "Focus EXCLUSIVELY on maintainability. Look for: code duplication (DRY "
+                    "violations), overly complex functions (high cyclomatic complexity), poor "
+                    "naming, missing/inadequate documentation, tight coupling, God objects, "
+                    "magic numbers, long parameter lists, and missing type annotations."
+                ),
+                "testing": (
+                    "Focus EXCLUSIVELY on testability and test coverage. Look for: untestable "
+                    "code patterns (hidden dependencies, no dependency injection), missing "
+                    "edge case tests, lack of error-path coverage, flaky-prone patterns "
+                    "(time-dependent, order-dependent tests), missing mocks for external "
+                    "services, and inadequate assertions."
+                ),
+            }
+            default_guidance = (
+                f"Focus EXCLUSIVELY on **{aspect}** quality. Identify specific issues, "
+                f"explain their impact, and suggest concrete improvements."
+            )
+            guidance = aspect_guidance.get(safe_aspect, default_guidance)
+
+            reviewer_prompt = (
+                f"You are a specialist CODE REVIEWER participating in a Mob Code Review.\n"
+                f"Your assigned quality dimension: **{aspect.upper()}**\n"
+                f"\n"
+                f"{guidance}\n"
+                f"\n"
+                f"**Language/Framework:** {body.language}\n"
+                f"\n"
+                f"**Code to Review:**\n"
+                f"```{body.language.lower().split()[0]}\n"
+                f"{body.code}\n"
+                f"```\n"
+                f"\n"
+                f"Your tasks:\n"
+                f"1. Analyse the code from the **{aspect}** perspective ONLY.\n"
+                f"   Do not comment on other dimensions — those are handled by specialist reviewers.\n"
+                f"2. Write `{review_filename}` with this exact format:\n"
+                f"   ```markdown\n"
+                f"   # {aspect.title()} Review\n"
+                f"   ## Summary\n"
+                f"   <1-3 sentence overall assessment>\n"
+                f"   ## Severity: [CRITICAL|HIGH|MEDIUM|LOW|NONE]\n"
+                f"   ## Findings\n"
+                f"   ### Finding 1: <title>\n"
+                f"   - **Location:** <line numbers or function name>\n"
+                f"   - **Issue:** <description>\n"
+                f"   - **Impact:** <what goes wrong if not fixed>\n"
+                f"   - **Fix:** <concrete recommendation>\n"
+                f"   ...(repeat for each finding)\n"
+                f"   ## Positive Aspects\n"
+                f"   <what the code does well from the {aspect} perspective>\n"
+                f"   ```\n"
+                f"3. Store your review in the shared scratchpad:\n"
+                f"   ```python\n"
+                + _write_snippet(review_key, review_filename)
+                + f"\n"
+                f"   ```\n"
+                f"\n"
+                f"Be precise and concrete. Use line numbers when possible. "
+                f"Rate severity honestly — do not escalate minor issues."
+            )
+
+            reviewer_task = await orchestrator.submit_task(
+                reviewer_prompt,
+                required_tags=body.reviewer_tags or None,
+                depends_on=[],
+            )
+            task_ids_map[f"reviewer_{safe_aspect}"] = reviewer_task.id
+            reviewer_task_ids.append(reviewer_task.id)
+
+        # ---------- Phase 2: synthesizer -------------------------------------
+        review_keys_list = [
+            f"{scratchpad_prefix}_review_{a.strip().lower().replace(' ', '_').replace('/', '_')}"
+            for a in body.aspects
+        ]
+        review_keys_desc = "\n".join(f"   - `{k}`" for k in review_keys_list)
+        synthesis_key = f"{scratchpad_prefix}_synthesis"
+
+        synthesizer_prompt = (
+            f"You are the SYNTHESIZER agent in a Mob Code Review.\n"
+            f"\n"
+            f"Specialist reviewers have independently examined the following code:\n"
+            f"```{body.language.lower().split()[0]}\n"
+            f"{body.code}\n"
+            f"```\n"
+            f"\n"
+            f"Your task:\n"
+            f"1. Read your orchestrator context and API credentials:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            f"   ```\n"
+            f"2. Read ALL specialist reviews from the shared scratchpad:\n"
+            f"   Keys to read:\n"
+            f"{review_keys_desc}\n"
+            f"   Use curl for each: "
+            f"`curl -s -H \"X-API-Key: $API_KEY\" \"$WEB_BASE_URL/scratchpad/<key>\"`\n"
+            f"\n"
+            f"3. Synthesize ALL reviews into `MOB_REVIEW.md` with this exact format:\n"
+            f"   ```markdown\n"
+            f"   # Mob Code Review — {body.language}\n"
+            f"   ## Executive Summary\n"
+            f"   <2-4 sentence overall assessment integrating all dimensions>\n"
+            f"   ## Overall Severity: [CRITICAL|HIGH|MEDIUM|LOW]\n"
+            f"   (take the maximum severity across all aspect reviews)\n"
+            f"   ## Critical Findings\n"
+            f"   <list findings rated CRITICAL or HIGH from any reviewer, with aspect label>\n"
+            f"   ## Medium/Low Findings\n"
+            f"   <list findings rated MEDIUM or LOW, with aspect label>\n"
+            f"   ## Dimension Summary\n"
+            f"   | Dimension | Severity | Key Finding |\n"
+            f"   |-----------|----------|-------------|\n"
+            f"   | <aspect> | <severity> | <one-line summary> |\n"
+            f"   ...\n"
+            f"   ## Recommended Actions\n"
+            f"   1. <highest-priority fix>\n"
+            f"   2. <second-priority fix>\n"
+            f"   ...\n"
+            f"   ## Positive Aspects\n"
+            f"   <what the code does well overall>\n"
+            f"   ```\n"
+            f"4. Store `MOB_REVIEW.md` in the shared scratchpad:\n"
+            f"   ```python\n"
+            + _write_snippet(synthesis_key, "MOB_REVIEW.md")
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Be balanced. Acknowledge strengths as well as weaknesses. "
+            f"Prioritise findings by severity and actionability. "
+            f"The MOB_REVIEW.md should be a self-contained document that a developer "
+            f"can act on without needing to read the individual aspect reviews."
+        )
+
+        synthesizer_task = await orchestrator.submit_task(
+            synthesizer_prompt,
+            required_tags=body.synthesizer_tags or None,
+            depends_on=reviewer_task_ids,
+            reply_to=body.reply_to,
+        )
+        task_ids_map["synthesizer"] = synthesizer_task.id
 
         all_task_ids = list(task_ids_map.values())
         run = wm.submit(name=wf_name, task_ids=all_task_ids)
