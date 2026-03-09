@@ -620,8 +620,8 @@ AI エージェントにとって TDD は「ガードレール」として機能
 | 優先度 | 課題 | 層 |
 |--------|------|----|
 | ~~**高**~~ | ~~**エージェント自律による実行方式変更**~~ | ~~完了 v0.49.0 — `POST /agents/{id}/change-strategy`、`ChangeStrategyRequest` モデル (single/parallel/competitive)、`/change-strategy` スラッシュコマンド。41/41 デモ PASS。~~ |
-| 中 | **`POST /workflows/delphi`** — 3–5 名の専門家ペルソナが多ラウンド合意形成。各ラウンド `delphi_round_{n}.md`、最終 `consensus.md` | 層3 |
-| 中 | **`POST /workflows/redblue`** — blue-team（実装）→ red-team（攻撃者視点）→ arbiter（リスク評価）の対抗評価 | 層3 |
+| ~~中~~ | ~~**`POST /workflows/delphi`**~~ | ~~完了 v1.0.23 — `DelphiWorkflowSubmit`, 3–5エキスパート × 1–3ラウンド, `delphi_round_{n}.md` + `consensus.md`. 22/22 デモ PASS. 40テスト.~~ |
+| ~~中~~ | ~~**`POST /workflows/redblue`**~~ | ~~完了 v1.0.24 — `RedBlueWorkflowSubmit`, blue-team→red-team→arbiter 3エージェントパイプライン. `blue_design.md` + `red_findings.md` + `risk_report.md`. 20/20 デモ PASS. 28テスト.~~ |
 | 中 | **`/deliberate <question>` スラッシュコマンド** — エージェントが自発的に2エージェント討論を起動し `DELIBERATION.md` を生成 | 層3 |
 
 ---
@@ -866,3 +866,47 @@ AI エージェントにとって TDD は「ガードレール」として機能
 - "How to Create Custom Slash Commands in Claude Code", BioErrorLog Tech Blog, https://en.bioerrorlog.work/entry/claude-code-custom-slash-command
 - "Slash Commands in the SDK - Claude API Docs", https://platform.claude.com/docs/en/agent-sdk/slash-commands
 
+
+---
+
+### 10.23 v1.0.24 — POST /workflows/redblue — Red Team / Blue Team 対抗評価ワークフロー
+
+#### 選定理由
+
+**選択: `POST /workflows/redblue` — Red Team / Blue Team 対抗評価ワークフロー (v1.0.24)**
+
+§11「層3：ステージの実行方式」の**中**優先度候補。高優先度の上位アイテムのうち未完了のものは規模が大きい（チェックポイント永続化 SQLite、OpenTelemetry 計装）ため、本イテレーションには適さない。
+
+1. **debate ワークフロー基盤の活用**: v0.37.0 で `POST /workflows/debate` (advocate/critic/judge)、v1.0.23 で `POST /workflows/delphi` を実装済み。redblue は debate の特殊化として、blue-team（実装・設計案）→ red-team（攻撃者視点）→ arbiter（リスク評価）の3エージェント構成で実現できる。既存のスクラッチパッド、タスク依存、role タグルーティングをそのまま活用できる。
+2. **研究的裏付けが強い**: adversarial multi-agent evaluation (arXiv:2410.04663) がバイアス削減と判断精度向上を実証。Red-Teaming LLM MAS (ACL 2025, arXiv:2502.14847) が敵対的エージェント構成のセキュリティレビュー適用を提案。
+3. **デモシナリオが明確**: blue-team が FastAPI エンドポイントを設計し、red-team が認証・入力検証・レートリミットの欠陥を列挙し、arbiter がリスク評価レポートを生成する具体的なシナリオ。成果物（`blue_design.md`、`red_findings.md`、`risk_report.md`）が明確。
+4. **v1.0.23 build-log のフィードバックへの対応**: 「stale worktree cleanup が recurring pain」→ デモで `git worktree prune` を前処理として明示的に実行する手順を標準化。
+
+**選択しなかった候補:**
+- チェックポイント永続化 (SQLite): 実装規模が大きく本イテレーションには不適。
+- OpenTelemetry GenAI Semantic Conventions: 外部インフラ（Jaeger/OTLP）の依存が増えデモが複雑化する。
+- 役割別 system_prompt テンプレートライブラリ: 有用だが、まずワークフロー拡充を優先する（ユーザー向け機能として直接価値が高い）。
+
+---
+
+#### 実装結果 (v1.0.24)
+
+**デモ結果**: 20/20 checks PASSED (2026-03-09)
+
+**実装内容**:
+- `RedBlueWorkflowSubmit` モデル (`topic`, `blue_tags`, `red_tags`, `arbiter_tags`, `reply_to`)
+- `POST /workflows/redblue` エンドポイント — blue_team → red_team → arbiter の3エージェントパイプライン
+- スクラッチパッドキー: `{prefix}_blue_design`, `{prefix}_red_findings`, `{prefix}_risk_report`
+- `tests/test_workflow_redblue.py` — 28 tests
+- OpenAPI スナップショット再生成
+- 総テスト数: **1412 tests** 全通過
+
+**デモパターン**: Adversarial Pipeline — blue-team → red-team → arbiter
+- blue-team: FastAPI JWT 認証エンドポイント設計 (HS256 access token + opaque refresh token)
+- red-team: 9件の脆弱性指摘 (P0: alg:none footgun, Redis SPOF; P1-P2: rate limiting bypass等)
+- arbiter: リスクマトリクス + 優先度付き推奨事項 + "P0修正後は単一サービス向けに適切" 判定
+
+**デモの主な知見**:
+- Stop hook の間欠的不発火は既知の問題。デモに「nudge」機構（3分後にIDLEを検出して手動 task-complete）を追加することで対処。
+- `required_tags` なしの場合、全タスクが最初の空きエージェント（blue-team）に集中するルーティング問題が発生。タグベースルーティングの必要性を確認。
+- `task_timeout: 1500` (25分) で複雑なタスクに十分なマージンを確保。

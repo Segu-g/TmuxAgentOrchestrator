@@ -657,6 +657,48 @@ class DelphiWorkflowSubmit(BaseModel):
         return v
 
 
+class RedBlueWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/redblue — Red Team / Blue Team adversarial evaluation.
+
+    Submits a 3-agent adversarial evaluation DAG:
+
+      1. ``blue_team``: constructs a design, implementation plan, or proposal for
+         *topic* and stores it in ``{scratchpad_prefix}_blue_design``.
+      2. ``red_team``: reads the blue-team output and attacks it from an adversarial
+         perspective — identifying vulnerabilities, flaws, and risks.  Stores
+         findings in ``{scratchpad_prefix}_red_findings``.
+      3. ``arbiter``: reads both artifacts and produces a balanced risk assessment
+         report with prioritised recommendations.  Stores result in
+         ``{scratchpad_prefix}_risk_report``.
+
+    Design references:
+    - Harrasse et al. "Debate, Deliberate, Decide (D3)" arXiv:2410.04663 (2026):
+      adversarial multi-agent evaluation reduces positional/verbosity bias.
+    - "Red-Teaming LLM Multi-Agent Systems via Communication Attacks" ACL 2025
+      (arXiv:2502.14847): structured adversarial evaluation improves system robustness.
+    - Farzulla, "Autonomous Red Team and Blue Team AI" DISSENSUS DAI-2513 (2025):
+      pairing adversarial + defensive agents produces realistic security assessments.
+    - DESIGN.md §10.23 (v1.0.24)
+    """
+
+    topic: str
+    # Optional per-role required_tags for agent capability routing
+    blue_tags: list[str] = []
+    red_tags: list[str] = []
+    arbiter_tags: list[str] = []
+    # When set, the arbiter RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    from pydantic import field_validator
+
+    @field_validator("topic")
+    @classmethod
+    def topic_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("topic must not be empty")
+        return v
+
+
 class FulldevWorkflowSubmit(BaseModel):
     """Request body for POST /workflows/fulldev — Full Software Development Lifecycle.
 
@@ -2970,6 +3012,211 @@ def create_app(
         task_ids_map["consensus"] = consensus_task.id
         all_task_ids.append(consensus_task.id)
 
+        run = wm.submit(name=wf_name, task_ids=all_task_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids_map,
+            "scratchpad_prefix": scratchpad_prefix,
+        }
+
+    @app.post(
+        "/workflows/redblue",
+        summary="Submit a Red Team / Blue Team adversarial evaluation workflow",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_redblue_workflow(body: RedBlueWorkflowSubmit) -> dict:
+        """Submit a 3-agent adversarial evaluation Workflow DAG.
+
+        Pipeline (strictly sequential):
+
+          1. **blue_team**: designs or implements a solution for *topic*, stores
+             result in ``{scratchpad_prefix}_blue_design``.
+          2. **red_team**: reads blue_team output and attacks it — lists
+             vulnerabilities, flaws, and risks; stores result in
+             ``{scratchpad_prefix}_red_findings``.
+          3. **arbiter**: reads both artifacts, produces a balanced risk
+             assessment with prioritised recommendations; stores result in
+             ``{scratchpad_prefix}_risk_report``.
+
+        Returns:
+        - ``workflow_id``: workflow run UUID for status polling
+        - ``name``: human-readable name (``redblue/<topic>``)
+        - ``task_ids``: dict with keys ``blue_team``, ``red_team``, ``arbiter``
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+
+        Design references:
+        - Harrasse et al. "D3" arXiv:2410.04663 (2026): adversarial multi-agent
+          evaluation reduces bias and improves agreement with human judgments.
+        - "Red-Teaming LLM MAS via Communication Attacks" ACL 2025 arXiv:2502.14847.
+        - Farzulla "Autonomous Red Team and Blue Team AI" DAI-2513 (2025).
+        - DESIGN.md §10.23 (v1.0.24)
+        """
+        import uuid as _uuid  # noqa: PLC0415
+
+        wm = orchestrator.get_workflow_manager()
+        wf_name = f"redblue/{body.topic}"
+
+        pre_run_id = str(_uuid.uuid4())
+        scratchpad_prefix = f"redblue_{pre_run_id[:8]}"
+
+        # Shared bash snippets for reading context and API key
+        _ctx_snippet = (
+            "WEB_BASE_URL=$(python3 -c \""
+            "import json; d=json.load(open('__orchestrator_context__.json')); "
+            "print(d['web_base_url'])\")\n"
+            "   API_KEY=$(cat __orchestrator_api_key__ 2>/dev/null || "
+            "echo \"$TMUX_ORCHESTRATOR_API_KEY\")"
+        )
+
+        def _scratchpad_key(suffix: str) -> str:
+            return f"{scratchpad_prefix}_{suffix}"
+
+        def _write_snippet(key: str, var: str = "CONTENT") -> str:
+            return (
+                f"   curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     -H 'Content-Type: application/json' \\\n"
+                f"     -d '{{\"value\": \"'${var}'\"}}'  "
+            )
+
+        def _read_snippet(key: str, varname: str) -> str:
+            return (
+                f"   {varname}=$(curl -s -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"value\"])')\n"
+            )
+
+        blue_design_key = _scratchpad_key("blue_design")
+        red_findings_key = _scratchpad_key("red_findings")
+        risk_report_key = _scratchpad_key("risk_report")
+
+        # --- Blue-team prompt ---
+        blue_prompt = (
+            f"You are the BLUE-TEAM agent in a Red/Blue adversarial evaluation workflow.\n"
+            f"\n"
+            f"**Evaluation topic:** {body.topic}\n"
+            f"\n"
+            f"Your task is to produce a concrete design or implementation plan for the topic above.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Analyse the topic and design a concrete solution:\n"
+            f"   - Describe the approach, architecture, or implementation plan.\n"
+            f"   - Include key technical decisions with rationale.\n"
+            f"   - Be specific: name technologies, patterns, or APIs you would use.\n"
+            f"   - Address security, performance, and maintainability.\n"
+            f"2. Write your design to `blue_design.md` in your working directory.\n"
+            f"3. Store it in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            f"   CONTENT=$(cat blue_design.md)\n"
+            + _write_snippet(blue_design_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Be thorough and honest — the red-team will scrutinise your design. Max 500 words."
+        )
+
+        # --- Red-team prompt ---
+        red_prompt = (
+            f"You are the RED-TEAM agent in a Red/Blue adversarial evaluation workflow.\n"
+            f"\n"
+            f"**Evaluation topic:** {body.topic}\n"
+            f"\n"
+            f"Your role is to act as an adversary and find weaknesses in the blue-team design.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read the blue-team design from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(blue_design_key, "BLUE_DESIGN")
+            + f"   echo \"Blue design: $BLUE_DESIGN\"\n"
+            f"   ```\n"
+            f"2. Attack the design rigorously from an adversarial perspective:\n"
+            f"   - Identify security vulnerabilities (authentication, authorisation, injection, etc.).\n"
+            f"   - Find scalability / reliability risks.\n"
+            f"   - Spot missing error handling or edge cases.\n"
+            f"   - Highlight hidden assumptions that may not hold in production.\n"
+            f"   - Be specific: name exact weaknesses, not vague concerns.\n"
+            f"   - Do NOT be constructive — your job is to list problems, not solutions.\n"
+            f"3. Write your findings to `red_findings.md` in your working directory.\n"
+            f"4. Store findings in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   CONTENT=$(cat red_findings.md)\n"
+            + _write_snippet(red_findings_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Be adversarial and thorough. Max 400 words."
+        )
+
+        # --- Arbiter prompt ---
+        arbiter_prompt = (
+            f"You are the ARBITER agent in a Red/Blue adversarial evaluation workflow.\n"
+            f"\n"
+            f"**Evaluation topic:** {body.topic}\n"
+            f"\n"
+            f"Your task is to read both the blue-team design and red-team findings,\n"
+            f"then produce a balanced risk assessment report.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read both artifacts from the scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(blue_design_key, "BLUE_DESIGN")
+            + _read_snippet(red_findings_key, "RED_FINDINGS")
+            + f"   ```\n"
+            f"2. Write `risk_report.md` in your working directory with these sections:\n"
+            f"   ```markdown\n"
+            f"   # Risk Assessment: {body.topic}\n"
+            f"   ## Blue-Team Design Summary\n"
+            f"   ## Red-Team Findings Summary\n"
+            f"   ## Risk Matrix\n"
+            f"   | Risk | Severity (High/Med/Low) | Likelihood | Mitigation |\n"
+            f"   |------|------------------------|------------|------------|\n"
+            f"   ## Overall Risk Level\n"
+            f"   ## Prioritised Recommendations\n"
+            f"   ## Verdict\n"
+            f"   ```\n"
+            f"3. Store the report in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   CONTENT=$(cat risk_report.md)\n"
+            + _write_snippet(risk_report_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Be balanced and objective. Acknowledge both the blue-team's strengths and "
+            f"the red-team's valid concerns. Prioritise recommendations by severity."
+        )
+
+        # Submit tasks in pipeline order
+        blue_task = await orchestrator.submit_task(
+            blue_prompt,
+            required_tags=body.blue_tags or None,
+            depends_on=[],
+        )
+
+        red_task = await orchestrator.submit_task(
+            red_prompt,
+            required_tags=body.red_tags or None,
+            depends_on=[blue_task.id],
+        )
+
+        arbiter_task = await orchestrator.submit_task(
+            arbiter_prompt,
+            required_tags=body.arbiter_tags or None,
+            depends_on=[red_task.id],
+            reply_to=body.reply_to,
+        )
+
+        task_ids_map = {
+            "blue_team": blue_task.id,
+            "red_team": red_task.id,
+            "arbiter": arbiter_task.id,
+        }
+
+        all_task_ids = list(task_ids_map.values())
         run = wm.submit(name=wf_name, task_ids=all_task_ids)
 
         return {

@@ -633,6 +633,55 @@
         "title": "RateLimitUpdate",
         "type": "object"
       },
+      "RedBlueWorkflowSubmit": {
+        "description": "Request body for POST /workflows/redblue \u2014 Red Team / Blue Team adversarial evaluation.\n\nSubmits a 3-agent adversarial evaluation DAG:\n\n  1. ``blue_team``: constructs a design, implementation plan, or proposal for\n     *topic* and stores it in ``{scratchpad_prefix}_blue_design``.\n  2. ``red_team``: reads the blue-team output and attacks it from an adversarial\n     perspective \u2014 identifying vulnerabilities, flaws, and risks.  Stores\n     findings in ``{scratchpad_prefix}_red_findings``.\n  3. ``arbiter``: reads both artifacts and produces a balanced risk assessment\n     report with prioritised recommendations.  Stores result in\n     ``{scratchpad_prefix}_risk_report``.\n\nDesign references:\n- Harrasse et al. \"Debate, Deliberate, Decide (D3)\" arXiv:2410.04663 (2026):\n  adversarial multi-agent evaluation reduces positional/verbosity bias.\n- \"Red-Teaming LLM Multi-Agent Systems via Communication Attacks\" ACL 2025\n  (arXiv:2502.14847): structured adversarial evaluation improves system robustness.\n- Farzulla, \"Autonomous Red Team and Blue Team AI\" DISSENSUS DAI-2513 (2025):\n  pairing adversarial + defensive agents produces realistic security assessments.\n- DESIGN.md \u00a710.23 (v1.0.24)",
+        "properties": {
+          "arbiter_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Arbiter Tags",
+            "type": "array"
+          },
+          "blue_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Blue Tags",
+            "type": "array"
+          },
+          "red_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Red Tags",
+            "type": "array"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "topic": {
+            "title": "Topic",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic"
+        ],
+        "title": "RedBlueWorkflowSubmit",
+        "type": "object"
+      },
       "ScratchpadWrite": {
         "description": "Request body for PUT /scratchpad/{key}.",
         "properties": {
@@ -3491,6 +3540,47 @@
           }
         },
         "summary": "Submit a 5-agent Full Software Development Lifecycle workflow"
+      }
+    },
+    "/workflows/redblue": {
+      "post": {
+        "description": "Submit a 3-agent adversarial evaluation Workflow DAG.\n\nPipeline (strictly sequential):\n\n  1. **blue_team**: designs or implements a solution for *topic*, stores\n     result in ``{scratchpad_prefix}_blue_design``.\n  2. **red_team**: reads blue_team output and attacks it \u2014 lists\n     vulnerabilities, flaws, and risks; stores result in\n     ``{scratchpad_prefix}_red_findings``.\n  3. **arbiter**: reads both artifacts, produces a balanced risk\n     assessment with prioritised recommendations; stores result in\n     ``{scratchpad_prefix}_risk_report``.\n\nReturns:\n- ``workflow_id``: workflow run UUID for status polling\n- ``name``: human-readable name (``redblue/<topic>``)\n- ``task_ids``: dict with keys ``blue_team``, ``red_team``, ``arbiter``\n- ``scratchpad_prefix``: scratchpad namespace for this run\n\nDesign references:\n- Harrasse et al. \"D3\" arXiv:2410.04663 (2026): adversarial multi-agent\n  evaluation reduces bias and improves agreement with human judgments.\n- \"Red-Teaming LLM MAS via Communication Attacks\" ACL 2025 arXiv:2502.14847.\n- Farzulla \"Autonomous Red Team and Blue Team AI\" DAI-2513 (2025).\n- DESIGN.md \u00a710.23 (v1.0.24)",
+        "operationId": "submit_redblue_workflow_workflows_redblue_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RedBlueWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Redblue Workflow Workflows Redblue Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a Red Team / Blue Team adversarial evaluation workflow"
       }
     },
     "/workflows/tdd": {
