@@ -1166,3 +1166,58 @@ class MobReviewWorkflowSubmit(BaseModel):
             if not str(a).strip():
                 raise ValueError("aspect names must not be blank")
         return v
+
+
+# ---------------------------------------------------------------------------
+# Iterative Review Workflow
+# ---------------------------------------------------------------------------
+
+
+class IterativeReviewWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/iterative-review.
+
+    Submits a 3-agent sequential pipeline workflow where an implementer writes code,
+    a reviewer critiques it (Self-Refine FEEDBACK step), and a revisor produces an
+    improved version (Self-Refine REFINE step).
+
+    Workflow topology (all sequential via depends_on)::
+
+        implementer → reviewer → revisor
+
+    Design references:
+    - Self-Refine (Madaan et al. NeurIPS 2023, arXiv:2303.17651): FEEDBACK→REFINE
+      iterative loop improves output quality ~20% on average.
+    - MAR: Multi-Agent Reflexion (arXiv:2512.20845, 2025): cross-agent feedback
+      outperforms single-agent self-feedback.
+    - RevAgent (arXiv:2511.00517, 2025): multi-stage code review pipeline with
+      specialized roles per stage.
+    - DESIGN.md §10.53 (v1.1.21)
+
+    Scratchpad keys (Blackboard pattern):
+    - ``{prefix}_implementation`` : implementer's initial code (written by implementer)
+    - ``{prefix}_review``         : reviewer's annotated feedback (written by reviewer)
+    - ``{prefix}_revised``        : revisor's improved code (written by revisor)
+
+    Artefacts produced:
+    - ``implementation.py`` / ``implementation.{ext}`` — initial implementation
+    - ``review.md`` — annotated review with Self-Refine FEEDBACK format
+    - ``revised.py`` / ``revised.{ext}`` — revised implementation after feedback
+    """
+
+    # Task specification — what to implement
+    task: str
+    # Language / framework context
+    language: str = "Python"
+    # Optional routing tags per role (empty = any available agent)
+    implementer_tags: list[str] = []
+    reviewer_tags: list[str] = []
+    revisor_tags: list[str] = []
+    # When set, the revisor RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    @field_validator("task")
+    @classmethod
+    def task_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("task must not be empty")
+        return v

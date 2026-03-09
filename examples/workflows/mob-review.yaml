@@ -21,6 +21,36 @@
 # Reference: ChatEval arXiv:2308.07201 (ICLR 2024);
 #            Agent-as-a-Judge arXiv:2508.02994 (2025);
 #            Code in Harmony (OpenReview 2025)
+#
+# --- IMPORTANT: Agent routing (required_tags) ---
+# By default, the orchestrator auto-generates per-aspect required_tags:
+#   aspect "security"        → required_tags: ["mob_reviewer", "security"]
+#   aspect "performance"     → required_tags: ["mob_reviewer", "performance"]
+#   aspect "maintainability" → required_tags: ["mob_reviewer", "maintainability"]
+#   aspect "testing"         → required_tags: ["mob_reviewer", "testing"]
+#
+# Your YAML agent config MUST tag each reviewer agent accordingly:
+#
+#   agents:
+#     - id: reviewer-security
+#       type: claude_code
+#       tags: ["mob_reviewer", "security"]
+#     - id: reviewer-performance
+#       type: claude_code
+#       tags: ["mob_reviewer", "performance"]
+#     - id: reviewer-maintainability
+#       type: claude_code
+#       tags: ["mob_reviewer", "maintainability"]
+#     - id: reviewer-testing
+#       type: claude_code
+#       tags: ["mob_reviewer", "testing"]
+#     - id: synthesizer
+#       type: claude_code
+#       tags: ["mob_synthesizer"]
+#
+# Set synthesizer_tags: ["mob_synthesizer"] below to route the synthesis task.
+# If reviewer_tags is set explicitly, that overrides the auto-generated tags for ALL reviewers.
+# Leave reviewer_tags empty (default) to use per-aspect auto-routing.
 
 workflow:
   endpoint: /workflows/mob-review
@@ -47,9 +77,12 @@ aspects:
   - maintainability
   - testing
 
-# Agent capability routing (empty = any available agent)
+# Agent capability routing.
+# reviewer_tags: leave empty to use auto-generated per-aspect tags ["mob_reviewer", "{aspect}"].
+#                Set explicitly to override all reviewer routing with the same tags.
+# synthesizer_tags: set to route the synthesizer task to a specific agent.
 reviewer_tags: []
-synthesizer_tags: []
+synthesizer_tags: ["mob_synthesizer"]
 
 # If set, the synthesizer's RESULT is delivered to this agent's mailbox
 reply_to: null
@@ -61,5 +94,6 @@ reply_to: null
 #   -d '{
 #     "code": "def get_user(user_id, db):\n    return db.execute(\"SELECT * FROM users WHERE id = \" + user_id).fetchone()",
 #     "language": "Python",
-#     "aspects": ["security", "performance", "maintainability", "testing"]
+#     "aspects": ["security", "performance", "maintainability", "testing"],
+#     "synthesizer_tags": ["mob_synthesizer"]
 #   }'

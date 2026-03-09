@@ -649,3 +649,123 @@ class TestMobReviewWorkflowStatus:
             headers=auth_headers(),
         )
         assert r1.json()["scratchpad_prefix"] != r2.json()["scratchpad_prefix"]
+
+
+# ---------------------------------------------------------------------------
+# required_tags routing — per-aspect auto-generation (v1.1.21 bug fix)
+# ---------------------------------------------------------------------------
+
+
+class TestMobReviewRequiredTags:
+    """Verify per-aspect required_tags auto-generation for correct agent routing."""
+
+    def test_default_reviewer_tags_are_per_aspect(self, client_and_orch):
+        """When reviewer_tags is empty, each reviewer task gets ['mob_reviewer', aspect]."""
+        client, orch = client_and_orch
+        resp = client.post(
+            "/workflows/mob-review",
+            json={"code": _SAMPLE_CODE, "aspects": ["security", "performance"]},
+            headers=auth_headers(),
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        tasks = _get_tasks(client)
+
+        security_tid = data["task_ids"]["reviewer_security"]
+        perf_tid = data["task_ids"]["reviewer_performance"]
+
+        security_tags = tasks[security_tid].get("required_tags", [])
+        perf_tags = tasks[perf_tid].get("required_tags", [])
+
+        assert "mob_reviewer" in security_tags, (
+            f"security reviewer task should have 'mob_reviewer' tag, got {security_tags!r}"
+        )
+        assert "security" in security_tags, (
+            f"security reviewer task should have 'security' tag, got {security_tags!r}"
+        )
+        assert "mob_reviewer" in perf_tags, (
+            f"performance reviewer task should have 'mob_reviewer' tag, got {perf_tags!r}"
+        )
+        assert "performance" in perf_tags, (
+            f"performance reviewer task should have 'performance' tag, got {perf_tags!r}"
+        )
+
+    def test_security_and_performance_tags_differ(self, client_and_orch):
+        """Security and performance reviewer tasks must have different required_tags."""
+        client, orch = client_and_orch
+        resp = client.post(
+            "/workflows/mob-review",
+            json={"code": _SAMPLE_CODE, "aspects": ["security", "performance"]},
+            headers=auth_headers(),
+        )
+        data = resp.json()
+        tasks = _get_tasks(client)
+
+        security_tags = set(tasks[data["task_ids"]["reviewer_security"]].get("required_tags", []))
+        perf_tags = set(tasks[data["task_ids"]["reviewer_performance"]].get("required_tags", []))
+
+        # They share "mob_reviewer" but differ in the aspect tag
+        assert security_tags != perf_tags, (
+            "security and performance reviewer tasks should have different required_tags"
+        )
+
+    def test_four_aspects_each_get_distinct_tags(self, client_and_orch):
+        """All four default aspects should each get unique per-aspect required_tags."""
+        client, orch = client_and_orch
+        resp = client.post(
+            "/workflows/mob-review",
+            json={"code": _SAMPLE_CODE, "aspects": _DEFAULT_ASPECTS},
+            headers=auth_headers(),
+        )
+        data = resp.json()
+        tasks = _get_tasks(client)
+
+        tag_sets: list[frozenset] = []
+        for aspect in _DEFAULT_ASPECTS:
+            tid = data["task_ids"][f"reviewer_{aspect}"]
+            tag_sets.append(frozenset(tasks[tid].get("required_tags", [])))
+
+        # All four tag sets should be distinct
+        assert len(set(tag_sets)) == len(_DEFAULT_ASPECTS), (
+            f"expected 4 distinct tag sets, got {tag_sets!r}"
+        )
+
+    def test_explicit_reviewer_tags_override_auto_generation(self, client_and_orch):
+        """When reviewer_tags is set, it overrides the auto-generated per-aspect tags."""
+        client, orch = client_and_orch
+        explicit_tags = ["my_custom_reviewer"]
+        resp = client.post(
+            "/workflows/mob-review",
+            json={
+                "code": _SAMPLE_CODE,
+                "aspects": ["security", "performance"],
+                "reviewer_tags": explicit_tags,
+            },
+            headers=auth_headers(),
+        )
+        data = resp.json()
+        tasks = _get_tasks(client)
+
+        for aspect in ["security", "performance"]:
+            tid = data["task_ids"][f"reviewer_{aspect}"]
+            task_tags = tasks[tid].get("required_tags", [])
+            assert task_tags == explicit_tags, (
+                f"reviewer_{aspect} should have explicit tags {explicit_tags!r}, got {task_tags!r}"
+            )
+
+    def test_custom_aspect_gets_auto_tags(self, client_and_orch):
+        """Custom (non-default) aspects also get auto-generated per-aspect tags."""
+        client, orch = client_and_orch
+        resp = client.post(
+            "/workflows/mob-review",
+            json={"code": _SAMPLE_CODE, "aspects": ["security", "documentation"]},
+            headers=auth_headers(),
+        )
+        data = resp.json()
+        tasks = _get_tasks(client)
+
+        doc_tid = data["task_ids"]["reviewer_documentation"]
+        doc_tags = tasks[doc_tid].get("required_tags", [])
+
+        assert "mob_reviewer" in doc_tags
+        assert "documentation" in doc_tags

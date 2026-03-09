@@ -886,6 +886,60 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "IterativeReviewWorkflowSubmit": {
+        "description": "Request body for POST /workflows/iterative-review.\n\nSubmits a 3-agent sequential pipeline workflow where an implementer writes code,\na reviewer critiques it (Self-Refine FEEDBACK step), and a revisor produces an\nimproved version (Self-Refine REFINE step).\n\nWorkflow topology (all sequential via depends_on)::\n\n    implementer \u2192 reviewer \u2192 revisor\n\nDesign references:\n- Self-Refine (Madaan et al. NeurIPS 2023, arXiv:2303.17651): FEEDBACK\u2192REFINE\n  iterative loop improves output quality ~20% on average.\n- MAR: Multi-Agent Reflexion (arXiv:2512.20845, 2025): cross-agent feedback\n  outperforms single-agent self-feedback.\n- RevAgent (arXiv:2511.00517, 2025): multi-stage code review pipeline with\n  specialized roles per stage.\n- DESIGN.md \u00a710.53 (v1.1.21)\n\nScratchpad keys (Blackboard pattern):\n- ``{prefix}_implementation`` : implementer's initial code (written by implementer)\n- ``{prefix}_review``         : reviewer's annotated feedback (written by reviewer)\n- ``{prefix}_revised``        : revisor's improved code (written by revisor)\n\nArtefacts produced:\n- ``implementation.py`` / ``implementation.{ext}`` \u2014 initial implementation\n- ``review.md`` \u2014 annotated review with Self-Refine FEEDBACK format\n- ``revised.py`` / ``revised.{ext}`` \u2014 revised implementation after feedback",
+        "properties": {
+          "implementer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Implementer Tags",
+            "type": "array"
+          },
+          "language": {
+            "default": "Python",
+            "title": "Language",
+            "type": "string"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "reviewer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Reviewer Tags",
+            "type": "array"
+          },
+          "revisor_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Revisor Tags",
+            "type": "array"
+          },
+          "task": {
+            "title": "Task",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task"
+        ],
+        "title": "IterativeReviewWorkflowSubmit",
+        "type": "object"
+      },
       "MobReviewWorkflowSubmit": {
         "description": "Request body for POST /workflows/mob-review \u2014 Mob Code Review.\n\nSubmits an (N+1)-agent workflow DAG where N reviewer agents each examine the\nsame code artefact from a **distinct quality dimension** in parallel, then a\nsingle synthesizer agent reads all reviews from the scratchpad and produces a\nunified ``MOB_REVIEW.md`` report.\n\nWorkflow topology::\n\n    reviewer_security       \u2500\u2500\u2510\n    reviewer_performance    \u2500\u2500\u253c\u2500\u2192 synthesizer\n    reviewer_maintainability\u2500\u2500\u2524\n    reviewer_testing        \u2500\u2500\u2518\n\n**Phase 1 \u2014 Parallel Reviewers** (``depends_on=[]``, all start simultaneously):\n  One reviewer per aspect in ``aspects``.  Each reviewer writes its findings to\n  a file ``review_{aspect}.md`` and stores it in the shared scratchpad under the\n  key ``{prefix}_review_{aspect}``.\n\n**Phase 2 \u2014 Synthesizer** (``depends_on=all reviewer task IDs``):\n  Reads every ``{prefix}_review_{aspect}`` key from the scratchpad, merges them\n  into a structured ``MOB_REVIEW.md``, and stores the result under\n  ``{prefix}_synthesis``.\n\nScratchpad keys (Blackboard pattern):\n- ``{prefix}_review_{aspect}`` : per-aspect review findings (one per reviewer)\n- ``{prefix}_synthesis``       : synthesizer's ``MOB_REVIEW.md`` content\n\nArtefacts produced by agents:\n- ``review_{aspect}.md``  \u2014 each reviewer's aspect-specific findings\n- ``MOB_REVIEW.md``       \u2014 synthesized review report\n\nDesign references:\n- ChatEval (arXiv:2308.07201, ICLR 2024): unique reviewer personas eliminate\n  performance degradation caused by role-prompt homogeneity.\n- Agent-as-a-Judge (arXiv:2508.02994, 2025): aggregating independent judgements\n  reduces variance akin to a voting committee.\n- Code in Harmony (OpenReview 2025): parallel multi-agent code quality evaluation\n  outperforms sequential review when dimensions are orthogonal.\n- Multi-Agent LLM SE Refactoring (ResearchGate 2025): specialised agents for\n  security, performance, and maintainability improve multi-dimensional code quality.\n- DESIGN.md \u00a710.52 (v1.1.20)",
         "properties": {
@@ -4621,6 +4675,47 @@
           }
         },
         "summary": "Submit a 5-agent Full Software Development Lifecycle workflow"
+      }
+    },
+    "/workflows/iterative-review": {
+      "post": {
+        "description": "Submit an Iterative Review Workflow DAG.\n\nSpawns 3 sequential agents: an **implementer** writes the initial code,\na **reviewer** critiques it (Self-Refine FEEDBACK step), and a **revisor**\nproduces an improved version (Self-Refine REFINE step).\n\nWorkflow topology (sequential via depends_on)::\n\n    implementer \u2192 reviewer \u2192 revisor\n\nReturns:\n- ``workflow_id``: workflow run UUID for status polling\n- ``name``: human-readable name (``iterative-review/<task_slug>``)\n- ``task_ids``: dict with keys ``implementer``, ``reviewer``, ``revisor``\n- ``scratchpad_prefix``: scratchpad namespace for this run\n  (e.g. ``iterrev_{run_id[:8]}``)\n\nDesign references:\n- Self-Refine (arXiv:2303.17651, NeurIPS 2023): FEEDBACK\u2192REFINE iterative\n  loop improves code quality ~20% on average. reviewer=FEEDBACK, revisor=REFINE.\n- MAR: Multi-Agent Reflexion (arXiv:2512.20845, 2025): cross-agent feedback\n  outperforms single-agent self-feedback.\n- RevAgent (arXiv:2511.00517, 2025): multi-stage code review pipeline.\n- DESIGN.md \u00a710.53 (v1.1.21)",
+        "operationId": "submit_iterative_review_workflow_workflows_iterative_review_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IterativeReviewWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Iterative Review Workflow Workflows Iterative Review Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit an implementer\u2192reviewer\u2192revisor Iterative Review workflow"
       }
     },
     "/workflows/mob-review": {

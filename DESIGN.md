@@ -3531,3 +3531,115 @@ v1.1.18 までに §11 の主要フィーチャーはほぼ実装済みとなっ
 
 **29/30 チェック PASSED**
 
+---
+
+## §10.53 — v1.1.21: mob-review `required_tags` 自動生成 + `POST /workflows/iterative-review`
+
+### Step 0 — 選択と理由
+
+**選択: mob-review required_tags バグ修正 + POST /workflows/iterative-review (反復レビューワークフロー)**
+
+**バグ修正 (必須):**
+v1.1.20 デモで `reviewer_security` タスクが `reviewer-maintainability` エージェントにディスパッチされた。
+根本原因: `submit_mob_review_workflow()` が `required_tags=body.reviewer_tags or None` を全レビュアーに同一タグを使用しており、アスペクト別のルーティングができなかった。
+修正: 各アスペクト（security/performance/maintainability/testing）に対して `["mob_reviewer", "{aspect}"]` を自動生成する。
+
+**次機能 — POST /workflows/iterative-review:**
+§11 の残存未実装候補を精査した結果:
+- Trace Replay CLI（低）: ResultStore 拡張が大規模。ROI 低。スキップ。
+- DECISION.md 標準フォーマット（低）: ドキュメントのみ。デモ実証困難。スキップ。
+- クリーンアーキテクチャ移行（高）: 大規模リファクタリング。1イテレーションで完結しない。スキップ。
+
+`POST /workflows/iterative-review` を選択する理由:
+1. **mob-review の自然な拡張**: 並列（mob-review）と直列（iterative）の両方のレビューパターンを提供することで、ユーザーの選択肢が広がる。
+2. **研究的裏付けが明確**: Code Review 2.0 / Self-Refine (arXiv:2303.17651) が反復的フィードバックループの有効性を実証している。
+3. **デモ価値が高い**: 実装者 → レビュアー → 修正者 の3エージェントパイプラインは、エージェント間の依存関係と協調を明確に示す。
+4. **実装コストが中程度**: `depends_on` チェーンを活用することで、既存インフラを最大限利用できる。
+
+ワークフロー構造:
+```
+implementer → reviewer → revisor
+```
+1. `implementer`: コードを実装し scratchpad に保存
+2. `reviewer`: 実装を受け取り、アノテーション付きレビューを行い scratchpad に保存
+3. `revisor`: 実装 + レビューを受け取り、修正版を生成
+
+**選択しなかった候補と理由:**
+- Trace Replay CLI: 低優先度、ResultStore 大規模拡張が必要。
+- DECISION.md 標準フォーマット: ドキュメントのみでデモ実証が困難。
+- クリーンアーキテクチャ移行: 1イテレーション完結不可。
+
+**実装スコープ:**
+1. `web/routers/workflows.py` — mob-review required_tags バグ修正 (per-aspect auto-generation)
+2. `examples/workflows/mob-review.yaml` — タグルーティングのガイダンスを追加
+3. `web/schemas.py` — `IterativeReviewWorkflowSubmit` Pydantic v2 モデル
+4. `web/routers/workflows.py` — `POST /workflows/iterative-review` エンドポイント
+5. `tests/test_workflow_mob_review.py` — required_tags 修正のテスト追加
+6. `tests/test_workflow_iterative_review.py` — 新ワークフローのテスト（目標 +30テスト）
+7. `tests/fixtures/openapi_schema.json` — OpenAPI スナップショット更新
+8. `pyproject.toml` — version 1.1.20 → 1.1.21
+
+**スクラッチパッドキー (iterative-review):**
+- `{prefix}_implementation` — implementer が生成したコード実装
+- `{prefix}_review` — reviewer のアノテーション付きフィードバック
+- `{prefix}_revised` — revisor が生成した修正版コード
+
+### Step 1 — Research
+
+**Query 1**: "iterative code review LLM agent self-refine feedback loop multi-agent 2025"
+
+主要知見:
+- **Self-Refine (arXiv:2303.17651, NeurIPS 2023)**: LLM が自身の出力を批評・改善する反復的フィードバックループ。FEEDBACK モジュール → REFINE モジュールの交互実行で出力品質を平均 ~20% 向上。コード生成タスクにおいても有効（コード最適化スコアで有意改善）。
+- **LessonL (arXiv:2505.23946, 2025)**: 複数 LLM エージェントがコード最適化を協調実行する solicitation–banking–selection フレームワーク。小規模エージェント群の協調が単一大規模 LLM を上回ることを実証。
+- **MAR: Multi-Agent Reflexion (arXiv:2512.20845, 2025)**: 複数エージェントによる相互フィードバックが自己フィードバックより高品質な改善を生む。`implementer → reviewer → revisor` の3エージェントチェーンはこのパターンの直接実装。
+
+**References**:
+- Self-Refine (arXiv:2303.17651): https://arxiv.org/abs/2303.17651
+- LessonL (arXiv:2505.23946): https://arxiv.org/pdf/2505.23946
+- MAR Multi-Agent Reflexion (arXiv:2512.20845): https://arxiv.org/html/2512.20845
+
+**Query 2**: "multi-agent task routing required_tags capability matching dispatch pattern 2025"
+
+主要知見:
+- **AWS Prescriptive Guidance — Routing dynamic dispatch patterns (2025)**: コーディネーター/ディスパッチャーパターンでは、タスクの意図を分析し最も適した専門エージェントへルーティングする。能力（capability）マッチングが中核要素。
+- **MasRouter (ACL 2025 — aclanthology.org/2025.acl-long.757)**: LLM ルーティングシステムがタスク複雑度・エージェント能力・コストを同時最適化。タスクへのタグ付けとエージェントへの能力タグ付けの対応が最もシンプルで robust なルーティング機構。
+- **Google ADK 8 essential patterns (InfoQ 2026-01)**: Sequential Pipeline / Capability-based routing がトップ2の必須パターンとして挙げられている。
+
+**References**:
+- AWS Routing patterns: https://docs.aws.amazon.com/prescriptive-guidance/latest/agentic-ai-patterns/routing-dynamic-dispatch-patterns.html
+- MasRouter ACL 2025: https://aclanthology.org/2025.acl-long.757.pdf
+- Google ADK patterns: https://developers.googleblog.com/developers-guide-to-multi-agent-patterns-in-adk/
+
+**Query 3**: "LLM code review pipeline implementer reviewer revisor three-agent chain 2025 arXiv"
+
+主要知見:
+- **RevAgent (arXiv:2511.00517, 2025)**: 5カテゴリ専門コメンテーターエージェント（生成段階）+ 1クリティックエージェント（識別段階）の2段階パイプライン。役割明確化 + 直列依存関係の典型パターン。本 `iterative-review` ワークフローの直接参照。
+- **AgentCoder**: programmer → test_designer → test_executor の3エージェントパイプライン。役割明確化 + 直列依存関係 (`depends_on`) の典型パターン。
+- **Rethinking Code Review Workflows (arXiv:2505.16339, 2025)**: Human-in-the-loop + LLM Review では「実装者 → レビュアー → 修正担当」の3ロールが最も実用的な分業パターン。
+
+**References**:
+- RevAgent (arXiv:2511.00517): https://arxiv.org/pdf/2511.00517
+- Rethinking Code Review Workflows (arXiv:2505.16339): https://arxiv.org/html/2505.16339v1
+- AgentCoder survey: https://arxiv.org/html/2508.00083v1
+
+**Query 4**: "Self-Refine iterative refinement LLM feedback 2023 Madaan code improvement arXiv:2303.17651"
+
+主要知見:
+- **Self-Refine (Madaan et al. NeurIPS 2023, arXiv:2303.17651)**: FEEDBACK → REFINE の交互ループ。(i) 問題の局所化 (ii) 改善指示 の2要素からなるフィードバックが効果的。コードの可読性・機能完全性が反復ごとに向上。
+  - 本ワークフローでは `reviewer` が FEEDBACK ロール、`revisor` が REFINE ロールに対応する。
+  - 単一エージェントの自己フィードバックより **異なるエージェントによるクロスレビュー** が品質向上に有効（ChatEval ICLR 2024 の知見と一致）。
+
+**References**:
+- Self-Refine official: https://selfrefine.info/
+- Self-Refine arXiv: https://arxiv.org/abs/2303.17651
+
+**実装への示唆**:
+1. `implementer` → `reviewer` → `revisor` の3段階直列 DAG（`depends_on` チェーン）
+2. `reviewer` は Self-Refine の FEEDBACK モジュールに対応: 問題局所化 + 改善指示の2要素を出力
+3. `revisor` は Self-Refine の REFINE モジュールに対応: フィードバックを参照して修正版を生成
+4. スクラッチパッド Blackboard パターン: `{prefix}_implementation` → `{prefix}_review` → `{prefix}_revised`
+5. `required_tags` でロール別エージェントルーティング: `["iterative_implementer"]` / `["iterative_reviewer"]` / `["iterative_revisor"]`
+6. mob-review バグ修正: per-aspect tags `["mob_reviewer", "{aspect}"]` を自動生成
+
+### Step 2 — 実装サマリー
+

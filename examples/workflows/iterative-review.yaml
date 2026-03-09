@@ -1,0 +1,78 @@
+# Iterative Review Workflow Template
+# ====================================
+# 3-agent sequential pipeline: implementer → reviewer → revisor
+#
+# Based on the Self-Refine pattern (Madaan et al. NeurIPS 2023, arXiv:2303.17651):
+#   - implementer  : writes initial code (Phase 1)
+#   - reviewer     : critiques the code — Self-Refine FEEDBACK step (Phase 2)
+#   - revisor      : improves the code based on review — Self-Refine REFINE step (Phase 3)
+#
+# Pipeline (sequential, each step depends_on the previous):
+#   implementer → reviewer → revisor
+#
+# Scratchpad keys (written by agents, read by next stage):
+#   {prefix}_implementation  — implementer's initial code
+#   {prefix}_review          — reviewer's annotated feedback (FEEDBACK step)
+#   {prefix}_revised         — revisor's improved code (REFINE step)
+#
+# Output files:
+#   implementation.{ext}  — initial implementation
+#   review.md             — structured review with severity-ordered issues
+#   revised.{ext}         — improved implementation after incorporating feedback
+#
+# Endpoint: POST /workflows/iterative-review
+# Reference: Self-Refine arXiv:2303.17651 (NeurIPS 2023);
+#            MAR Multi-Agent Reflexion arXiv:2512.20845 (2025);
+#            RevAgent arXiv:2511.00517 (2025)
+#
+# --- IMPORTANT: Agent routing (required_tags) ---
+# By default, the orchestrator auto-generates role-based required_tags:
+#   implementer → required_tags: ["iterative_implementer"]
+#   reviewer    → required_tags: ["iterative_reviewer"]
+#   revisor     → required_tags: ["iterative_revisor"]
+#
+# Your YAML agent config MUST tag each agent accordingly:
+#
+#   agents:
+#     - id: implementer
+#       type: claude_code
+#       tags: ["iterative_implementer"]
+#     - id: reviewer
+#       type: claude_code
+#       tags: ["iterative_reviewer"]
+#     - id: revisor
+#       type: claude_code
+#       tags: ["iterative_revisor"]
+#
+# Set implementer_tags/reviewer_tags/revisor_tags to override the defaults.
+
+workflow:
+  endpoint: /workflows/iterative-review
+
+# --- Required fields ---
+
+# The implementation task description
+task: "Write a function that validates an email address using regex"
+
+# Language / framework context
+language: "Python"
+
+# --- Optional fields ---
+
+# Agent capability routing (empty = use auto-generated role tags).
+# Override only if you want custom routing.
+implementer_tags: []
+reviewer_tags: []
+revisor_tags: []
+
+# If set, the revisor's RESULT is delivered to this agent's mailbox
+reply_to: null
+
+# --- Curl example ---
+# curl -s -X POST http://localhost:8000/workflows/iterative-review \
+#   -H "Content-Type: application/json" \
+#   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+#   -d '{
+#     "task": "Write a Python function that validates an email address",
+#     "language": "Python"
+#   }'

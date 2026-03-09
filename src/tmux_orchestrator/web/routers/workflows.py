@@ -19,6 +19,7 @@ from tmux_orchestrator.web.schemas import (
     DebateWorkflowSubmit,
     DelphiWorkflowSubmit,
     FulldevWorkflowSubmit,
+    IterativeReviewWorkflowSubmit,
     MobReviewWorkflowSubmit,
     PairWorkflowSubmit,
     RedBlueWorkflowSubmit,
@@ -3346,9 +3347,19 @@ def build_workflows_router(
                 f"Rate severity honestly — do not escalate minor issues."
             )
 
+            # Auto-generate per-aspect required_tags if reviewer_tags not explicitly set.
+            # Pattern: ["mob_reviewer", "{aspect}"] ensures each task is routed to the
+            # agent tagged with that specific aspect (ChatEval insight: unique personas
+            # per reviewer; MasRouter ACL 2025: capability-tag matching).
+            # If caller explicitly passes reviewer_tags, those override the auto-generated ones.
+            if body.reviewer_tags:
+                aspect_required_tags: list[str] | None = list(body.reviewer_tags)
+            else:
+                aspect_required_tags = ["mob_reviewer", safe_aspect]
+
             reviewer_task = await orchestrator.submit_task(
                 reviewer_prompt,
-                required_tags=body.reviewer_tags or None,
+                required_tags=aspect_required_tags,
                 depends_on=[],
             )
             task_ids_map[f"reviewer_{safe_aspect}"] = reviewer_task.id
@@ -3424,6 +3435,226 @@ def build_workflows_router(
         )
         task_ids_map["synthesizer"] = synthesizer_task.id
 
+        all_task_ids = list(task_ids_map.values())
+        run = wm.submit(name=wf_name, task_ids=all_task_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids_map,
+            "scratchpad_prefix": scratchpad_prefix,
+        }
+
+    # -----------------------------------------------------------------------
+    # POST /workflows/iterative-review
+    # -----------------------------------------------------------------------
+
+    @router.post(
+        "/workflows/iterative-review",
+        summary="Submit an implementer→reviewer→revisor Iterative Review workflow",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_iterative_review_workflow(
+        body: IterativeReviewWorkflowSubmit,
+    ) -> dict:
+        """Submit an Iterative Review Workflow DAG.
+
+        Spawns 3 sequential agents: an **implementer** writes the initial code,
+        a **reviewer** critiques it (Self-Refine FEEDBACK step), and a **revisor**
+        produces an improved version (Self-Refine REFINE step).
+
+        Workflow topology (sequential via depends_on)::
+
+            implementer → reviewer → revisor
+
+        Returns:
+        - ``workflow_id``: workflow run UUID for status polling
+        - ``name``: human-readable name (``iterative-review/<task_slug>``)
+        - ``task_ids``: dict with keys ``implementer``, ``reviewer``, ``revisor``
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+          (e.g. ``iterrev_{run_id[:8]}``)
+
+        Design references:
+        - Self-Refine (arXiv:2303.17651, NeurIPS 2023): FEEDBACK→REFINE iterative
+          loop improves code quality ~20% on average. reviewer=FEEDBACK, revisor=REFINE.
+        - MAR: Multi-Agent Reflexion (arXiv:2512.20845, 2025): cross-agent feedback
+          outperforms single-agent self-feedback.
+        - RevAgent (arXiv:2511.00517, 2025): multi-stage code review pipeline.
+        - DESIGN.md §10.53 (v1.1.21)
+        """
+        wm = orchestrator.get_workflow_manager()
+        task_slug = body.task[:40].strip().replace(" ", "_").replace("/", "_")
+        wf_name = f"iterative-review/{task_slug}"
+
+        pre_run_id = str(uuid.uuid4())
+        scratchpad_prefix = f"iterrev_{pre_run_id[:8]}"
+
+        impl_key = f"{scratchpad_prefix}_implementation"
+        review_key = f"{scratchpad_prefix}_review"
+        revised_key = f"{scratchpad_prefix}_revised"
+
+        # Shared read snippet (reads value from scratchpad key)
+        def _read_snippet(key: str) -> str:
+            return (
+                f"python3 -c \"\n"
+                f"import json, urllib.request, os\n"
+                f"api_key = os.environ.get('TMUX_ORCHESTRATOR_API_KEY', '')\n"
+                f"if not api_key:\n"
+                f"    try: api_key = open('__orchestrator_api_key__').read().strip()\n"
+                f"    except: pass\n"
+                f"ctx = json.load(open('__orchestrator_context__.json'))\n"
+                f"base_url = ctx['web_base_url']\n"
+                f"req = urllib.request.Request(base_url + '/scratchpad/{key}')\n"
+                f"req.add_header('X-API-Key', api_key)\n"
+                f"resp = urllib.request.urlopen(req, timeout=15)\n"
+                f"data = json.loads(resp.read())\n"
+                f"print(data.get('value', data))\n"
+                f"\""
+            )
+
+        def _write_snippet_ir(key: str, filename: str) -> str:
+            return (
+                f"python3 -c \"\n"
+                f"import json, urllib.request, os\n"
+                f"content = open('{filename}', 'r', errors='replace').read()\n"
+                f"payload = json.dumps({{'value': content}}).encode()\n"
+                f"api_key = os.environ.get('TMUX_ORCHESTRATOR_API_KEY', '')\n"
+                f"if not api_key:\n"
+                f"    try: api_key = open('__orchestrator_api_key__').read().strip()\n"
+                f"    except: pass\n"
+                f"ctx = json.load(open('__orchestrator_context__.json'))\n"
+                f"base_url = ctx['web_base_url']\n"
+                f"req = urllib.request.Request(base_url + '/scratchpad/{key}', data=payload, method='PUT')\n"
+                f"req.add_header('Content-Type', 'application/json')\n"
+                f"req.add_header('X-API-Key', api_key)\n"
+                f"urllib.request.urlopen(req, timeout=15)\n"
+                f"print('Stored to scratchpad: {key}')\n"
+                f"\""
+            )
+
+        lang = body.language
+        lang_ext = lang.lower().split()[0]
+        impl_file = f"implementation.{lang_ext}"
+        review_file = "review.md"
+        revised_file = f"revised.{lang_ext}"
+
+        # ---------- Phase 1: implementer ------------------------------------
+        implementer_prompt = (
+            f"You are the IMPLEMENTER in an Iterative Review pipeline.\n"
+            f"\n"
+            f"**Task:** {body.task}\n"
+            f"**Language/Framework:** {lang}\n"
+            f"\n"
+            f"Your job:\n"
+            f"1. Implement the task above in {lang}. Write clean, correct, idiomatic code.\n"
+            f"   Save your implementation to `{impl_file}`.\n"
+            f"2. Store your implementation in the shared scratchpad:\n"
+            f"   ```python\n"
+            f"   {_write_snippet_ir(impl_key, impl_file)}\n"
+            f"   ```\n"
+            f"\n"
+            f"Write complete, working code. Include docstrings and type hints where appropriate.\n"
+            f"A reviewer will critique your implementation, and a revisor will improve it.\n"
+        )
+
+        # ---------- Phase 2: reviewer (Self-Refine FEEDBACK step) -----------
+        reviewer_prompt = (
+            f"You are the REVIEWER in an Iterative Review pipeline (Self-Refine FEEDBACK step).\n"
+            f"\n"
+            f"**Task context:** {body.task}\n"
+            f"**Language/Framework:** {lang}\n"
+            f"\n"
+            f"Your job:\n"
+            f"1. Read the implementer's code from the shared scratchpad:\n"
+            f"   ```python\n"
+            f"   {_read_snippet(impl_key)}\n"
+            f"   ```\n"
+            f"2. Write a structured review to `{review_file}` with this exact format:\n"
+            f"   ```markdown\n"
+            f"   # Code Review — FEEDBACK\n"
+            f"   ## Overall Assessment\n"
+            f"   <2-3 sentence summary of implementation quality>\n"
+            f"   ## Issues (ordered by severity)\n"
+            f"   ### Issue 1: <title>\n"
+            f"   - **Severity:** [CRITICAL|HIGH|MEDIUM|LOW]\n"
+            f"   - **Location:** <line/function name>\n"
+            f"   - **Problem:** <what is wrong>\n"
+            f"   - **Fix:** <concrete improvement instruction>\n"
+            f"   ...\n"
+            f"   ## Positive Aspects\n"
+            f"   <what the implementation does well>\n"
+            f"   ## Summary of Required Changes\n"
+            f"   <numbered list of must-fix items for the revisor>\n"
+            f"   ```\n"
+            f"3. Store your review in the shared scratchpad:\n"
+            f"   ```python\n"
+            f"   {_write_snippet_ir(review_key, review_file)}\n"
+            f"   ```\n"
+            f"\n"
+            f"Be precise, actionable, and constructive. "
+            f"Focus on correctness, clarity, and {lang} best practices.\n"
+        )
+
+        # ---------- Phase 3: revisor (Self-Refine REFINE step) --------------
+        revisor_prompt = (
+            f"You are the REVISOR in an Iterative Review pipeline (Self-Refine REFINE step).\n"
+            f"\n"
+            f"**Task context:** {body.task}\n"
+            f"**Language/Framework:** {lang}\n"
+            f"\n"
+            f"Your job:\n"
+            f"1. Read the original implementation from the shared scratchpad:\n"
+            f"   ```python\n"
+            f"   {_read_snippet(impl_key)}\n"
+            f"   ```\n"
+            f"2. Read the reviewer's feedback from the shared scratchpad:\n"
+            f"   ```python\n"
+            f"   {_read_snippet(review_key)}\n"
+            f"   ```\n"
+            f"3. Produce an improved version that addresses ALL issues raised by the reviewer.\n"
+            f"   Save the revised code to `{revised_file}`.\n"
+            f"4. Store your revised implementation in the shared scratchpad:\n"
+            f"   ```python\n"
+            f"   {_write_snippet_ir(revised_key, revised_file)}\n"
+            f"   ```\n"
+            f"\n"
+            f"Apply EVERY fix listed in the reviewer's 'Summary of Required Changes'.\n"
+            f"The revised code should be strictly better than the original on all dimensions.\n"
+        )
+
+        # Auto-generate required_tags per role unless explicitly overridden
+        impl_req_tags: list[str] | None = (
+            list(body.implementer_tags) if body.implementer_tags else ["iterative_implementer"]
+        )
+        rev_req_tags: list[str] | None = (
+            list(body.reviewer_tags) if body.reviewer_tags else ["iterative_reviewer"]
+        )
+        revisor_req_tags: list[str] | None = (
+            list(body.revisor_tags) if body.revisor_tags else ["iterative_revisor"]
+        )
+
+        implementer_task = await orchestrator.submit_task(
+            implementer_prompt,
+            required_tags=impl_req_tags,
+            depends_on=[],
+        )
+        reviewer_task = await orchestrator.submit_task(
+            reviewer_prompt,
+            required_tags=rev_req_tags,
+            depends_on=[implementer_task.id],
+        )
+        revisor_task = await orchestrator.submit_task(
+            revisor_prompt,
+            required_tags=revisor_req_tags,
+            depends_on=[reviewer_task.id],
+            reply_to=body.reply_to,
+        )
+
+        task_ids_map = {
+            "implementer": implementer_task.id,
+            "reviewer": reviewer_task.id,
+            "revisor": revisor_task.id,
+        }
         all_task_ids = list(task_ids_map.values())
         run = wm.submit(name=wf_name, task_ids=all_task_ids)
 
