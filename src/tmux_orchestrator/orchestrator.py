@@ -11,6 +11,14 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from tmux_orchestrator.agents.base import Agent, AgentStatus, Task
+from tmux_orchestrator.application.infra_protocols import (  # noqa: F401 (re-exported)
+    AutoScalerProtocol,
+    CheckpointStoreProtocol,
+    NullAutoScaler,
+    NullCheckpointStore,
+    NullResultStore,
+    ResultStoreProtocol,
+)
 from tmux_orchestrator.application.monitor_protocols import (  # noqa: F401 (re-exported)
     ContextMonitorProtocol,
     DriftMonitorProtocol,
@@ -31,7 +39,7 @@ from tmux_orchestrator.webhook_manager import WebhookManager
 if TYPE_CHECKING:
     from tmux_orchestrator.config import AgentConfig, OrchestratorConfig
     from tmux_orchestrator.tmux_interface import TmuxInterface
-    from tmux_orchestrator.workflow_manager import WorkflowRun
+    from tmux_orchestrator.workflow_manager import WorkflowManager, WorkflowRun
     from tmux_orchestrator.worktree import WorktreeManager
 
 logger = logging.getLogger(__name__)
@@ -63,6 +71,11 @@ class Orchestrator:
         context_monitor: "ContextMonitorProtocol | None" = None,
         drift_monitor: "DriftMonitorProtocol | None" = None,
         webhook_manager: "WebhookManager | None" = None,
+        result_store: "ResultStoreProtocol | None" = None,
+        checkpoint_store: "CheckpointStoreProtocol | None" = None,
+        autoscaler: "AutoScalerProtocol | None" = None,
+        workflow_manager: "WorkflowManager | None" = None,
+        group_manager: "GroupManager | None" = None,
     ) -> None:
         self.bus = bus
         self.tmux = tmux
@@ -215,32 +228,46 @@ class Orchestrator:
             )
         )
         # Queue-depth autoscaler — only created when autoscale_max > 0.
+        # Injected via autoscaler parameter (AutoScalerProtocol); defaults to
+        # AutoScaler for production use.  NullAutoScaler (or any conforming object)
+        # can be injected for unit tests.
         # Reference: Kubernetes HPA; Thijssen "Autonomic Computing"; AWS cooldowns.
-        # DESIGN.md §10.18 (v0.23.0)
-        if config.autoscale_max > 0:
+        # DESIGN.md §10.18 (v0.23.0); §10.35 (v1.0.35 — DI).
+        if autoscaler is not None:
+            self._autoscaler: "AutoScalerProtocol | None" = autoscaler
+        elif config.autoscale_max > 0:
             from tmux_orchestrator.autoscaler import AutoScaler
-            self._autoscaler: "AutoScaler | None" = AutoScaler(self, config)
+            self._autoscaler = AutoScaler(self, config)
         else:
             self._autoscaler = None
         # Append-only JSONL result store — Event Sourcing pattern.
-        # Enabled only when config.result_store_enabled=True to avoid
-        # unexpected I/O in deployments that don't need persistence.
+        # Injected via result_store parameter (ResultStoreProtocol); defaults to
+        # ResultStore when config.result_store_enabled=True.  NullResultStore can be
+        # injected for tests to avoid unexpected I/O.
         # Reference: Fowler "Event Sourcing" (2005); Young CQRS (2010);
-        # Hickey "The Value of Values" (Datomic, 2012). DESIGN.md §10.19 (v0.24.0)
-        if config.result_store_enabled:
+        # Hickey "The Value of Values" (Datomic, 2012). DESIGN.md §10.19 (v0.24.0);
+        # §10.35 (v1.0.35 — DI).
+        if result_store is not None:
+            self._result_store: "ResultStoreProtocol | None" = result_store
+        elif config.result_store_enabled:
             from tmux_orchestrator.result_store import ResultStore
-            self._result_store: "ResultStore | None" = ResultStore(
+            self._result_store = ResultStore(
                 store_dir=config.result_store_dir,
                 session_name=config.session_name,
             )
         else:
             self._result_store = None
         # Workflow DAG tracker — always enabled (zero overhead when no workflows
-        # are submitted).  Tracks multi-step pipelines submitted via POST /workflows.
+        # are submitted).  Injected via workflow_manager parameter; defaults to
+        # WorkflowManager().
         # Reference: Apache Airflow DAG model; Tomasulo's algorithm (IBM 1967);
-        # AWS Step Functions; Prefect "Modern Data Stack". DESIGN.md §10.20 (v0.25.0)
-        from tmux_orchestrator.workflow_manager import WorkflowManager
-        self._workflow_manager = WorkflowManager()
+        # AWS Step Functions; Prefect "Modern Data Stack". DESIGN.md §10.20 (v0.25.0);
+        # §10.35 (v1.0.35 — DI).
+        if workflow_manager is not None:
+            self._workflow_manager: "WorkflowManager" = workflow_manager
+        else:
+            from tmux_orchestrator.workflow_manager import WorkflowManager  # noqa: PLC0415
+            self._workflow_manager = WorkflowManager()
         # Outbound webhook notification manager.
         # Fire-and-forget delivery of task/agent/workflow events to registered URLs.
         # Injected via webhook_manager parameter; defaults to WebhookManager for
@@ -265,19 +292,22 @@ class Orchestrator:
                 retry_backoff_base=wh_cfg.retry_backoff_base,
             )
         # Checkpoint store — SQLite-backed fault-tolerant persistence.
-        # Saves task queue and workflow state after each mutation so that an
-        # unclean shutdown can be recovered with --resume.
+        # Injected via checkpoint_store parameter (CheckpointStoreProtocol); defaults
+        # to CheckpointStore when config.checkpoint_enabled=True.  NullCheckpointStore
+        # can be injected for tests to avoid SQLite file creation.
+        # Note: when injected, initialize() and save_meta("session_name") are NOT called
+        # automatically — the caller is responsible for initialisation.
         # Reference: LangGraph checkpointer pattern (LangChain docs 2025);
-        # Apache Flink Checkpoints (Flink stable docs);
-        # Chandy-Lamport distributed snapshots (1985).
-        # DESIGN.md §10.12 (v0.45.0)
-        if config.checkpoint_enabled:
+        # Apache Flink Checkpoints; Chandy-Lamport (1985).
+        # DESIGN.md §10.12 (v0.45.0); §10.35 (v1.0.35 — DI).
+        if checkpoint_store is not None:
+            self._checkpoint_store: "CheckpointStoreProtocol | None" = checkpoint_store
+        elif config.checkpoint_enabled:
             from tmux_orchestrator.checkpoint_store import CheckpointStore
-            self._checkpoint_store: "CheckpointStore | None" = CheckpointStore(
-                db_path=config.checkpoint_db,
-            )
-            self._checkpoint_store.initialize()
-            self._checkpoint_store.save_meta("session_name", config.session_name)
+            _cp = CheckpointStore(db_path=config.checkpoint_db)
+            _cp.initialize()
+            _cp.save_meta("session_name", config.session_name)
+            self._checkpoint_store = _cp
         else:
             self._checkpoint_store = None
         # OpenTelemetry tracing — GenAI Semantic Conventions.
@@ -303,11 +333,14 @@ class Orchestrator:
             self._telemetry = None
         # Named agent group manager — logical pools for targeted task dispatch.
         # Groups allow tasks to target a named pool instead of individual agent IDs or tags.
+        # Injected via group_manager parameter; defaults to GroupManager().
         # References:
         #   Kubernetes Node Pools / Node Groups; AWS Auto Scaling Groups;
         #   Apache Mesos Roles; HashiCorp Nomad Task Groups.
-        # DESIGN.md §10.26 (v0.31.0)
-        self._group_manager = GroupManager()
+        # DESIGN.md §10.26 (v0.31.0); §10.35 (v1.0.35 — DI).
+        self._group_manager: GroupManager = (
+            group_manager if group_manager is not None else GroupManager()
+        )
         # Load groups from config
         for grp in config.groups:
             name = grp.get("name", "")
@@ -587,6 +620,32 @@ class Orchestrator:
                 "cooldown": self.config.autoscale_cooldown,
             }
         return await self._autoscaler.status()
+
+    def reconfigure_autoscaler(
+        self,
+        *,
+        min: "int | None" = None,
+        max: "int | None" = None,
+        threshold: "int | None" = None,
+        cooldown: "float | None" = None,
+    ) -> dict:
+        """Reconfigure autoscaling parameters at runtime.
+
+        Delegates to the injected ``AutoScalerProtocol`` instance.
+        Raises ``ValueError`` when autoscaling is not enabled.
+
+        Reference: DESIGN.md §10.35 (v1.0.35 — DI + public API surface).
+        """
+        if self._autoscaler is None:
+            raise ValueError(
+                "Autoscaling is not enabled (autoscale_max=0 in config or no injected autoscaler)"
+            )
+        return self._autoscaler.reconfigure(
+            min=min,
+            max=max,
+            threshold=threshold,
+            cooldown=cooldown,
+        )
 
     # ------------------------------------------------------------------
     # Context monitor

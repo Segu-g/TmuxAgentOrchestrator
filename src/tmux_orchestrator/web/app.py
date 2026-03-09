@@ -5301,17 +5301,18 @@ def create_app(
         Only supplied fields are changed; omit a field to leave it unchanged.
         Returns 409 when autoscaling is not enabled (``autoscale_max=0``).
         """
-        if orchestrator._autoscaler is None:
+        try:
+            result = orchestrator.reconfigure_autoscaler(
+                min=body.min,
+                max=body.max,
+                threshold=body.threshold,
+                cooldown=body.cooldown,
+            )
+        except ValueError:
             raise HTTPException(
                 status_code=409,
                 detail="Autoscaling is not enabled (autoscale_max=0 in config)",
             )
-        result = orchestrator._autoscaler.reconfigure(
-            min=body.min,
-            max=body.max,
-            threshold=body.threshold,
-            cooldown=body.cooldown,
-        )
         return result
 
     @app.post("/agents/{agent_id}/message", summary="Send a message to an agent", dependencies=[Depends(auth)])

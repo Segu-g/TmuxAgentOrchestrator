@@ -697,7 +697,7 @@ AI エージェントにとって TDD は「ガードレール」として機能
 |--------|------|------|
 | **高** | **クリーンアーキテクチャ層別ディレクトリ移行** — 現在フラットな `tmux_orchestrator/` 以下のモジュールを `domain/` / `application/` / `infrastructure/` / `monitoring/` / `adapters/` に段階的に移動する。後方互換シム（旧パスからの re-export）を置き、テストを壊さずに移行する。移行順: ① `domain/` (AgentStatus, Task, MessageType 抽出), ② `infrastructure/` (tmux_interface, messaging, worktree 等), ③ `application/` (orchestrator, registry, bus), ④ `adapters/` (config, factory, schemas, web, tui)。各移動は独立したコミット単位で行い、`uv run pytest tests/ -x -q` が常にグリーンであることを確認する | §2「ドメイン分離方針」および「目標とするクリーンアーキテクチャ層構造」参照。Martin "Clean Architecture" (2017): 依存は常にドメイン中心に向かう（Dependency Rule）。現状は orchestrator.py が context_monitor / drift_monitor / result_store 等のインフラを直接 import しており、依存方向が逆転している。移行することで各層の単体テストが高速化・安定化する。 |
 | ~~**高**~~ | ~~**`domain/` 純粋型の抽出** — `AgentStatus`, `AgentRole` (from config.py / agents/base.py)、`Task` (from agents/base.py)、`MessageType` / `Message` (from bus.py) を `domain/agent.py` / `domain/task.py` / `domain/message.py` に移動。既存モジュールは `from tmux_orchestrator.domain.agent import AgentStatus` を re-export するシムに書き換える。domain/ は外部ライブラリを一切 import しない~~ | ~~完了 v1.0.11 — 1156 tests 全通過。Strangler Fig パターンで後方互換性を保ちつつ型を集約。`test_domain_purity.py` 20 tests で純粋性を継続保証。14/15 デモ PASS。~~ |
-| **高** | **`orchestrator.py` のインフラ依存を依存注入（DI）に置き換える** — `Orchestrator.__init__` で直接 import している `ContextMonitor`, `DriftMonitor`, `ResultStore`, `CheckpointStore`, `Autoscaler`, `WebhookManager` を抽象 Protocol 型（または TypeVar Bound）として受け取るように変更し、具体実装は `factory.py` で注入する。`Orchestrator` が infrastructure モジュールを import しないようにする | 現状 orchestrator.py の import 行が最多（14 個のローカル import）。ContextMonitor / DriftMonitor がモニタリングインフラであるにもかかわらず business logic と同居している。DI 化により orchestrator の単体テストでモックが不要になる。 |
+| ~~**高**~~ | ~~**`orchestrator.py` のインフラ依存を依存注入（DI）に置き換える**~~ | ~~完了 v1.0.35 — `ResultStoreProtocol`, `CheckpointStoreProtocol`, `AutoScalerProtocol` を `application/infra_protocols.py` に定義。`NullResultStore`, `NullCheckpointStore`, `NullAutoScaler` Null Object 実装を追加。`WorkflowManager`, `GroupManager` も constructor injection 対応。`reconfigure_autoscaler()` 公開メソッド追加。50 tests 追加 (32 protocol + 18 DI)。20/20 デモ PASS。~~ |
 | 高 | **OpenTelemetry GenAI Semantic Conventions 準拠トレース出力** — `gen_ai.*` 属性 (token counts, tool calls, agent spans) を既存 `trace_id` ベースの構造化ログに付加し、Datadog/Jaeger/OTLP エクスポーターへ送信できるようにする | OpenTelemetry "AI Agent Observability" (2025) が業界標準に収斂しつつあり、Datadog が GenAI Semantic Conventions にネイティブ対応済み。現状の `trace_id` は相関のみでスパン階層がない。[opentelemetry.io/blog/2025/ai-agent-observability](https://opentelemetry.io/blog/2025/ai-agent-observability/) |
 | ~~**高**~~ | ~~**エージェントドリフト検出 (Agent Stability Index)**~~ | ~~完了 v1.0.9 — `DriftMonitor` (role/idle/length 3サブスコア)、`agent_drift_warning` イベント。34テスト。17/17デモPASS。~~ |
 | 中 | **DriftMonitor — セマンティック類似度ベースの role_score 強化** — 現行のキーワードマッチを embedding コサイン類似度に置き換え、system_prompt と pane 出力の意味的乖離をより精密に測定する。`sentence-transformers` の軽量モデル (paraphrase-MiniLM-L6-v2, 22MB) を使用してランタイム外部 API 依存を回避する | Rath arXiv:2601.04170: ASI の Role Adherence 次元は「agent_id とタスクタイプの相互情報量」を使用。v1.0.9 のキーワードマッチは role_score = 1.0 に張り付く傾向（スコアが役割逸脱を検出しにくい）。embedding 距離により「形式は合っているが内容が違う」ドリフトを検出可能。 |
@@ -727,6 +727,92 @@ AI エージェントにとって TDD は「ガードレール」として機能
 ---
 
 ## 10. 調査記録
+
+### 10.35 v1.0.35 — `orchestrator.py` 残りインフラ依存 DI 整理（ResultStore / CheckpointStore / AutoScaler / WorkflowManager / GroupManager）
+
+#### 選定理由
+
+**選択: orchestrator.py 残りインフラ DI 整理 (v1.0.35)**
+
+§11「アーキテクチャ・品質」の**高**優先度候補。
+
+**選択理由:**
+
+1. **未完了の高優先度 DI 候補**: v1.0.34 で `ContextMonitor`, `DriftMonitor`, `WebhookManager` を DI 化した。
+   しかし `orchestrator.py` にはまだ以下のインライン import／直接インスタンス化が残っている:
+   - `ResultStore` — `if config.result_store_enabled:` ブランチ内でのインライン import
+   - `CheckpointStore` — `if config.checkpoint_enabled:` ブランチ内でのインライン import
+   - `AutoScaler` — `if config.autoscale_max > 0:` ブランチ内でのインライン import
+   - `WorkflowManager` — `__init__` で直接 import + 無条件インスタンス化
+   - `GroupManager` — `__init__` で直接 import + 無条件インスタンス化
+   これら5つを Protocol 型パラメータとして `__init__` で受け取るように変更し、
+   具体実装は `factory.py` の `build_system()` で注入する。
+
+2. **テスト改善**: 現状 `test_orchestrator.py` でこれらのコンポーネントをテストする際、
+   実際のファイルシステムや外部依存が必要。DI 化により `NullResultStore` / `NullCheckpointStore`
+   等のプロトコル準拠 Null オブジェクトを使用してテストを高速・独立させられる。
+
+3. **前回イテレーションの自然な継続**: v1.0.34 の `WebhookManager` DI と同一パターンで実装できる。
+   `application/monitor_protocols.py` と同様に `application/infra_protocols.py` を新設し、
+   各インターフェースを Protocol として定義する。
+
+**非選択:**
+- OpenTelemetry — `telemetry.py` (223行) + `config.py` に全設定項目が実装済み。高優先度ではあるが既に実装されていた。
+- チェックポイント永続化 SQLite — 既に `checkpoint_store.py` で実装済み。
+- `/deliberate --rounds N` — `max_rounds` パラメータで既に多ラウンド対応済み (v1.0.32)。
+- `contexts` count validator for /workflows/ddd — スコープが小さすぎる。
+
+#### リサーチ（Step 1 — Research）
+
+**Query 1**: "Python dependency injection Protocol null object pattern orchestrator 2025 2026"
+
+主要知見:
+- **Glukhov "Dependency Injection: a Python Way" (glukhov.org, 2025-12)**:
+  「Constructor injection makes dependencies explicit and required — when you look at `__init__`, you immediately see what a component needs.」
+  Protocol-based design (PEP 544) により、継承なしで任意のクラスがインターフェースを満たせる。
+  Composition Root パターン: 依存グラフをアプリ起動時の1か所（`factory.py` / `main.py`）に集約することで明示性を維持する。
+  URL: https://www.glukhov.org/post/2025/12/dependency-injection-in-python
+
+- **DataCamp "Python Dependency Injection: A Guide" (2025)**:
+  Null Object パターン（何もしない実装）を Protocol に準拠させることで、テスト時に実際の I/O を行わない
+  高速な単体テストが実現できる。
+  URL: https://www.datacamp.com/tutorial/python-dependency-injection
+
+**Query 2**: "Clean Architecture infrastructure layer dependency injection Python factory pattern 2025"
+
+主要知見:
+- **Glukhov "Python Design Patterns for Clean Architecture" (glukhov.org, 2025-11)**:
+  「Infrastructure layer should contain concrete implementations while keeping domain and application layers free from framework details.」
+  Factory Container パターン: `container.register(interface, factory_fn)` で登録し、`container.resolve(interface)` で解決。
+  これにより PostgreSQL→SQLite 等の切り替えが1行の factory 変更で完了し、テスト時は in-memory 実装を使用できる。
+  URL: https://www.glukhov.org/post/2025/11/python-design-patterns-for-clean-architecture/
+
+- **DEV "Layered Architecture & DI: Clean and Testable FastAPI Code" (2025)**:
+  「Fat Router, Thin Service アンチパターンを避けるためルーターは HTTP 変換のみを担当し、ビジネスロジックをサービス/ユースケースレイヤーに委譲する。」
+  URL: https://dev.to/markoulis/layered-architecture-dependency-injection-a-recipe-for-clean-and-testable-fastapi-code-3ioo
+
+**Query 3**: "Python typing Protocol injectable component factory pattern unit test isolation 2025"
+
+主要知見:
+- **PEP 544 – Protocols: Structural subtyping (static duck typing)** (peps.python.org):
+  `@runtime_checkable` デコレーターにより `isinstance()` チェックが可能。Protocol は継承を強制しないため、
+  既存の具体クラスをそのまま Protocol 準拠クラスとして利用できる（Null Object にも適用）。
+  URL: https://peps.python.org/pep-0544/
+
+- **Dependency Injector "Factory provider"** (python-dependency-injector.ets-labs.org):
+  「overriding feature for testing or re-configuring a project in different environments — better than monkey-patching.」
+  Factory Provider を用いると production と test で同一コードパスを使いながら依存のみ切り替えられる。
+  URL: https://python-dependency-injector.ets-labs.org/providers/factory.html
+
+**実装方針:**
+1. `application/infra_protocols.py` 新設 — `ResultStoreProtocol`, `CheckpointStoreProtocol`,
+   `AutoScalerProtocol`, `WorkflowManagerProtocol`, `GroupManagerProtocol` を Protocol として定義
+2. `NullResultStore`, `NullCheckpointStore`, `NullAutoScaler` を同ファイルに追加（Null Object パターン）
+3. `Orchestrator.__init__` の5箇所を constructor injection に変換
+4. `factory.py` `build_system()` で具体実装を注入
+5. 各テストで Null オブジェクトを渡すことでインライン import を廃止
+
+---
 
 ### 10.34 v1.0.34 — ProcessPort を `ClaudeCodeAgent` の正規インターフェース型に昇格 + WebhookManager DI
 

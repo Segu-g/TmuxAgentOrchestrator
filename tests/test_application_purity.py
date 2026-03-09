@@ -212,6 +212,38 @@ def test_application_package_exports_task_submitter() -> None:
     assert TaskSubmitter is not None
 
 
+def test_application_package_exports_infra_protocols() -> None:
+    """application/__init__ re-exports infra protocols and Null Objects (v1.0.35)."""
+    from tmux_orchestrator.application import (
+        AutoScalerProtocol,
+        CheckpointStoreProtocol,
+        NullAutoScaler,
+        NullCheckpointStore,
+        NullResultStore,
+        ResultStoreProtocol,
+    )
+
+    assert isinstance(NullResultStore(), ResultStoreProtocol)
+    assert isinstance(NullCheckpointStore(), CheckpointStoreProtocol)
+    assert isinstance(NullAutoScaler(), AutoScalerProtocol)
+
+
+def test_orchestrator_exports_infra_protocols() -> None:
+    """orchestrator.py re-exports infra protocols for backward compat (v1.0.35)."""
+    from tmux_orchestrator.orchestrator import (
+        AutoScalerProtocol,
+        CheckpointStoreProtocol,
+        NullAutoScaler,
+        NullCheckpointStore,
+        NullResultStore,
+        ResultStoreProtocol,
+    )
+
+    assert isinstance(NullResultStore(), ResultStoreProtocol)
+    assert isinstance(NullCheckpointStore(), CheckpointStoreProtocol)
+    assert isinstance(NullAutoScaler(), AutoScalerProtocol)
+
+
 # ---------------------------------------------------------------------------
 # Identity tests: shim and application types must be the SAME object
 # ---------------------------------------------------------------------------

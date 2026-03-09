@@ -17,6 +17,12 @@ Public re-exports:
         DriftMonitorProtocol,
         NullContextMonitor,
         NullDriftMonitor,
+        ResultStoreProtocol,
+        CheckpointStoreProtocol,
+        AutoScalerProtocol,
+        NullResultStore,
+        NullCheckpointStore,
+        NullAutoScaler,
         TaskService,
         SubmitTaskDTO,
         SubmitTaskResult,
@@ -32,6 +38,14 @@ References:
     - DESIGN.md §10.N (v1.0.15 — application/ layer extraction)
 """
 
+from tmux_orchestrator.application.infra_protocols import (
+    AutoScalerProtocol,
+    CheckpointStoreProtocol,
+    NullAutoScaler,
+    NullCheckpointStore,
+    NullResultStore,
+    ResultStoreProtocol,
+)
 from tmux_orchestrator.application.monitor_protocols import (
     ContextMonitorProtocol,
     DriftMonitorProtocol,
@@ -56,13 +70,19 @@ from tmux_orchestrator.application.workflow_service import (
 )
 
 __all__ = [
+    "AutoScalerProtocol",
     "CancelTaskDTO",
     "CancelTaskResult",
     "CancelTaskUseCase",
+    "CheckpointStoreProtocol",
     "ContextMonitorProtocol",
     "DriftMonitorProtocol",
+    "NullAutoScaler",
+    "NullCheckpointStore",
     "NullContextMonitor",
     "NullDriftMonitor",
+    "NullResultStore",
+    "ResultStoreProtocol",
     "SubmitTaskDTO",
     "SubmitTaskResult",
     "SubmitTaskUseCase",
