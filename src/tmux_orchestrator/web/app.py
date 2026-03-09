@@ -975,6 +975,80 @@ class DDDWorkflowSubmit(BaseModel):
         return v
 
 
+class CompetitionWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/competition — Best-of-N competitive solver.
+
+    Submits a (N+1)-agent workflow DAG where N solver agents tackle the same
+    problem independently using different strategies, and a single judge agent
+    selects the winner:
+
+      **Phase 1 — Parallel Solvers** (``depends_on=[]``, all start simultaneously):
+        ``solver_{strategy}`` for each strategy in ``strategies``:
+        Each solver receives the same ``problem`` description plus a strategy
+        hint.  It writes its solution to ``solver_{strategy}_result.md``,
+        extracts a numeric score on a ``SCORE: <number>`` line, and stores the
+        result in the shared scratchpad.
+
+      **Phase 2 — Judge** (``depends_on=all solver task IDs``):
+        ``judge``: reads all solver results from the scratchpad, compares them
+        against ``scoring_criterion``, selects the winner, and writes
+        ``COMPETITION_RESULT.md`` containing:
+        - ``WINNER: <strategy>``
+        - A score table (strategy → score)
+        - Rationale for the selection
+        The judge stores the result in the shared scratchpad.
+
+    Scratchpad keys (Blackboard pattern):
+    - ``{prefix}_solver_{strategy}``  : solver result + score for each strategy
+    - ``{prefix}_judge``              : judge's ``COMPETITION_RESULT.md`` content
+
+    Artifacts produced by agents:
+    - ``solver_{strategy}_result.md`` — each solver's solution + SCORE line
+    - ``COMPETITION_RESULT.md``       — judge's winner declaration
+
+    Design references:
+    - "Making, not Taking, the Best of N" (FusioN), arXiv:2510.00931, 2025:
+      BoN selection vs. synthesis comparison; list-wise judge evaluation.
+    - M-A-P "Multi-Agent-based Parallel Test-Time Scaling", arXiv:2506.12928,
+      2025: parallel BoN with list-wise verdict outperforms point-wise.
+    - "When AIs Judge AIs: Agent-as-a-Judge", arXiv:2508.02994, 2025:
+      agent judge observes intermediate steps and produces structured scores.
+    - MultiAgentBench, arXiv:2503.01935, 2025: collaboration + competition
+      benchmark demonstrating milestone-based KPIs for competitive agents.
+    - DESIGN.md §10.36 (v1.1.0)
+    """
+
+    problem: str
+    strategies: list[str]
+    scoring_criterion: str = "correctness and efficiency"
+    # Optional per-role required_tags for agent capability routing
+    solver_tags: list[str] = []
+    judge_tags: list[str] = []
+    # When set, the judge RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    from pydantic import field_validator
+
+    @field_validator("problem")
+    @classmethod
+    def problem_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("problem must not be empty")
+        return v
+
+    @field_validator("strategies")
+    @classmethod
+    def strategies_must_have_two_to_ten(cls, v: list) -> list:
+        if len(v) < 2:
+            raise ValueError("strategies must have at least 2 entries")
+        if len(v) > 10:
+            raise ValueError("strategies must have at most 10 entries")
+        for s in v:
+            if not str(s).strip():
+                raise ValueError("strategy names must not be blank")
+        return v
+
+
 # ---------------------------------------------------------------------------
 # Module-level auth state
 # ---------------------------------------------------------------------------
@@ -4840,6 +4914,218 @@ def create_app(
             reply_to=body.reply_to,
         )
         task_ids_map["integration_designer"] = integration_task.id
+
+        all_task_ids = list(task_ids_map.values())
+        run = wm.submit(name=wf_name, task_ids=all_task_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids_map,
+            "scratchpad_prefix": scratchpad_prefix,
+        }
+
+    @app.post(
+        "/workflows/competition",
+        summary="Submit a Best-of-N competitive solver workflow",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_competition_workflow(body: CompetitionWorkflowSubmit) -> dict:
+        """Submit a Best-of-N competitive solver Workflow DAG.
+
+        Spawns N solver agents in **parallel** (all ``depends_on=[]``), each
+        applying a different strategy to the same problem.  After all solvers
+        complete, a **judge** agent reads every solver's result from the shared
+        scratchpad, compares them against the scoring criterion, and writes
+        ``COMPETITION_RESULT.md`` declaring the winner.
+
+        Workflow topology::
+
+            solver_strategy_0 ──┐
+            solver_strategy_1 ──┼─→ judge
+            solver_strategy_2 ──┘
+
+        Returns:
+        - ``workflow_id``: workflow run UUID for status polling
+        - ``name``: human-readable name (``competition/<problem[:40]>``)
+        - ``task_ids``: dict with keys ``solver_{strategy}`` (one per strategy)
+          and ``judge``, mapping to global task IDs
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+          (e.g. ``competition_{run_id[:8]}``)
+
+        Design references:
+        - "Making, not Taking, the Best of N" (FusioN), arXiv:2510.00931, 2025.
+        - M-A-P "Multi-Agent Parallel Test-Time Scaling", arXiv:2506.12928, 2025.
+        - "When AIs Judge AIs: Agent-as-a-Judge", arXiv:2508.02994, 2025.
+        - MultiAgentBench, arXiv:2503.01935, 2025.
+        - DESIGN.md §10.36 (v1.1.0)
+        """
+        import uuid as _uuid  # noqa: PLC0415
+
+        wm = orchestrator.get_workflow_manager()
+        problem_slug = body.problem[:40].strip().replace("\n", " ")
+        wf_name = f"competition/{problem_slug}"
+
+        pre_run_id = str(_uuid.uuid4())
+        scratchpad_prefix = f"competition_{pre_run_id[:8]}"
+
+        # Shared Python snippet for reading orchestrator context + API key
+        _ctx_snippet = (
+            "WEB_BASE_URL=$(python3 -c \""
+            "import json; d=json.load(open('__orchestrator_context__.json')); "
+            "print(d['web_base_url'])\")\n"
+            "   API_KEY=$(cat __orchestrator_api_key__ 2>/dev/null || "
+            "echo \"$TMUX_ORCHESTRATOR_API_KEY\")"
+        )
+
+        def _write_snippet(key: str, filename: str) -> str:
+            """Python3-based scratchpad write snippet (handles quotes/newlines)."""
+            return (
+                f"   python3 -c \"\n"
+                f"import json, urllib.request, os\n"
+                f"content = open('{filename}', 'r', errors='replace').read()\n"
+                f"payload = json.dumps({{'value': content}}).encode()\n"
+                f"api_key = os.environ.get('TMUX_ORCHESTRATOR_API_KEY', '')\n"
+                f"if not api_key:\n"
+                f"    try: api_key = open('__orchestrator_api_key__').read().strip()\n"
+                f"    except: pass\n"
+                f"ctx = json.load(open('__orchestrator_context__.json'))\n"
+                f"base_url = ctx['web_base_url']\n"
+                f"req = urllib.request.Request(base_url + '/scratchpad/{key}', data=payload, method='PUT')\n"
+                f"req.add_header('Content-Type', 'application/json')\n"
+                f"req.add_header('X-API-Key', api_key)\n"
+                f"urllib.request.urlopen(req, timeout=15)\n"
+                f"print('Stored to scratchpad: {key}')\n"
+                f"\"  "
+            )
+
+        task_ids_map: dict[str, str] = {}
+        solver_task_ids: list[str] = []
+
+        # Phase 1: one solver per strategy, all in parallel (depends_on=[])
+        for strategy in body.strategies:
+            # Sanitise strategy name for use in file/key names
+            safe_strategy = strategy.strip().replace(" ", "_").replace("/", "_")
+            solver_key = f"{scratchpad_prefix}_solver_{safe_strategy}"
+            result_filename = f"solver_{safe_strategy}_result.md"
+
+            solver_prompt = (
+                f"You are a SOLVER agent competing in a Best-of-N competition.\n"
+                f"\n"
+                f"**Problem:**\n"
+                f"{body.problem}\n"
+                f"\n"
+                f"**Your strategy:** {strategy}\n"
+                f"**Scoring criterion:** {body.scoring_criterion}\n"
+                f"\n"
+                f"Your tasks:\n"
+                f"1. Implement a solution to the problem using the **{strategy}** strategy.\n"
+                f"   - Be concrete: write actual code or a detailed algorithmic procedure.\n"
+                f"   - Optimise for the scoring criterion: {body.scoring_criterion}.\n"
+                f"2. Evaluate your own solution against the scoring criterion.\n"
+                f"   Produce a single numeric score (integer or float).\n"
+                f"3. Write `{result_filename}` with this exact format:\n"
+                f"   ```markdown\n"
+                f"   # Solver Result: {strategy}\n"
+                f"   ## Strategy\n"
+                f"   <description of your approach>\n"
+                f"   ## Solution\n"
+                f"   <your full solution / code>\n"
+                f"   ## Self-Evaluation\n"
+                f"   <how you assessed the score>\n"
+                f"   SCORE: <number>\n"
+                f"   ```\n"
+                f"   The `SCORE: <number>` line MUST appear at the end of the file.\n"
+                f"4. Store your result in the shared scratchpad:\n"
+                f"   ```python\n"
+                + _write_snippet(solver_key, result_filename)
+                + f"\n"
+                f"   ```\n"
+                f"\n"
+                f"Be thorough and honest in your self-evaluation. "
+                f"A higher numeric score means a better solution."
+            )
+
+            solver_task = await orchestrator.submit_task(
+                solver_prompt,
+                required_tags=body.solver_tags or None,
+                depends_on=[],
+            )
+            role_key = f"solver_{safe_strategy}"
+            task_ids_map[role_key] = solver_task.id
+            solver_task_ids.append(solver_task.id)
+
+        # Phase 2: judge reads all solver results and picks the winner
+        solver_keys_desc = "\n".join(
+            f"   - strategy '{s}': key `{scratchpad_prefix}_solver_{s.strip().replace(' ', '_').replace('/', '_')}`"
+            for s in body.strategies
+        )
+        judge_key = f"{scratchpad_prefix}_judge"
+
+        judge_prompt = (
+            f"You are the JUDGE agent in a Best-of-N competitive solver workflow.\n"
+            f"\n"
+            f"**Problem:**\n"
+            f"{body.problem}\n"
+            f"\n"
+            f"**Scoring criterion:** {body.scoring_criterion}\n"
+            f"**Strategies competing:** {', '.join(body.strategies)}\n"
+            f"\n"
+            f"Your tasks:\n"
+            f"1. Set up credentials:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            f"   ```\n"
+            f"2. Read ALL solver results from the shared scratchpad:\n"
+            f"   Keys to read:\n"
+            f"{solver_keys_desc}\n"
+            f"   Use curl to read each key:\n"
+            f"   `curl -s -H \"X-API-Key: $API_KEY\" \"$WEB_BASE_URL/scratchpad/<key>\"`\n"
+            f"\n"
+            f"3. For each solver result:\n"
+            f"   - Extract the numeric score from the `SCORE: <number>` line.\n"
+            f"   - Read the solution and self-evaluation.\n"
+            f"\n"
+            f"4. Write `COMPETITION_RESULT.md` with this exact format:\n"
+            f"   ```markdown\n"
+            f"   # Competition Result\n"
+            f"   ## Problem\n"
+            f"   <brief summary>\n"
+            f"   ## Scoring Criterion\n"
+            f"   {body.scoring_criterion}\n"
+            f"   ## Scores\n"
+            f"   | Strategy | Score |\n"
+            f"   |----------|-------|\n"
+            f"   | <strategy> | <score> |\n"
+            f"   ...\n"
+            f"   ## Winner\n"
+            f"   WINNER: <winning_strategy_name>\n"
+            f"   ## Rationale\n"
+            f"   <why this strategy won>\n"
+            f"   ## Runner-up\n"
+            f"   <second-best strategy and its score>\n"
+            f"   ```\n"
+            f"   The `WINNER: <strategy>` line MUST appear in the ## Winner section.\n"
+            f"\n"
+            f"5. Store the competition result in the shared scratchpad:\n"
+            f"   ```python\n"
+            + _write_snippet(judge_key, "COMPETITION_RESULT.md")
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Be objective. Select the winner based solely on the numeric scores "
+            f"and the scoring criterion: {body.scoring_criterion}. "
+            f"If two strategies tie on score, prefer the one whose solution is "
+            f"simpler and more maintainable."
+        )
+
+        judge_task = await orchestrator.submit_task(
+            judge_prompt,
+            required_tags=body.judge_tags or None,
+            depends_on=solver_task_ids,
+            reply_to=body.reply_to,
+        )
+        task_ids_map["judge"] = judge_task.id
 
         all_task_ids = list(task_ids_map.values())
         run = wm.submit(name=wf_name, task_ids=all_task_ids)
