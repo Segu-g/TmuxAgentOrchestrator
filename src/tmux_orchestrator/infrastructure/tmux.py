@@ -35,6 +35,9 @@ POLL_INTERVAL = 0.1  # seconds
 # Prevents high-output agents (e.g. claude streaming responses) from flooding
 # the asyncio event loop with run_coroutine_threadsafe calls.
 PUBLISH_DEBOUNCE_S = 1.0
+# Maximum seconds to poll pane output for paste-preview detection after
+# send_keys().  Long prompts can take up to ~500ms to trigger the preview.
+_PASTE_PREVIEW_POLL_S = 0.5
 
 
 @dataclass
@@ -179,10 +182,43 @@ class TmuxInterface:
         which absorbs the trailing newline that ``send_keys(enter=True)``
         appends.  We therefore always send Enter as a *separate* keypress
         after a brief pause to let any paste-preview settle.
+
+        If paste-preview mode was triggered (pane shows ``[Pasted text``),
+        an additional Enter is sent to confirm the paste before the normal
+        Enter, preventing the agent from hanging indefinitely.
+
+        The paste-preview check is retried for up to 0.5 seconds to
+        accommodate the latency between sending text and the preview
+        appearing in the captured pane output.
+
+        Reference: DESIGN.md §10.37 (v1.1.1 — paste-preview hang fix)
+        tmux assume-paste-time man page: https://man7.org/linux/man-pages/man1/tmux.1.html
+        tmux/tmux issue #467: send-keys shows preview when called from outside session
         """
         pane.send_keys(text, enter=False)
         if enter:
-            time.sleep(0.15)  # let paste-preview settle before Enter
+            # Poll for up to _PASTE_PREVIEW_POLL_S seconds for paste-preview.
+            # The paste-preview appears asynchronously in the pane output;
+            # polling ensures we detect it even with slight latency.
+            paste_detected = False
+            poll_deadline = time.monotonic() + _PASTE_PREVIEW_POLL_S
+            time.sleep(0.05)  # initial wait for pane to update
+            while time.monotonic() < poll_deadline:
+                output = self.capture_pane(pane)
+                if _paste_preview_active(output):
+                    paste_detected = True
+                    break
+                time.sleep(0.05)
+            if paste_detected:
+                # tmux showed "[Pasted text #N]" — send Enter to dismiss.
+                # The dismissed paste will appear at the prompt; a second
+                # Enter then submits it to the running process.
+                logger.debug(
+                    "Paste-preview detected in pane %s — sending extra Enter to dismiss",
+                    pane.id,
+                )
+                pane.send_keys("", enter=True)
+                time.sleep(0.1)  # let paste-preview be dismissed
             pane.send_keys("", enter=True)
 
     def capture_pane(self, pane: libtmux.Pane) -> str:
@@ -291,3 +327,32 @@ class TmuxInterface:
 
 def _hash(text: str) -> str:
     return hashlib.md5(text.encode(), usedforsecurity=False).hexdigest()
+
+
+def _paste_preview_active(pane_output: str) -> bool:
+    """Return ``True`` if tmux paste-preview mode is currently showing.
+
+    When a long or multi-line string is sent via ``send_keys``, tmux may
+    display a ``[Pasted text #N]`` line in the pane and wait for Enter to
+    confirm the paste (or Escape to cancel).  Detecting this marker lets
+    ``send_keys`` dismiss the preview with an additional Enter keystroke
+    before sending the intended Enter to the underlying process.
+
+    Parameters
+    ----------
+    pane_output:
+        Captured text from ``capture_pane()`` immediately after sending keys.
+
+    Returns
+    -------
+    bool
+        ``True`` if ``[Pasted text`` appears in the last few lines of output,
+        indicating that tmux paste-preview mode is active.
+
+    Reference: DESIGN.md §10.37 (v1.1.1 — paste-preview hang fix).
+    tmux man page ``assume-paste-time``: https://man7.org/linux/man-pages/man1/tmux.1.html
+    """
+    # Check only the last few lines to avoid false positives on old scrollback
+    # that may contain "[Pasted text" from a previous paste event.
+    last_lines = pane_output.rsplit("\n", 10)[-10:]
+    return any("[Pasted text" in line for line in last_lines)

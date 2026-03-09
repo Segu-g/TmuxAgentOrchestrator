@@ -5,25 +5,36 @@ Tests cover:
    finished_at=None (task exists but incomplete)
 2. wait_for_server — success and timeout
 3. api — basic GET/POST round-trip (mocked)
+4. start_server / stop_server — process-group-aware server lifecycle helpers
 
 All HTTP calls are intercepted via a custom urllib opener or by patching
 urllib.request.urlopen directly.
 
 References:
     - DESIGN.md §10.N (v1.0.18 — demo stability tests)
+    - DESIGN.md §10.37 (v1.1.1 — server cleanup helper)
 """
 from __future__ import annotations
 
 import io
 import json
+import os
+import signal
+import subprocess
 import time
 import urllib.error
 import urllib.request
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from tmux_orchestrator.testing.demo_client import api, wait_for_agent_done, wait_for_server
+from tmux_orchestrator.testing.demo_client import (
+    api,
+    start_server,
+    stop_server,
+    wait_for_agent_done,
+    wait_for_server,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -289,3 +300,89 @@ class TestApi:
         req = mock_open.call_args[0][0]
         assert req.get_method() == "POST"
         assert json.loads(req.data) == {"prompt": "hello"}
+
+
+# ---------------------------------------------------------------------------
+# start_server / stop_server
+# ---------------------------------------------------------------------------
+
+
+class TestStartStopServer:
+    """Tests for the start_server() and stop_server() helper functions."""
+
+    def test_start_server_uses_start_new_session(self, tmp_path: "pytest.TempPathFactory") -> None:
+        """start_server() must set start_new_session=True for process group isolation."""
+        mock_proc = MagicMock(spec=subprocess.Popen)
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            result = start_server(["echo", "hello"], cwd=tmp_path)
+
+        assert result is mock_proc
+        _, kwargs = mock_popen.call_args
+        assert kwargs.get("start_new_session") is True
+        assert kwargs.get("stdin") == subprocess.DEVNULL
+        assert str(kwargs.get("cwd")) == str(tmp_path)
+
+    def test_start_server_overrides_start_new_session(self, tmp_path: "pytest.TempPathFactory") -> None:
+        """start_server() must override any caller-supplied start_new_session value."""
+        mock_proc = MagicMock(spec=subprocess.Popen)
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            # Caller tries to set start_new_session=False — must be overridden
+            result = start_server(["echo", "hello"], cwd=tmp_path, start_new_session=False)
+
+        _, kwargs = mock_popen.call_args
+        assert kwargs.get("start_new_session") is True
+
+    def test_start_server_passes_extra_kwargs(self, tmp_path: "pytest.TempPathFactory") -> None:
+        """Extra keyword arguments are forwarded to Popen."""
+        mock_proc = MagicMock(spec=subprocess.Popen)
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            start_server(
+                ["echo", "hello"],
+                cwd=tmp_path,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        _, kwargs = mock_popen.call_args
+        assert kwargs.get("stdout") == subprocess.PIPE
+        assert kwargs.get("stderr") == subprocess.PIPE
+
+    def test_stop_server_calls_killpg(self, tmp_path: "pytest.TempPathFactory") -> None:
+        """stop_server() must call os.killpg with SIGTERM."""
+        mock_proc = MagicMock(spec=subprocess.Popen)
+        mock_proc.pid = 12345
+
+        with patch("os.getpgid", return_value=12345) as mock_getpgid, \
+             patch("os.killpg") as mock_killpg, \
+             patch.object(mock_proc, "wait"):
+            stop_server(mock_proc)
+
+        mock_getpgid.assert_called_once_with(12345)
+        mock_killpg.assert_called_once_with(12345, signal.SIGTERM)
+
+    def test_stop_server_handles_process_already_exited(
+        self, tmp_path: "pytest.TempPathFactory"
+    ) -> None:
+        """stop_server() must not raise if the process already exited."""
+        mock_proc = MagicMock(spec=subprocess.Popen)
+        mock_proc.pid = 99999
+
+        with patch("os.getpgid", side_effect=ProcessLookupError), \
+             patch.object(mock_proc, "wait"):
+            # Should not raise
+            stop_server(mock_proc)
+
+    def test_stop_server_force_kills_on_timeout(self, tmp_path: "pytest.TempPathFactory") -> None:
+        """stop_server() sends SIGKILL to the group if wait() times out."""
+        mock_proc = MagicMock(spec=subprocess.Popen)
+        mock_proc.pid = 12345
+        mock_proc.wait.side_effect = [subprocess.TimeoutExpired(cmd="server", timeout=5), None]
+
+        with patch("os.getpgid", return_value=12345), \
+             patch("os.killpg") as mock_killpg:
+            stop_server(mock_proc, timeout=5.0)
+
+        # SIGTERM first, then SIGKILL
+        calls = mock_killpg.call_args_list
+        assert any(c == call(12345, signal.SIGTERM) for c in calls)
+        assert any(c == call(12345, signal.SIGKILL) for c in calls)

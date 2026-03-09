@@ -40,6 +40,9 @@ References:
 from __future__ import annotations
 
 import json
+import os
+import signal
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -252,3 +255,104 @@ def api(
     req = urllib.request.Request(url, data=body, method=method, headers=headers)
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read())
+
+
+# ---------------------------------------------------------------------------
+# start_server / stop_server — process-group-aware server lifecycle helpers
+# ---------------------------------------------------------------------------
+
+
+def start_server(
+    cmd: list[str],
+    cwd: "str | os.PathLike[str]",
+    **kwargs: Any,
+) -> subprocess.Popen:
+    """Start a server process in its own process group.
+
+    Uses ``start_new_session=True`` (equivalent to ``os.setsid()``) so that
+    the server and all its child processes form an independent process group.
+    This makes ``stop_server()`` able to cleanly terminate the entire group
+    via ``os.killpg()``, avoiding zombie child processes left behind by a
+    simple ``proc.terminate()`` call.
+
+    Parameters
+    ----------
+    cmd:
+        Command list passed to ``subprocess.Popen``.
+    cwd:
+        Working directory for the server process.  **Must** be the demo
+        folder (not ``PROJECT_ROOT``) so that ``WorktreeManager`` uses the
+        demo git repository.
+    **kwargs:
+        Additional keyword arguments forwarded to ``subprocess.Popen``.
+        Note: ``start_new_session`` is always set to ``True``; any caller-
+        supplied value is overridden.
+
+    Returns
+    -------
+    subprocess.Popen
+        The running server process handle.  Pass to ``stop_server()`` to
+        shut it down.
+
+    Design references:
+    - POSIX ``setsid(2)`` — create a new session and process group
+    - POSIX ``killpg(2)`` — send signal to a process group
+    - GNU libc manual "Process Group Functions"
+      https://www.gnu.org/software/libc/manual/html_node/Process-Group-Functions.html
+    - DESIGN.md §10.37 (v1.1.1 — server cleanup helper)
+    """
+    # Force start_new_session=True; ignore any caller-supplied value.
+    kwargs.pop("start_new_session", None)
+    proc = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        **kwargs,
+    )
+    return proc
+
+
+def stop_server(proc: subprocess.Popen, *, timeout: float = 5.0) -> None:
+    """Terminate a server process and its entire process group.
+
+    Sends ``SIGTERM`` to the process group created by ``start_server()``,
+    then waits up to *timeout* seconds for the process to exit.  If the
+    process group no longer exists (e.g. it already exited), the error is
+    silently ignored.
+
+    Parameters
+    ----------
+    proc:
+        The ``subprocess.Popen`` object returned by ``start_server()``.
+    timeout:
+        Seconds to wait for the process to exit after sending ``SIGTERM``.
+        Default 5.0 s.
+
+    Design references:
+    - POSIX ``killpg(2)`` — send signal to process group
+    - POSIX SIGTERM/SIGKILL model: graceful shutdown before forced kill
+    - DESIGN.md §10.37 (v1.1.1 — server cleanup helper)
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        # Process already exited — nothing to kill.
+        pass
+    except OSError:
+        # Fallback: try direct terminate if getpgid fails.
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Force-kill the process group if graceful shutdown timed out.
+        try:
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGKILL)
+        except OSError:
+            pass
+        proc.wait()

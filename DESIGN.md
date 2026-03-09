@@ -1747,3 +1747,81 @@ judge エージェント（depends_on=全 solver）
 - "Making, not Taking, the Best of N" (FusioN), arXiv:2510.00931, 2025, https://arxiv.org/pdf/2510.00931
 - "M-A-P: Multi-Agent-based Parallel Test-Time Scaling", arXiv:2506.12928, 2025, https://arxiv.org/pdf/2506.12928
 - "Statistical Estimation of Adversarial Risk under Best-of-N Sampling", arXiv:2601.22636, 2025, https://arxiv.org/html/2601.22636
+
+---
+
+## §10.37 — v1.1.1: `[Pasted text #1]` ハング修正 + Server Cleanup Helper
+
+**選択日**: 2026-03-09
+
+### 選択理由
+
+**選択: paste-preview ハング修正 + demo server cleanup ヘルパー (PATCH バンプ)**
+
+v1.1.0 デモで発見された2つのバグを修正する:
+
+1. **`[Pasted text #1]` ハング**: 長いプロンプト送信時に tmux paste-preview モードが起動し、
+   Claude CLI がプロンプトを受け取れない。`ensure_session()` で `assume-paste-time 0` を設定しているが、
+   実際のデモで発生することが確認されており、不十分。
+
+2. **server cleanup**: `proc.terminate()` だけでは uvicorn の子プロセスが残留する。
+   `start_new_session=True` + `os.killpg()` パターンに移行する。
+
+**選択しなかった候補**:
+- スライディングウィンドウ + TF-IDF コンテキスト圧縮: 外部ライブラリ依存が大きい
+- DriftMonitor セマンティック類似度: embedding モデルが CI で重い
+
+### 根本原因分析
+
+`TmuxInterface.send_keys()` は以下の実装:
+
+```python
+def send_keys(self, pane, text, enter=True):
+    pane.send_keys(text, enter=False)
+    if enter:
+        time.sleep(0.15)
+        pane.send_keys("", enter=True)
+```
+
+`ensure_session()` で `assume-paste-time 0` を設定しているが、
+Claude CLI が独自の bracketed-paste 検出を持つため、tmux 設定のみでは不十分。
+0.15秒 sleep + Enter パターンは paste-preview が **表示されてしまった後** に Enter を送るが、
+Claude CLI が `[Pasted text #N]` 確認を待っている間にさらに Enter が重複する可能性がある。
+
+**修正**: `send_keys()` で Enter 送信後にペイン出力を検査し、`[Pasted text` が
+表示されている場合は追加 Enter を送信して paste-preview を確定させる。
+
+### Web調査結果
+
+**Query 1**: "tmux assume-paste-time bracket paste mode [Pasted text terminal behavior 2024"
+
+- `assume-paste-time` はキーが 1ms より速く入力された場合を paste とみなす閾値。`0` で無効化。
+  (man7.org tmux manpage)
+- bracketed paste mode は tmux に 2012 年追加。`\033[200~`/`\033[201~` で pasted text を囲む。
+  (tmux/tmux commit f4fdddc)
+- `assume-paste-time` と bracketed paste mode は独立した仕組み。
+
+**References**:
+- tmux man page: https://man7.org/linux/man-pages/man1/tmux.1.html
+- tmux bracketed paste commit: https://github.com/tmux/tmux/commit/f4fdddc9306886e3ab5257f40003f6db83ac926b
+- Bracketed paste mode bug report: https://github.com/microsoft/terminal/issues/19418
+
+**Query 2**: "tmux send-keys long text paste preview mode enter keypress workaround"
+
+- `tmux send-keys` のセッション外からの呼び出し時に preview が表示される。(tmux/tmux issue #467)
+- libtmux 経由は Python プロセスからの発行のため「セッション外」扱いになりうる。
+- send-keys を inside session から呼ぶ場合は preview が表示されない。
+
+**References**:
+- tmux send-keys preview issue: https://github.com/tmux/tmux/issues/467
+- libtmux send_keys issue: https://github.com/tmux-python/libtmux/issues/15
+
+**Query 3**: "tmux assume-paste-time option explanation paste detection milliseconds"
+
+- `assume-paste-time 0` は tmux.conf の一般的な回避策。ただし Claude CLI が独自の
+  bracketed-paste を処理するため、設定だけでは不十分なケースがある。
+- `os.setsid()` / `start_new_session=True` は POSIX のプロセスグループ管理の標準的手法。
+
+**References**:
+- Ubuntu tmux manpage: https://manpages.ubuntu.com/manpages/xenial/man1/tmux.1.html
+- tmux man7.org: https://man7.org/linux/man-pages/man1/tmux.1.html
