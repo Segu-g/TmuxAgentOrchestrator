@@ -2283,3 +2283,123 @@ build-log v1.0.23 で「stale worktree cleanup が recurring pain」と記録済
 - `contexts` count validator for /workflows/ddd: スコープが小さすぎる。
 - Prompt delivery timeout 短縮 (1.5s): v1.1.2/v1.1.3 で関連修正済み、単独イテレーション価値が低い。
 - DriftMonitor セマンティック類似度: `sentence-transformers` 依存、大きな変更。
+
+---
+
+## §10.45 — v1.1.9: エージェント状態機械 Hypothesis ステートフルテスト
+
+**選択日**: 2026-03-09
+
+### 選択理由
+
+**選択: `AgentStatus` 遷移シーケンスの Hypothesis `RuleBasedStateMachine` テスト**
+
+§11「層5：ツール・マネジメント（アーキテクチャ品質）」中優先度候補。
+
+**選択理由**:
+1. **本番コード変更なし**: `AgentStatus` 遷移ロジック (`IDLE→BUSY→IDLE/ERROR/DRAINING`) はすでに実装済み。テストコードのみ追加するため、既存機能へのリスクがゼロ。
+2. **テストカバレッジの重要なギャップを埋める**: v0.10.0 で導入した PBT (`test_bus_stateful.py`) はステートレスなプロパティテストのみ。状態遷移シーケンス（特に割り込み・タイムアウト・リカバリ）のテストが未カバー。
+3. **デッドロック・不変量違反の自動検出**: Hypothesis `stateful` が生成するシーケンスは手書きテストでは到達しない遷移パスを発見する。過去のバグ（watchdog timeout、circuit breaker誤作動）のリグレッションを自動化できる。
+4. **実装コストが低い**: `RuleBasedStateMachine` 1クラス＋ルール関数5-8個で完結する。新しい依存ライブラリ不要。
+5. **デモ価値**: 本番コード変更なしでも、2エージェント（Director + Worker）を使った「状態遷移を実際に踏むタスクパイプライン」デモを追加できる。
+
+**選択しなかった候補と理由**:
+- **チェックポイント永続化 (SQLite)**: スキーマ設計・`--resume` フラグ・マイグレーション管理で実装規模が大きい。v1.2.x 以降向け。
+- **ProcessPort 抽象インターフェース**: `ClaudeCodeAgent` の全 libtmux 依存を交換するリファクタリングは広範囲かつ既存テストへの影響が大きい。
+- **OpenTelemetry GenAI Semantic Conventions**: OTLP エクスポーター・Jaeger/Datadog セットアップが必要でデモ環境の準備コストが高い。
+- **`UseCaseInteractor` 層の抽出**: FastAPI ハンドラーの全面リファクタリングで、現在の安定したエンドポイントに不要なリスクを持ち込む。
+- **Director の `agent_drift_warning` 購読**: DriftMonitor が drift_warnings=0 のままのケースで効果が見えにくく、デモ価値が低い。
+
+### 実装計画
+
+**テスト設計** (`tests/test_agent_status_stateful.py`):
+
+```python
+from hypothesis.stateful import RuleBasedStateMachine, rule, invariant, initialize
+from tmux_orchestrator.domain.agent import AgentStatus
+
+class AgentStatusMachine(RuleBasedStateMachine):
+    # モデル: 状態 × ビジーカウンタ × エラーカウンタ
+    @initialize()
+    def setup(self): ...
+
+    @rule()
+    def dispatch_task(self): ...   # IDLE → BUSY
+
+    @rule()
+    def complete_task(self): ...   # BUSY → IDLE
+
+    @rule()
+    def task_error(self): ...      # BUSY → ERROR
+
+    @rule()
+    def recover_from_error(self): ... # ERROR → IDLE (circuit breaker reset)
+
+    @rule()
+    def drain_agent(self): ...     # IDLE/BUSY → DRAINING
+
+    @invariant()
+    def valid_status(self): ...    # AgentStatus は常に有効な値
+
+    @invariant()
+    def busy_only_from_idle(self): ... # BUSY になる前は必ず IDLE だった
+```
+
+**対象クラス/モジュール**:
+- `src/tmux_orchestrator/domain/agent.py` — `AgentStatus` enum
+- `src/tmux_orchestrator/registry.py` — `AgentRegistry` (状態遷移メソッド群)
+- `src/tmux_orchestrator/orchestrator.py` — dispatch ロジック
+
+**デモシナリオ** (`~/Demonstration/v1.1.9-hypothesis-stateful/`):
+- Director エージェントが複数タスクを順次発行し、Worker が IDLE→BUSY→IDLE を繰り返す
+- watchdog タイムアウトを意図的に引き起こして ERROR→回復のサイクルを実証
+- デモ前後で Hypothesis テストが全てパスすることを確認
+
+### 調査結果 (Step 1 — Research)
+
+**Query 1**: "Hypothesis stateful testing RuleBasedStateMachine state machine Python 2025 invariants"
+
+主要知見:
+- **Hypothesis 公式ドキュメント "Stateful tests"**: `RuleBasedStateMachine` は `@rule()` で遷移を定義し、`@invariant()` で各ステップ後に検証する不変量を記述する。`@precondition` でルールの適用条件を指定することで assume() より効率的なフィルタリングが可能。`@initialize()` で初期化ルールを定義し、初期化前は `@invariant()` が実行されない。
+- **Hypothesis "Rule Based Stateful Testing" 記事**: `Bundle` を使ってステートフルなデータ（例: 生成されたエージェントID）をルール間で受け渡す設計パターンを解説。存在しないオブジェクトに対する操作を avoid するための `assume()` の使い方を例示。
+- **`precondition()` デコレータ**: `assume()` と異なり、条件を満たさないルールは最初からスキップされる（ヘルスチェック違反を防ぐ）。`assume()` はルール内で呼び出して条件が満たされない入力を棄却する。
+
+**References**:
+- Hypothesis docs "Stateful tests": https://hypothesis.readthedocs.io/en/latest/stateful.html
+- Hypothesis "Rule Based Stateful Testing": https://hypothesis.works/articles/rule-based-stateful-testing/
+
+**Query 2**: "Hypothesis RuleBasedStateMachine agent state machine deadlock detection property based testing concurrent systems 2025"
+
+主要知見:
+- **QuickCheck State Machine (Hackage `quickcheck-state-machine`)**: Haskell 実装の `quickcheck-state-machine` は sequential + parallel の2プロパティを定義し、並列実行時のリニアリザビリティ違反を検出。Python の Hypothesis はシーケンシャルのみ直接サポートするが、ステートフルテストとして状態遷移シーケンスの不変量を効率よく検証できる。
+- **Formal Signoff for Digital State Machines (IJSAT 2025)**: デジタル状態機械の形式的検証にデッドロック検出を組み込む手法を論じる。「到達不能状態」と「デッドロック状態」を形式モデルで検出。Hypothesis のステートフルテストは同等の問題を確率的に検出できる（全状態空間ではなく反例主導のファジング）。
+- **Monitoring Multi-Agent Systems for deadlock detection (ResearchGate)**: UML モデルを基にした実行時デッドロック検出手法。エージェント間通信プロトコルの状態機械モデルと Hypothesis の RuleBasedStateMachine は構造的に同型。
+
+**References**:
+- Hypothesis docs stateful.rst: https://github.com/HypothesisWorks/hypothesis/blob/master/hypothesis-python/docs/stateful.rst
+- Formal Signoff for Digital State Machines, IJSAT 2025: https://www.ijsat.org/papers/2025/1/7767.pdf
+- quickcheck-state-machine: https://hackage.haskell.org/package/quickcheck-state-machine
+
+**Query 3**: "Hypothesis stateful testing Python AsyncIO state machine IDLE BUSY ERROR transitions invariants 2025"
+
+主要知見:
+- **Pytest 8.0 Async / Hypothesis Stateful (johal.in 2025)**: `asyncio.new_event_loop()` + `loop.run_until_complete()` パターンで Hypothesis ステートフルテストから非同期コードを呼び出す方法を解説。各マシンインスタンスが独自のイベントループを持つことで Hypothesis のフォーク動作と互換性を保てる。
+- **Python state machine libraries**: `python-statemachine 3.0.0` は async コールバックをネイティブサポートし、`transitions` ライブラリは `MachineFactory.get_predefined(asyncio=True)` で非同期機械を生成する。TmuxAgentOrchestrator の `AgentStatus` は単純な Enum であるため、既存の `_set_busy` / `_set_idle` メソッドを `loop.run_until_complete()` でラップして直接テスト可能。
+- **HealthCheck.filter_too_much 抑制**: `precondition` と `assume()` の組み合わせで状態フィルタリングが多い場合に Hypothesis が health check 違反を報告する。`@precondition` を優先して `assume()` を最小化することで解決できる。
+
+**References**:
+- Pytest 8.0 Async / Hypothesis Stateful 2025: https://johal.in/pytest-8-0-async-trio-anyio-hypothesis-stateful-junit-xml-parallelism-2025/
+- Hypothesis docs stateful: https://hypothesis.readthedocs.io/en/latest/stateful.html
+- python-statemachine async support: https://python-statemachine.readthedocs.io/en/latest/async.html
+
+### 実装サマリー
+
+3つの `RuleBasedStateMachine` を `tests/test_stateful_agent_and_breaker.py` に実装した:
+
+1. **`RealAgentStatusMachine`** — `_FakeAgent` の `_set_busy()` / `_set_idle()` を直接呼び出し、4つの不変量 (P1–P4) を検証。特に P3「`_set_idle()` は DRAINING/ERROR/STOPPED 状態では no-op」を自動生成シーケンスで確認。
+2. **`CircuitBreakerMachine`** — `record_success()` / `record_failure()` / `_to_half_open()` を呼び出し、5つの不変量 (B1–B5) を検証。特に B3「`_opened_at` は OPEN 時のみセット」と B4「CLOSED → `is_allowed()=True`, OPEN → `is_allowed()=False`」を検証。
+3. **`AgentRegistryMachine`** — `register` / `unregister` / `record_busy` / `record_result` を任意順序で呼び出し、3つの不変量 (R1、R3、R4) を検証。特に R1「`find_idle_worker()` は IDLE エージェントのみ返す」を確認。
+
+全テスト: **2010** (2007 + 3 新規)。
+
+
