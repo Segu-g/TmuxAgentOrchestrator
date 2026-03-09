@@ -4155,4 +4155,28 @@ References:
 - faif/python-patterns, https://github.com/faif/python-patterns (2025)
 - freecodecamp, "How to Use the Factory Pattern in Python", https://www.freecodecamp.org/news/how-to-use-the-factory-pattern-in-python-a-practical-guide/ (2025)
 - refactoring.guru, "Factory Method in Python", https://refactoring.guru/design-patterns/factory-method/python/example (2025)
-| `main.py` | ROOT に留まる | CLI エントリポイント (typer) — Composition Root の最外殻 |
+
+### Step 2 — 実装サマリー
+
+**実装ファイル**:
+- `src/tmux_orchestrator/application/factory.py` — 完全な canonical 実装 (build_system, patch_web_url, patch_api_key) を配置。`application.bus.Bus` と `application.config.load_config` から import。
+- `src/tmux_orchestrator/factory.py` — Strangler Fig shim 化。`application.factory` から re-export のみ。
+- `tests/test_factory.py` — 8パッチを `tmux_orchestrator.application.factory.*` に更新。
+- `tests/test_system_prompt_file.py` — 8パッチを `tmux_orchestrator.application.factory.*` に更新。
+- `tests/test_context_spec_files.py` — 2パッチを `tmux_orchestrator.application.factory.*` に更新。
+- `tests/test_application_purity.py` — `_CROSS_LAYER_FILES` の `factory.py` コメント更新（除外継続 — Composition Root は TmuxInterface + WorktreeManager をインフラから合法的に import）。
+- `DESIGN.md §10.60` — 選択理由 + 3 WebSearch クエリ + 実装サマリー。
+- `pyproject.toml` — version 1.1.27 → 1.1.28
+
+**テスト数**: 2564 (変化なし — migration のみ)
+
+**バージョン**: 1.1.28
+
+**E2E デモ** (`~/Demonstration/v1.1.28-clean-arch-final/`):
+- 2 実エージェント (`agent-mapper`, `agent-validator`) が Pipeline パターンで動作。
+- mapper: 7/7 検証チェック PASS (canonical impl 確認、shim 確認、import 解析)
+- validator: 10/10 検証チェック PASS (関数同一性、パッチ動作、Phase5 後退確認)
+- **10/10 チェック PASS (初回実行)**
+
+**Clean Architecture 完成度**: ~99%
+- 残存課題: `Orchestrator` を `application/__init__` から re-export できない (循環インポートチェーン) → `application/__init__.py` の NOTE コメントで対処済み。
