@@ -698,7 +698,7 @@ AI エージェントにとって TDD は「ガードレール」として機能
 | **高** | **クリーンアーキテクチャ層別ディレクトリ移行** — 現在フラットな `tmux_orchestrator/` 以下のモジュールを `domain/` / `application/` / `infrastructure/` / `monitoring/` / `adapters/` に段階的に移動する。後方互換シム（旧パスからの re-export）を置き、テストを壊さずに移行する。移行順: ① `domain/` (AgentStatus, Task, MessageType 抽出), ② `infrastructure/` (tmux_interface, messaging, worktree 等), ③ `application/` (orchestrator, registry, bus), ④ `adapters/` (config, factory, schemas, web, tui)。各移動は独立したコミット単位で行い、`uv run pytest tests/ -x -q` が常にグリーンであることを確認する | §2「ドメイン分離方針」および「目標とするクリーンアーキテクチャ層構造」参照。Martin "Clean Architecture" (2017): 依存は常にドメイン中心に向かう（Dependency Rule）。現状は orchestrator.py が context_monitor / drift_monitor / result_store 等のインフラを直接 import しており、依存方向が逆転している。移行することで各層の単体テストが高速化・安定化する。 |
 | ~~**高**~~ | ~~**`domain/` 純粋型の抽出** — `AgentStatus`, `AgentRole` (from config.py / agents/base.py)、`Task` (from agents/base.py)、`MessageType` / `Message` (from bus.py) を `domain/agent.py` / `domain/task.py` / `domain/message.py` に移動。既存モジュールは `from tmux_orchestrator.domain.agent import AgentStatus` を re-export するシムに書き換える。domain/ は外部ライブラリを一切 import しない~~ | ~~完了 v1.0.11 — 1156 tests 全通過。Strangler Fig パターンで後方互換性を保ちつつ型を集約。`test_domain_purity.py` 20 tests で純粋性を継続保証。14/15 デモ PASS。~~ |
 | ~~**高**~~ | ~~**`orchestrator.py` のインフラ依存を依存注入（DI）に置き換える**~~ | ~~完了 v1.0.35 — `ResultStoreProtocol`, `CheckpointStoreProtocol`, `AutoScalerProtocol` を `application/infra_protocols.py` に定義。`NullResultStore`, `NullCheckpointStore`, `NullAutoScaler` Null Object 実装を追加。`WorkflowManager`, `GroupManager` も constructor injection 対応。`reconfigure_autoscaler()` 公開メソッド追加。50 tests 追加 (32 protocol + 18 DI)。20/20 デモ PASS。~~ |
-| 高 | **OpenTelemetry GenAI Semantic Conventions 準拠トレース出力** — `gen_ai.*` 属性 (token counts, tool calls, agent spans) を既存 `trace_id` ベースの構造化ログに付加し、Datadog/Jaeger/OTLP エクスポーターへ送信できるようにする | OpenTelemetry "AI Agent Observability" (2025) が業界標準に収斂しつつあり、Datadog が GenAI Semantic Conventions にネイティブ対応済み。現状の `trace_id` は相関のみでスパン階層がない。[opentelemetry.io/blog/2025/ai-agent-observability](https://opentelemetry.io/blog/2025/ai-agent-observability/) |
+| ~~**高**~~ | ~~**OpenTelemetry GenAI Semantic Conventions 準拠トレース出力**~~ | ~~完了 v1.1.10 — `workflow_span()` + `RingBufferSpanExporter` + `GET /telemetry/spans` + `gen_ai.agent.description/version` + `BatchSpanProcessor` 本番パス + OTel→structlog 伝播。25テスト追加。25/25 デモ PASS。~~ |
 | ~~**高**~~ | ~~**エージェントドリフト検出 (Agent Stability Index)**~~ | ~~完了 v1.0.9 — `DriftMonitor` (role/idle/length 3サブスコア)、`agent_drift_warning` イベント。34テスト。17/17デモPASS。~~ |
 | 中 | **DriftMonitor — セマンティック類似度ベースの role_score 強化** — 現行のキーワードマッチを embedding コサイン類似度に置き換え、system_prompt と pane 出力の意味的乖離をより精密に測定する。`sentence-transformers` の軽量モデル (paraphrase-MiniLM-L6-v2, 22MB) を使用してランタイム外部 API 依存を回避する | Rath arXiv:2601.04170: ASI の Role Adherence 次元は「agent_id とタスクタイプの相互情報量」を使用。v1.0.9 のキーワードマッチは role_score = 1.0 に張り付く傾向（スコアが役割逸脱を検出しにくい）。embedding 距離により「形式は合っているが内容が違う」ドリフトを検出可能。 |
 | 中 | **Director の `agent_drift_warning` 購読による自動 re-brief** — Director エージェントが bus の `agent_drift_warning` イベントを購読し、ドリフトを検出したワーカーに自動で re-brief メッセージを送信する仕組みを追加する。v1.0.8 の「ディレクター投票が遅い」問題の根本解決。`/delegate` スラッシュコマンドで受信後に再ブリーフィングを実行 | v1.0.9 build-log: drift_warnings=0 は正常動作だが、将来の曖昧タスクでワーカーがドリフトする場合に Director が自動介入できる仕組みが必要。v1.0.8 build-log: 「Director polling が遅い (11分ループ)」根本原因は能動的な完了通知の欠如。`agent_drift_warning` bus イベントを Director が購読することで同様の問題を予防できる。 |
@@ -2469,6 +2469,24 @@ class AgentStatusMachine(RuleBasedStateMachine):
 - **実装済み**: `TelemetrySetup`, `agent_span()`, `task_queued_span()`, `GET /telemetry/status`, Orchestrator統合 (30テスト)
 - **未実装**: `workflow_span()` (ワークフロー単位トレース), `GET /telemetry/spans` REST エンドポイント, `gen_ai.agent.description`/`version` 属性, `BatchSpanProcessor` 本番設定, OTel trace_id → structlog 伝播
 
-### Step 2 — 実装
+### Step 2 — 実装サマリー
+
+**実装ファイル**:
+- `src/tmux_orchestrator/telemetry.py`: `workflow_span()`, `RingBufferSpanExporter`, `gen_ai.agent.description/version` 属性, `BatchSpanProcessor` 本番パス
+- `src/tmux_orchestrator/logging_config.py`: `JsonFormatter.format()` に OTel span context (otel_trace_id, otel_span_id) 伝播追加
+- `src/tmux_orchestrator/web/routers/system.py`: `GET /telemetry/spans` エンドポイント追加
+- `tests/test_telemetry_v2.py`: 25 新規テスト (2010 → 2035 全通過)
+
+**E2E デモ** (`~/Demonstration/v1.1.10-otel-genai-semconv/`):
+- agent-implementer (26.9s): statistics_utils.py (mean/median/mode) 実装 → scratchpad 保存
+- agent-reviewer (39.5s): scratchpad からコード取得 → 15テスト作成・実行 → 全通過
+- OTel スパン: 3件キャプチャ (`task_queued` × 2 + `invoke_agent` × 1)
+- GET /telemetry/spans: リアルタイムスパン取得確認
+
+**デバッグ事項**:
+1. `--api-key` フラグ未指定 → サーバーが独自キー生成 → 全 REST 呼び出し 401
+2. `POST /tasks` レスポンスキーが `task_id` (not `id`) → デモ側フォールバック追加
+
+**25/25 チェック PASSED**
 
 
