@@ -43,6 +43,7 @@ References:
     - Percival, Gregory "Architecture Patterns with Python" (2020) Ch. 8 — Message Bus
     - DESIGN.md §10.N (v1.0.15 — application/ layer extraction)
     - DESIGN.md §10.56 (v1.1.24 — Clean Architecture Phase 2)
+    - DESIGN.md §10.59 (v1.1.27 — Clean Architecture Phase 5)
 """
 
 from tmux_orchestrator.application.bus import Bus
@@ -85,6 +86,34 @@ from tmux_orchestrator.application.workflow_service import (
     WorkflowStep,
     _topological_sort,
 )
+from tmux_orchestrator.application.schemas import (
+    AgentBusyPayload,
+    AgentErrorPayload,
+    AgentIdlePayload,
+    DriftWarningPayload,
+    Episode,
+    EpisodeCreate,
+    PeerMessagePayload,
+    SpawnSubagentPayload,
+    SubagentSpawnedPayload,
+    TaskDeadLetteredPayload,
+    TaskQueuedPayload,
+    TaskResultPayload,
+    parse_result_payload,
+    parse_status_payload,
+)
+from tmux_orchestrator.application.config import (
+    AgentConfig,
+    OrchestratorConfig,
+    WebhookConfig,
+    load_config,
+)
+# NOTE: Orchestrator, build_system, patch_api_key, patch_web_url are NOT imported here
+# to avoid a deep circular import chain (orchestrator → agents.base → logging_config →
+# infrastructure → bus → application/__init__ → orchestrator).
+# Import them directly from their canonical modules:
+#   from tmux_orchestrator.application.orchestrator import Orchestrator
+#   from tmux_orchestrator.application.factory import build_system, patch_api_key, patch_web_url
 
 __all__ = [
     "AgentRegistry",
@@ -122,4 +151,23 @@ __all__ = [
     "_topological_sort",
     "supervised_task",
     "validate_dag",
+    # Phase 5 additions
+    "AgentBusyPayload",
+    "AgentConfig",
+    "AgentErrorPayload",
+    "AgentIdlePayload",
+    "DriftWarningPayload",
+    "Episode",
+    "EpisodeCreate",
+    "OrchestratorConfig",
+    "PeerMessagePayload",
+    "SpawnSubagentPayload",
+    "SubagentSpawnedPayload",
+    "TaskDeadLetteredPayload",
+    "TaskQueuedPayload",
+    "TaskResultPayload",
+    "WebhookConfig",
+    "load_config",
+    "parse_result_payload",
+    "parse_status_payload",
 ]

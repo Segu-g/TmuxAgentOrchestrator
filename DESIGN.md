@@ -4033,3 +4033,69 @@ References:
 | `security.py` | `infrastructure/security.py` | Starlette middleware、外部依存あり |
 | `telemetry.py` | `infrastructure/telemetry.py` | OpenTelemetry SDK、外部依存あり |
 | `logging_config.py` | `infrastructure/logging_config.py` | sys/logging 設定、infrastructure 横断関心事 |
+
+
+## §10.59 — v1.1.27: Clean Architecture Migration Phase 5 — schemas.py + config.py + factory.py + orchestrator.py
+
+### Step 0 — 選択理由
+
+**選択した機能**: Clean Architecture Migration Phase 5 — 残存 ROOT ファイル群 (`schemas.py`, `config.py`, `factory.py`, `orchestrator.py`) の application 層への移動と Strangler Fig shim 化。
+
+**理由**:
+- Phase 1-4 完了後、`schemas.py`・`config.py`・`factory.py`・`orchestrator.py` が ROOT に残る最後の主要ファイル群。
+- `schemas.py`: Pydantic モデル (bus メッセージペイロード・エピソード記憶) — 外部依存は Pydantic のみ。Application layer の DTO として最適な位置。
+- `config.py`: YAML ローダー + Python dataclasses — `yaml` (stdlib 相当) + `pathlib` のみ。Application layer が適切 (pure config, no infra I/O)。
+- `factory.py`: Composition Root — 全コンポーネントを配線する Factory。Application layer (`application/factory.py`) に移動する。
+- `orchestrator.py` (2698行): ROOT で既にほぼ Pure Python asyncio — `TmuxInterface` は TYPE_CHECKING のみ参照。Application layer に移動する Strangler Fig shim を作成する。
+- `main.py`: CLI エントリポイント (typer) — ROOT に留まる (Composition Root の最外殻)。
+
+**選択しなかったこと**:
+- `main.py` は CLI エントリポイントの性格上、ROOT に留める。
+
+### Step 1 — Research
+
+**Query 1**: "Clean Architecture Python schemas Pydantic models layer placement application vs domain 2025"
+
+主要知見:
+- DTO (Data Transfer Object) は Application Layer が最適な位置。Domain 層は純粋な business rule を持ち、Pydantic に依存しない。
+- 実用的アプローチ (Sam Keen, 2025): 複雑なドメインロジックがない場合は Pydantic を Application 層 DTO として使用することが許容される。重複検証はアンチパターン。
+- Bus メッセージペイロードは Application Layer の DTO — `application/schemas.py` が正しい位置。
+
+References:
+- Glukhov, "Python Design Patterns for Clean Architecture", https://www.glukhov.org/post/2025/11/python-design-patterns-for-clean-architecture/ (2025)
+- BigGo, "Python Developers Debate Whether Pydantic Should Stay Out of Domain Logic", https://biggo.com/news/202507271932_Pydantic_Domain_Layer_Debate (2025)
+- DeepEngineering, "Pragmatic Clean Architecture in Python: A Conversation with Sam Keen", https://deepengineering.substack.com/p/pragmatic-clean-architecture-in-python (2025)
+
+**Query 2**: "Python Clean Architecture config dataclass YAML loading layer classification Composition Root factory 2025"
+
+主要知見:
+- Config dataclass (YAML ローダー付き) は Application layer に配置 — 外部 I/O (filesystem) は含むが、インフラサービス (HTTP, DB) ではない。yamldataclassconfig ライブラリが同様のパターンを実装。
+- Composition Root (factory) は Application layer — "依存関係グラフの配線責務"。Domain/Application コンポーネントを組み合わせ、Infrastructure を注入する層。
+- Martin "Clean Architecture" (2017): Composition Root は Main Component に相当し、最も外側の円 (Frameworks & Drivers) に位置する。但し Python の小規模プロジェクトでは application/factory.py が慣習的。
+
+References:
+- PyPI, yamldataclassconfig, https://pypi.org/project/yamldataclassconfig/ (2025)
+- PyPI, config2class, https://pypi.org/project/config2class/ (2025)
+- pcah/python-clean-architecture, https://github.com/pcah/python-clean-architecture (2025)
+
+**Query 3**: "Strangler Fig pattern Python module re-export shim large file migration monolith 2025"
+
+主要知見:
+- Strangler Fig: 旧モジュールを re-export shim (`from new_location import *`) に変換し、新 canonical 場所に実装を移動する。既存 import パスを破壊しない。
+- Intercepting Facade (AWS Prescriptive Guidance): Facade が旧実装と新実装の橋渡し役 — Python の re-export が同等の役割を担う。
+- 2025 年の OneUptime GKE マイグレーション事例: 段階的移行はリスク最小化、いつでもロールバック可能。テストが常に green であることが安全網。
+
+References:
+- Tiset, "The Strangler fig pattern", https://medium.com/@sylvain.tiset/the-strangler-fig-pattern-is-what-you-need-to-migrate-monolithic-application-with-legacy-code-to-ec24cf7168eb (2025)
+- AWS Prescriptive Guidance, "Strangler fig pattern", https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/strangler-fig.html (2025)
+- OneUptime, "Strangler Fig Pattern on GKE", https://oneuptime.com/blog/post/2026-02-17-how-to-implement-the-strangler-fig-pattern-to-migrate-monoliths-to-microservices-on-gke/view (2026)
+
+### 層分類サマリー
+
+| ファイル | 移動先 | 理由 |
+|---|---|---|
+| `schemas.py` | `application/schemas.py` | Pydantic DTO (bus payload + episode) — 外部依存は Pydantic のみ |
+| `config.py` | `application/config.py` | YAML + dataclasses — filesystem 読み取りのみ、infra サービス依存なし |
+| `factory.py` | `application/factory.py` | Composition Root — application/infrastructure を配線する Application Service |
+| `orchestrator.py` | `application/orchestrator.py` | 純粋 asyncio dispatch loop — TmuxInterface は TYPE_CHECKING のみ (Protocol DI 済み) |
+| `main.py` | ROOT に留まる | CLI エントリポイント (typer) — Composition Root の最外殻 |

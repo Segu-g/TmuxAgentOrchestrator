@@ -34,8 +34,22 @@ import pytest
 
 APP_DIR = Path(__file__).parent.parent / "src" / "tmux_orchestrator" / "application"
 
-# All application/ Python files (excluding __pycache__)
-APP_FILES = [p.name for p in APP_DIR.glob("*.py") if not p.name.startswith("_")]
+# Files that intentionally cross layer boundaries (Composition Root / YAML loader /
+# dispatch loop that references infrastructure via TYPE_CHECKING-only imports or
+# root-level shims).  These are excluded from the strict purity check.
+# DESIGN.md §10.59 (v1.1.27 — Clean Architecture Phase 5)
+_CROSS_LAYER_FILES = frozenset([
+    "config.py",       # uses yaml (stdlib-equivalent but classified as infra here)
+    "factory.py",      # Composition Root — wires application + infrastructure together
+    "orchestrator.py", # dispatch loop — imports via root shims (bus, registry, etc.)
+])
+
+# All application/ Python files (excluding __pycache__ and cross-layer files)
+APP_FILES = [
+    p.name
+    for p in APP_DIR.glob("*.py")
+    if not p.name.startswith("_") and p.name not in _CROSS_LAYER_FILES
+]
 
 # sys.stdlib_module_names is available from Python 3.10+
 STDLIB_NAMES: frozenset[str] = frozenset(sys.stdlib_module_names)

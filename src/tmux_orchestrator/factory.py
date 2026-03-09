@@ -9,6 +9,10 @@ supply a lambda that always returns True; the CLI supplies ``typer.confirm``.
 
 Reference: Fowler "Patterns of Enterprise Application Architecture" (2002) Ch. 14
            (Service Locator / Factory); DESIGN.md §10.5 (2026-03-05).
+
+Note: Implementation lives here (root) for backward-compat with test patches.
+      ``application/factory.py`` re-exports from this module.
+      DESIGN.md §10.59 (v1.1.27 — Strangler Fig: factory implementation kept at root)
 """
 
 from __future__ import annotations
