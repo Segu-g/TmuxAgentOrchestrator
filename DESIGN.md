@@ -2854,4 +2854,29 @@ class AgentStatusMachine(RuleBasedStateMachine):
 2. Use Case 内で `HTTPException` を raise しない — 代わりに `ValueError` / ドメイン例外を raise し、FastAPI ハンドラーで変換する
 3. テストは `MockOrchestratorPort` を注入して Web/非同期コンテキストなしで `execute()` を直接呼び出す
 
+### Step 2 — 実装サマリー
+
+**実装ファイル**:
+- `src/tmux_orchestrator/application/use_cases.py`: `GetAgentUseCase` + `GetAgentDTO` + `GetAgentResult` 追加
+- `src/tmux_orchestrator/application/__init__.py`: 新 Use Case を export に追加
+- `src/tmux_orchestrator/web/routers/tasks.py`: `_do_submit_task()` → `SubmitTaskUseCase` 委譲、`delete_task` → `CancelTaskUseCase` 委譲
+- `tests/test_use_cases.py`: GetAgentUseCase の 13 テスト追加 (計 41 test メソッド)
+- `tests/test_use_case_router_integration.py` (新規): ルーター-UseCase 統合テスト 33 件
+- `tests/fixtures/openapi_schema.json`: DELETE /tasks/{id} 応答形状変更 (CancelTaskResult.to_dict) に追従
+
+**バグ修正**:
+- `task.required_tags` / `task.depends_on` が `None` のケース: `list(x) if x else []` に修正
+  → `test_capability_tags.py::test_post_task_no_required_tags_omitted` が修正で green に
+
+**テスト数**: 2131 → 2170 (+39)
+
+**E2E デモ** (`~/Demonstration/v1.1.14-use-case-interactor/`):
+- agent-spec: math_utils 仕様書を Markdown で作成 → scratchpad `v1114_spec` に保存 (~60s)
+- agent-impl: 仕様書を読み、`math_utils.py` + `test_math_utils.py` を実装 → scratchpad `v1114_implementation` に保存 (~70s)
+- CancelTaskUseCase: 存在しないタスク → 404; キュー内タスク → cancelled=true
+- SubmitTaskResult.to_dict() の全必須フィールド確認 (task_id, prompt, priority, retry_count)
+- デバッグ: (1) Config に `type: claude_code` 追加漏れ → `KeyError: 'type'` 修正 (2) `task.required_tags=None` バグ修正
+
+**31/31 チェック PASSED**
+
 
