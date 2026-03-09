@@ -2423,7 +2423,7 @@
     },
     "/agents/{agent_id}/worktree-status": {
       "get": {
-        "description": "Return the git worktree integrity status for *agent_id*.\n\nChecks performed:\n- Path existence (worktree directory must exist on disk)\n- ``index.lock`` presence (indicates a crashed git process)\n- HEAD resolution (``git rev-parse HEAD`` must succeed)\n- Branch name (expected ``worktree/{agent_id}``)\n- Dirty state (uncommitted changes via ``git status --porcelain``)\n- Object-store integrity (``git fsck --no-dangling``)\n\nFields returned:\n- ``agent_id``: the agent identifier\n- ``path``: absolute path to the worktree, or null for shared agents\n- ``is_valid``: True iff the worktree is structurally sound\n- ``is_dirty``: True iff uncommitted changes are present\n- ``is_locked``: True iff a stale ``index.lock`` is present\n- ``head_sha``: 40-character SHA of HEAD, or null\n- ``branch``: current branch name, or null\n- ``errors``: list of diagnostic messages from fsck / git commands\n- ``checked_at``: ISO 8601 timestamp of when the check ran\n\nReturns 404 if the agent is not registered with the orchestrator.\n\nDesign references:\n- git-fsck(1): https://git-scm.com/docs/git-fsck\n- GitLab \"Repository checks\": https://docs.gitlab.com/ee/administration/repository_checks.html\n- DESIGN.md \u00a710.17 (v0.43.0)",
+        "description": "Return the git worktree integrity status for *agent_id*.\n\nChecks performed:\n- Path existence (worktree directory must exist on disk)\n- ``index.lock`` presence (indicates a crashed git process)\n- HEAD resolution (``git rev-parse HEAD`` must succeed)\n- Branch name (expected ``worktree/{agent_id}``)\n- Dirty state (uncommitted changes via ``git status --porcelain``)\n- Object-store integrity (``git fsck --no-dangling``)\n\nReturns 404 if the agent is not registered with the orchestrator.\n\nDesign references:\n- git-fsck(1): https://git-scm.com/docs/git-fsck\n- GitLab \"Repository checks\": https://docs.gitlab.com/ee/administration/repository_checks.html\n- DESIGN.md \u00a710.17 (v0.43.0)",
         "operationId": "agent_worktree_status_agents__agent_id__worktree_status_get",
         "parameters": [
           {
@@ -3413,7 +3413,7 @@
     },
     "/tasks": {
       "get": {
-        "description": "Return all tasks: currently queued, in-progress, and completed/failed.\n\nCombines the pending queue, currently dispatched (in-progress) tasks,\nand per-agent history into a single flat list.  Use ``skip`` and\n``limit`` query params for pagination.\n\nEach task record contains at minimum:\n- ``task_id``: unique task identifier\n- ``status``: one of ``\"queued\"``, ``\"in_progress\"``, ``\"success\"``, ``\"error\"``\n- ``prompt``: task prompt text\n- ``priority``: dispatch priority (lower = higher priority)\n- ``max_retries``: maximum allowed retries\n- ``retry_count``: current retry attempt count\n\nDesign reference:\n- AWS SQS message visibility / dead-letter queue listing\n- DESIGN.md \u00a710.21 (v0.26.0)",
+        "description": "Return all tasks: currently queued, in-progress, and completed/failed.\n\nCombines the pending queue, currently dispatched (in-progress) tasks,\nand per-agent history into a single flat list.  Use ``skip`` and\n``limit`` query params for pagination.\n\nDesign reference:\n- AWS SQS message visibility / dead-letter queue listing\n- DESIGN.md \u00a710.21 (v0.26.0)",
         "operationId": "list_tasks_tasks_get",
         "parameters": [
           {
@@ -3467,7 +3467,7 @@
         "summary": "List all tasks (active + completed)"
       },
       "post": {
-        "operationId": "submit_task_tasks_post",
+        "operationId": "submit_task_limited_tasks_post",
         "requestBody": {
           "content": {
             "application/json": {
@@ -3484,7 +3484,7 @@
               "application/json": {
                 "schema": {
                   "additionalProperties": true,
-                  "title": "Response Submit Task Tasks Post",
+                  "title": "Response Submit Task Limited Tasks Post",
                   "type": "object"
                 }
               }
@@ -3548,7 +3548,7 @@
     },
     "/tasks/{task_id}": {
       "delete": {
-        "description": "Cancel *task_id* whether it is queued or currently in-progress.\n\n- If the task is **queued**: removes it from the priority queue and\n  publishes STATUS ``task_cancelled``.\n- If the task is **in-progress**: marks it as cancelled (tombstone),\n  sends Ctrl-C to the agent via ``interrupt()``, and publishes STATUS\n  ``task_cancelled``.  The eventual RESULT from the agent is silently\n  discarded.\n- If the task is **already completed/failed/unknown**: returns 404.\n\nReturns:\n``{\"cancelled\": true, \"task_id\": ..., \"was_running\": <bool>}``\n\nDesign references:\n- Kubernetes ``kubectl delete pod`` \u2014 REST DELETE on a resource URI\n- POSIX SIGTERM/SIGKILL model; Go context.Context cancellation\n- DESIGN.md \u00a710.22 (v0.27.0)",
+        "description": "Cancel *task_id* whether it is queued or currently in-progress.\n\nDesign references:\n- Kubernetes ``kubectl delete pod`` \u2014 REST DELETE on a resource URI\n- POSIX SIGTERM/SIGKILL model; Go context.Context cancellation\n- DESIGN.md \u00a710.22 (v0.27.0)",
         "operationId": "delete_task_tasks__task_id__delete",
         "parameters": [
           {
@@ -3588,7 +3588,7 @@
         "summary": "Cancel a task by ID (queued or in-progress)"
       },
       "get": {
-        "description": "Return the status and details of a specific task by its ID.\n\nSearches the pending queue, waiting queue, in-progress tasks, and\nper-agent history.\n\nReturns:\n- ``task_id``: unique task identifier\n- ``prompt``: task prompt text\n- ``priority``: dispatch priority\n- ``status``: one of ``\"queued\"``, ``\"waiting\"``, ``\"in_progress\"``, ``\"success\"``, ``\"error\"``\n- ``depends_on``: list of task IDs this task depends on (if any)\n- ``blocking``: list of task IDs that are waiting on this task (if any)\n- ``max_retries``: maximum allowed retries\n- ``retry_count``: current retry attempt count\n- 404 if the task ID is unknown.\n\nDesign reference: DESIGN.md \u00a710.21 (v0.26.0); DESIGN.md \u00a710.24 (v0.29.0)",
+        "description": "Return the status and details of a specific task by its ID.\n\nDesign reference: DESIGN.md \u00a710.21 (v0.26.0); DESIGN.md \u00a710.24 (v0.29.0)",
         "operationId": "get_task_tasks__task_id__get",
         "parameters": [
           {
@@ -3628,7 +3628,7 @@
         "summary": "Get a specific task by ID"
       },
       "patch": {
-        "description": "Update the priority of a task that is still in the pending queue.\n\nRebuilds the internal heap after the in-place mutation so the new\npriority is respected on the next dispatch cycle.\n\nReturns:\n- ``{\"updated\": true, \"task_id\": ..., \"priority\": N}``\n  if the task was found in the pending queue and its priority was changed.\n- ``{\"updated\": false, \"task_id\": ...}``\n  if the task is not in the pending queue (already dispatched, completed,\n  or never submitted).\n\nDesign reference: Python heapq \"Priority Queue Implementation Notes\"\n(https://docs.python.org/3/library/heapq.html); Liu & Layland (1973)\n\"Scheduling Algorithms for Multiprogramming in a Hard Real-Time\nEnvironment\", JACM 20(1) \u2014 live priority adjustment prevents priority\ninversion and lets operators promote urgent work without re-submitting.",
+        "description": "Update the priority of a task that is still in the pending queue.",
         "operationId": "update_task_priority_tasks__task_id__patch",
         "parameters": [
           {
@@ -3680,7 +3680,7 @@
     },
     "/tasks/{task_id}/cancel": {
       "post": {
-        "description": "Remove *task_id* from the pending queue and discard it.\n\nReturns:\n- ``{\"cancelled\": true, \"task_id\": ..., \"status\": \"cancelled\"}``\n  if the task was successfully removed from the queue.\n- ``{\"cancelled\": false, \"task_id\": ..., \"status\": \"already_dispatched\"}``\n  if the task was not in the pending queue (already dispatched or\n  currently in-flight).\n- ``404`` if the task ID has never been submitted or tracked.\n\nDesign reference: Microsoft Azure \"Asynchronous Request-Reply pattern\"\n(2024): \"A client can send an HTTP DELETE request on the URL provided\nby Location header when the task is submitted.\" We use POST on a verb\nsub-resource (action endpoint) since DELETE on /tasks/{id} could be\nambiguous with resource deletion semantics.\nDESIGN.md \u00a711 (v0.17.0) \u2014 task cancellation.",
+        "description": "Remove *task_id* from the pending queue and discard it.\n\nReturns:\n- ``{\"cancelled\": true, \"task_id\": ..., \"status\": \"cancelled\"}``\n  if the task was successfully removed from the queue.\n- ``{\"cancelled\": false, \"task_id\": ..., \"status\": \"already_dispatched\"}``\n  if the task was not in the pending queue (already dispatched or\n  currently in-flight).\n- ``404`` if the task ID has never been submitted or tracked.\n\nDesign reference: DESIGN.md \u00a711 (v0.17.0) \u2014 task cancellation.",
         "operationId": "cancel_task_tasks__task_id__cancel_post",
         "parameters": [
           {
