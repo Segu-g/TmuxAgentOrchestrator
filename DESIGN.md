@@ -3835,3 +3835,65 @@ References:
 - Tiset, "The Strangler fig pattern", Medium, https://medium.com/@sylvain.tiset/the-strangler-fig-pattern-is-what-you-need-to-migrate-monolithic-application-with-legacy-code-to-ec24cf7168eb (2023)
 - AWS Prescriptive Guidance, "Strangler fig pattern", https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/strangler-fig.html
 
+## §10.56 — v1.1.24: Clean Architecture Migration Phase 2 — `application/bus.py`, `application/registry.py`, `application/workflow_manager.py`
+
+### Step 0 — 選択理由
+
+**選択した機能**: Clean Architecture Migration Phase 2 — application layer への bus, registry, workflow_manager の移動
+
+**理由**:
+- Phase 1 (v1.1.23) で `domain/workflow.py` と `domain/phase_strategy.py` が完成し、次のフェーズが明確に定義された。
+- `bus.py`, `registry.py`, `workflow_manager.py` の3ファイルはいずれも純粋なアプリケーション層の責任を持つ (tmux/HTTP/filesystem に直接依存しない)。
+- `Bus` は純粋な async pub/sub — infrastructure (tmux, HTTP) を直接使わないため application/ が正しい層。
+- `AgentRegistry` は in-memory の agent state 管理 — DDD Aggregate パターン (Evans 2003) に従い application layer の service として整理。
+- `WorkflowManager` は workflow DAG のトラッキング — domain/workflow.py の WorkflowRun を使うため application layer に属する。
+- 既存の 2531 テストを Strangler Fig パターンで全て緑のまま移行可能。
+
+**選択しなかった候補と理由**:
+- `orchestrator.py` の移動: 複雑な依存関係 (tmux, asyncio dispatch loop) があるため Phase 3 に延期。
+- `context_monitor.py` / `episode_store.py` の移動: orchestrator.py との依存関係が強いため Phase 3 以降。
+
+### Step 1 — 調査記録
+
+**Query 1**: "application layer Clean Architecture Python async pub/sub message bus 2024 2025"
+
+主要知見:
+- Message Bus は application layer に属するべき — domain event を application service に橋渡しする役割 (Percival & Gregory "Architecture Patterns with Python", O'Reilly, Ch.8)。
+- In-process async pub/sub は asyncio.Queue ベースで構築できる — 外部依存なし。
+- Event-Driven Architecture: producers → bus → consumers の分離が Clean Architecture の関心分離原則と一致する。
+- aiopubsub など軽量ライブラリは asyncio ベースの pub/sub を application layer で実装する良い参考例。
+
+References:
+- Percival, Gregory, "Architecture Patterns with Python", O'Reilly Ch.8 — Events and the Message Bus, https://www.oreilly.com/library/view/architecture-patterns-with/9781492052197/ch08.html (2020)
+- Hash Block, "How I Built an In-Memory Pub/Sub Engine in Python With Only 80 Lines", Medium, https://medium.com/@connect.hashblock/how-i-built-an-in-memory-pub-sub-engine-in-python-with-only-80-lines-eb42d30f0160 (2024)
+- Quantlane, "Design your app using the pub-sub pattern with aiopubsub", https://quantlane.com/blog/aiopubsub/ (2024)
+- Shaliamekh, "Clean Architecture with Python", Medium, https://medium.com/@shaliamekh/clean-architecture-with-python-d62712fd8d4f (2024)
+
+**Query 2**: "Registry pattern Domain-Driven Design application layer Python in-memory agent state 2024"
+
+主要知見:
+- Registry は DDD においてエンティティの in-memory lookup table として機能する — application layer の service として適切 (Evans "Domain-Driven Design" 2003, Ch.6)。
+- Repository パターンと Registry の違い: Repository は persistence を抽象化するが、Registry は純粋な in-memory lookup を提供する。
+- Application service は domain layer (entities, aggregates) に依存し、infrastructure (DB, filesystem) には Protocol 経由でのみアクセスする。
+- Domain Events と Agent State: domain event で agent state 変更を通知し、application service が応答する設計が推奨される。
+
+References:
+- Evans, "Domain-Driven Design", Addison-Wesley, Ch.6 — Aggregates, https://lyz-code.github.io/blue-book/architecture/domain_driven_design/ (2003)
+- Nayeem Islam, "Everything You Need to Know About Domain-Driven Design with Python Microservices", Medium, https://medium.com/@nomannayeem/everything-you-need-to-know-about-domain-driven-design-with-python-microservices-2c2f6556b5b1 (2024)
+- ThinhDA, "Crafting Maintainable Python Applications with Domain-Driven Design and Clean Architecture", https://thinhdanggroup.github.io/python-code-structure/ (2024)
+- w3computing, "Implementing Domain-Driven Design in Python Projects", https://www.w3computing.com/articles/implementing-domain-driven-design-in-python-projects/ (2024)
+
+**Query 3**: "Python Strangler Fig module re-export shim incremental Clean Architecture migration bus registry 2025"
+
+主要知見:
+- Strangler Fig パターン: 新旧システムを並行稼働させ、routing layer (shim/facade) で切り替える (Fowler 2004)。Python では旧モジュールを re-export shim に変換することで既存 import パスを保持できる。
+- Reduced risk: 変更を段階的に適用し、blast radius を最小化。既存テストが常に green であることがロールバック安全性を保証する。
+- Continuous delivery: 移行中も新機能のデリバリーを継続できる — Strangler Fig の最大の利点。
+- AWS Prescriptive Guidance の Intercepting Facade パターン — routing layer が旧実装と新実装の両方を支える橋渡し役として機能する。
+
+References:
+- Fowler, "Strangler Fig Application", https://martinfowler.com/bliki/StranglerFigApplication.html (2004)
+- Swimm, "Strangler Fig Pattern: Modernizing It Without Losing It", https://swimm.io/learn/legacy-code/strangler-fig-pattern-modernizing-it-without-losing-it (2025)
+- AWS Prescriptive Guidance, "Strangler fig pattern", https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/strangler-fig.html (2025)
+- future-processing, "What is the Strangler Fig Pattern?", https://www.future-processing.com/blog/strangler-fig-pattern/ (2025)
+

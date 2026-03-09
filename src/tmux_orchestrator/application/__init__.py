@@ -9,6 +9,9 @@ Layer rule (Clean Architecture — Martin, 2017):
 
 Public re-exports:
     from tmux_orchestrator.application import (
+        Bus,
+        AgentRegistry,
+        WorkflowManager,
         TaskSubmitter,
         WorkflowStep,
         Workflow,
@@ -37,9 +40,13 @@ Public re-exports:
 References:
     - Martin, Robert C. "Clean Architecture" (2017) Ch. 22 — The Clean Architecture
     - Freeman & Pryce "Growing Object-Oriented Software, Guided by Tests" (2009)
+    - Percival, Gregory "Architecture Patterns with Python" (2020) Ch. 8 — Message Bus
     - DESIGN.md §10.N (v1.0.15 — application/ layer extraction)
+    - DESIGN.md §10.56 (v1.1.24 — Clean Architecture Phase 2)
 """
 
+from tmux_orchestrator.application.bus import Bus
+from tmux_orchestrator.application.circuit_breaker import BreakerState, CircuitBreaker
 from tmux_orchestrator.application.infra_protocols import (
     AutoScalerProtocol,
     CheckpointStoreProtocol,
@@ -70,6 +77,8 @@ from tmux_orchestrator.application.use_cases import (
     SubmitTaskUseCase,
     TaskService,
 )
+from tmux_orchestrator.application.registry import AgentRegistry
+from tmux_orchestrator.application.workflow_manager import WorkflowManager, WorkflowRun, validate_dag
 from tmux_orchestrator.application.workflow_service import (
     TaskSubmitter,
     Workflow,
@@ -78,11 +87,15 @@ from tmux_orchestrator.application.workflow_service import (
 )
 
 __all__ = [
+    "AgentRegistry",
     "AutoScalerProtocol",
+    "BreakerState",
+    "Bus",
     "CancelTaskDTO",
     "CancelTaskResult",
     "CancelTaskUseCase",
     "CheckpointStoreProtocol",
+    "CircuitBreaker",
     "ContextMonitorProtocol",
     "DriftMonitorProtocol",
     "GetAgentDTO",
@@ -103,7 +116,10 @@ __all__ = [
     "TaskService",
     "TaskSubmitter",
     "Workflow",
+    "WorkflowManager",
+    "WorkflowRun",
     "WorkflowStep",
     "_topological_sort",
     "supervised_task",
+    "validate_dag",
 ]

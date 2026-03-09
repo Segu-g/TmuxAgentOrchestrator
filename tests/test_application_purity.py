@@ -284,3 +284,130 @@ def test_null_drift_monitor_is_same_class() -> None:
     from tmux_orchestrator.application.monitor_protocols import NullDriftMonitor as AppNull
 
     assert OrchestratorNull is AppNull
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — bus.py, circuit_breaker.py, registry.py, workflow_manager.py
+# ---------------------------------------------------------------------------
+
+# --- Shim backward-compatibility ---
+
+
+def test_bus_shim_import() -> None:
+    """Bus can still be imported from the old root path."""
+    from tmux_orchestrator.bus import Bus
+
+    bus = Bus()
+    assert hasattr(bus, "publish")
+    assert hasattr(bus, "subscribe")
+
+
+def test_circuit_breaker_shim_import() -> None:
+    """CircuitBreaker and BreakerState can still be imported from root circuit_breaker."""
+    from tmux_orchestrator.circuit_breaker import BreakerState, CircuitBreaker
+
+    cb = CircuitBreaker("agent-x")
+    assert cb.state == BreakerState.CLOSED
+    assert cb.is_allowed() is True
+
+
+def test_registry_shim_import() -> None:
+    """AgentRegistry can still be imported from root registry."""
+    from tmux_orchestrator.registry import AgentRegistry
+
+    reg = AgentRegistry(p2p_permissions=[])
+    assert reg.find_idle_worker() is None
+
+
+def test_workflow_manager_shim_import() -> None:
+    """WorkflowManager and validate_dag can still be imported from root workflow_manager."""
+    from tmux_orchestrator.workflow_manager import WorkflowManager, validate_dag
+
+    wm = WorkflowManager()
+    assert wm.list_all() == []
+    assert callable(validate_dag)
+
+
+# --- Identity (shim → application canonical class) ---
+
+
+def test_bus_is_same_class() -> None:
+    """bus.Bus shim and application.bus.Bus must be the same class."""
+    from tmux_orchestrator.bus import Bus as ShimBus
+    from tmux_orchestrator.application.bus import Bus as AppBus
+
+    assert ShimBus is AppBus
+
+
+def test_circuit_breaker_is_same_class() -> None:
+    from tmux_orchestrator.circuit_breaker import CircuitBreaker as ShimCB
+    from tmux_orchestrator.application.circuit_breaker import CircuitBreaker as AppCB
+
+    assert ShimCB is AppCB
+
+
+def test_breaker_state_is_same_class() -> None:
+    from tmux_orchestrator.circuit_breaker import BreakerState as ShimBS
+    from tmux_orchestrator.application.circuit_breaker import BreakerState as AppBS
+
+    assert ShimBS is AppBS
+
+
+def test_agent_registry_is_same_class() -> None:
+    from tmux_orchestrator.registry import AgentRegistry as ShimReg
+    from tmux_orchestrator.application.registry import AgentRegistry as AppReg
+
+    assert ShimReg is AppReg
+
+
+def test_workflow_manager_is_same_class() -> None:
+    from tmux_orchestrator.workflow_manager import WorkflowManager as ShimWM
+    from tmux_orchestrator.application.workflow_manager import WorkflowManager as AppWM
+
+    assert ShimWM is AppWM
+
+
+def test_validate_dag_is_same_function() -> None:
+    from tmux_orchestrator.workflow_manager import validate_dag as shim_fn
+    from tmux_orchestrator.application.workflow_manager import validate_dag as app_fn
+
+    assert shim_fn is app_fn
+
+
+# --- application/__init__ package re-exports ---
+
+
+def test_application_package_exports_bus() -> None:
+    from tmux_orchestrator.application import Bus
+
+    bus = Bus()
+    assert hasattr(bus, "publish")
+
+
+def test_application_package_exports_circuit_breaker() -> None:
+    from tmux_orchestrator.application import BreakerState, CircuitBreaker
+
+    cb = CircuitBreaker("test-agent")
+    assert cb.state == BreakerState.CLOSED
+
+
+def test_application_package_exports_agent_registry() -> None:
+    from tmux_orchestrator.application import AgentRegistry
+
+    reg = AgentRegistry(p2p_permissions=[])
+    assert reg.list_all() == []
+
+
+def test_application_package_exports_workflow_manager() -> None:
+    from tmux_orchestrator.application import WorkflowManager, validate_dag
+
+    wm = WorkflowManager()
+    assert wm.list_all() == []
+    assert callable(validate_dag)
+
+
+def test_application_package_exports_workflow_run() -> None:
+    from tmux_orchestrator.application import WorkflowRun
+
+    run = WorkflowRun.create("wf", ["t1"])
+    assert run.name == "wf"
