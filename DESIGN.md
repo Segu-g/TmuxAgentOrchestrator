@@ -3194,3 +3194,87 @@ class AgentStatusMachine(RuleBasedStateMachine):
 **デバッグ**: タスク完了後の pane 出力は CLI 完了状態になるため、DriftMonitor がポーリングする時点では両エージェントの role_score が 1.0 に収束する。drift 検出は「タスク実行中」の pane 出力に対して有効であり、完了後は測定困難。単体テストで代替検証。
 
 **21/21 チェック PASSED**
+
+---
+
+## §10.50 — v1.1.18: Director `agent_drift_warning` 購読による自動 re-brief
+
+### Step 0 — 選択
+
+**選択: Director が `agent_drift_warning` bus イベントを購読して BUSY 中のワーカーに自動再ブリーフィングを送信する機能**
+
+#### 選択理由
+
+1. **真の未実装項目**: v1.1.17 でプロジェクトの §11「高」「中」優先度の大部分が完了した。残存する中優先度の未実装候補を精査した結果、Director `agent_drift_warning` 購読が最も価値/実装コスト比が高いと判断した。チェックポイント永続化・ProcessPort・OpenTelemetry は完了済み。P2P 許可テーブルの TLA+ 仕様化はツールチェーン依存が大きく ROI が低い。
+
+2. **既存インフラを活用**: `DriftMonitor` (v1.0.9) が `agent_drift_warning` bus イベントを既に発行している。`Orchestrator.bus` は全 STATUS メッセージを伝搬する。必要な追加は Orchestrator 内で bus 購読コールバックを登録し、ドリフト警告を受け取ったら対象エージェントの pane にシステムメッセージを送信するロジックのみ。
+
+3. **自律性の向上**: v1.0.8 build-log で「Director polling が遅い (11分ループ)」根本原因は能動的な完了通知の欠如と報告された。`agent_drift_warning` 購読による自動介入は同様の問題を予防する。エージェントが役割から逸脱した時点でオーケストレーターが即座に re-brief を注入することで、手動監視なしのドリフト回復が実現する。
+
+4. **デモ設計が明確**: implementer エージェント（Python コード実装）+ 意図的にドリフトさせた reviewer エージェント（無関係な応答）の2エージェント構成。DriftMonitor が drift を検出 → Orchestrator が自動 re-brief を pane に送信 → reviewer が正しい役割に戻る流れを実証できる。
+
+#### 選択しなかった候補と理由
+
+- **P2P 許可テーブルの TLA+ 形式仕様化**: TLC model checker インストールと TLA+ 言語習得が前提。ユーザー向け機能でなく ROI が低い。
+- **DECISION.md 標準フォーマット**: 低優先度。ワークフロー出力規約の統一は有用だが、実装コスト比で今回選ばない。
+- **構造化デバッグ: トレースリプレイ CLI**: チェックポイント永続化は完了済みだが、replay CLI は大規模スコープ。
+- **チェックポイント永続化 `--resume` の Workflow 状態復元拡張**: 単独イテレーションには大きすぎる。
+
+#### 実装スコープ
+
+1. `orchestrator.py`: `start()` 内で `bus.subscribe(broadcast=True)` コールバックを登録し、`event == "agent_drift_warning"` のペイロードを受け取ったとき対象エージェントへ re-brief を送信する `_handle_drift_warning()` メソッドを追加。
+2. `config.py` (OrchestratorConfig): `drift_rebrief_enabled: bool = True` と `drift_rebrief_message: str` フィールドを追加。
+3. REST エンドポイント `GET /agents/{id}/drift-rebriefs` — 各エージェントが受けた re-brief の履歴 (timestamp, drift_score) を返す（オプショナル）。
+4. テスト: `tests/test_drift_rebrief.py` — Orchestrator が drift warning を受信したとき `send_keys` を呼ぶことを検証 (+15 テスト目標)。
+
+### Step 1 — Research
+
+**Query 1**: "multi-agent LLM drift detection automatic re-briefing orchestrator 2025 2026"
+
+主要知見:
+- **Adnan Masood PhD Medium (2026-01)** "Agent Drift: the reliability blind spot in multi-agent LLM systems": セマンティックドリフトはマルチエージェント LLM ワークフローの 600 インタラクションまでに約 50% で発生。緩和戦略として episodic memory consolidation・drift-aware routing protocols・adaptive behavioral anchoring の3つが提案される。自動 re-brief はこの「adaptive behavioral anchoring」の具体的実装に相当する。
+- **arXiv:2601.04170** (Rath et al., 2026-01) "Agent Drift: Quantifying Behavioral Degradation in Multi-Agent LLM Systems": ASI (Agent Stability Index) が 12 次元でドリフトを計量。ASI < 0.85 で役割逸脱の兆候。「drift-aware routing」でドリフト検出時に別エージェントへ再ルーティングまたは re-brief を行うことがアーキテクチャ推奨として明示されている。
+
+**References**:
+- Adnan Masood Medium (2026): https://medium.com/@adnanmasood/agent-drift-the-reliability-blind-spot-in-multi-agent-llm-systems-and-a-blueprint-to-measure-it-7c653d684b80
+- arXiv:2601.04170: https://arxiv.org/abs/2601.04170
+
+**Query 2**: "agent drift warning automatic recovery re-prompt multi-agent system arXiv 2025"
+
+主要知見:
+- **arXiv:2603.03258** "Inherited Goal Drift: Contextual Pressure Can Undermine Agentic Goals" (2026): コンテキスト圧力によるゴール漂流を分析。外部から明示的なゴールリマインダー (goal reminder injection) を注入することがドリフト予防の最効果的手法として位置付けられている。これは本実装の re-brief メッセージ送信と直接対応する。
+- **arXiv:2601.04170** (Rath et al.): drift-aware routing の「behavioral anchoring」実装として、ドリフト検出後にエージェントの元タスク概要を再送信し、role_score が回復するまでモニタリングを継続するパターンが推奨されている。
+
+**References**:
+- arXiv:2603.03258: https://arxiv.org/html/2603.03258
+- arXiv:2601.04170 (Rath et al.): https://arxiv.org/pdf/2601.04170
+
+**Query 3**: "LLM agent role adherence monitoring automatic correction intervention 2025"
+
+主要知見:
+- **ACL 2025 EMNLP Industry** "Towards Enforcing Company Policy Adherence in Agentic Workflows" (arXiv:2507.16459): ToolGuard パターン — policy-to-tool mapping を使ってエージェントのツール呼び出し前にポリシー遵守を検証する。自動介入パイプラインが最小人手で実現できることを実証。
+- **ICLR 2025 Building Trust Workshop** "Monitoring LLM Agents for Adherence to Specified Behaviors": LLM-based monitor が自律エージェントの隠れた逸脱行動を検出。モニターが逸脱を検出した後、外部シグナル（人間または上位エージェント）による修正介入が必須とされる。本実装の Orchestrator 側 re-brief がこの「修正介入」に相当する。
+- **arXiv:2509.22735** "Regulating the Agency of LLM-based Agents": エージェントのエージェンシーを直接介入の対象にするフレームワーク。監視ループ → 逸脱検出 → 修正注入のパターンを提案。
+
+**References**:
+- EMNLP Industry 2025 arXiv:2507.16459: https://arxiv.org/html/2507.16459v2
+- ICLR 2025 Building Trust Workshop: https://openreview.net/pdf?id=LC0XQ6ufbr
+- arXiv:2509.22735: https://arxiv.org/html/2509.22735v1
+
+**Query 4**: "orchestrator pub-sub event driven agent correction drift intervention 2025"
+
+主要知見:
+- **Redis AI Agent Orchestration (2025)** "AI agent orchestration for production systems": イベント駆動アーキテクチャでエージェント通信を同期 request-response から非同期 pub-sub に移行することで、ドリフト検出後の介入遅延を最小化できる。
+- **AWS Strands Agents "Advanced Orchestration Techniques" (2025)**: エージェントに「目標の永続化 (goal persistence)」パターンを適用するアーキテクチャを紹介。上位エージェントが定期的にゴールを確認・再注入することでコンテキスト圧力によるドリフトを抑制。
+
+**References**:
+- Redis AI Agent Orchestration: https://redis.io/blog/ai-agent-orchestration/
+- AWS Strands Agents Advanced Orchestration: https://aws.amazon.com/blogs/machine-learning/customize-agent-workflows-with-advanced-orchestration-techniques-using-strands-agents/
+
+**実装への示唆**:
+1. Orchestrator は bus の broadcast subscriber として `agent_drift_warning` を購読する
+2. ドリフト検出時に `pane.send_keys()` でシステムメッセージ（役割とタスクのリマインダー）を注入する
+3. re-brief の内容は `drift_rebrief_message` config フィールド + 元タスクプロンプトの先頭200文字
+4. 連続 re-brief を防ぐため per-agent クールダウン (デフォルト 60 秒) を設ける
+5. re-brief 履歴は in-memory dict で記録し REST で公開する
+

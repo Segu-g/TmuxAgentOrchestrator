@@ -610,6 +610,26 @@ def build_agents_router(
     
     
     @router.get(
+        "/agents/{agent_id}/drift-rebriefs",
+        summary="Per-agent drift auto re-brief history",
+        dependencies=[Depends(auth)],
+    )
+    async def agent_drift_rebriefs(agent_id: str) -> list[dict]:
+        """Return the list of automatic role re-briefs sent to *agent_id*.
+
+        Each entry contains:
+        - ``timestamp``: ISO-8601 UTC string when the re-brief was sent.
+        - ``drift_score``: composite drift score at the time of re-brief.
+
+        Returns an empty list if no re-briefs have been sent for this agent.
+
+        Design reference: Rath arXiv:2601.04170 "drift-aware routing" re-brief;
+        arXiv:2603.03258 "goal reminder injection";
+        DESIGN.md §10.50 (v1.1.18).
+        """
+        return orchestrator.get_agent_drift_rebriefs(agent_id)
+
+    @router.get(
         "/agents/{agent_id}/history",
         summary="Per-agent task history",
         dependencies=[Depends(auth)],

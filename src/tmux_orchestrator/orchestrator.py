@@ -381,6 +381,14 @@ class Orchestrator:
         # Reference: Wang & Chen "MIRIX" arXiv:2507.07957 (2025);
         # DESIGN.md §10.29 (v1.0.29)
         self._episode_store: "Any | None" = None
+        # Drift auto re-brief state (v1.1.18).
+        # _drift_rebrief_history: agent_id → list of {timestamp, drift_score} dicts
+        # _drift_rebrief_last_sent: agent_id → monotonic time of last re-brief
+        # Reference: Rath arXiv:2601.04170 "drift-aware routing" re-brief pattern;
+        # arXiv:2603.03258 "goal reminder injection" for drift prevention.
+        # DESIGN.md §10.50 (v1.1.18)
+        self._drift_rebrief_history: dict[str, list[dict]] = {}
+        self._drift_rebrief_last_sent: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -686,6 +694,91 @@ class Orchestrator:
     def all_agent_drift_stats(self) -> list[dict]:
         """Return drift stats for all tracked agents."""
         return self._drift_monitor.all_drift_stats()
+
+    def get_agent_drift_rebriefs(self, agent_id: str) -> list[dict]:
+        """Return the re-brief history for *agent_id* (most-recent-first).
+
+        Each entry contains ``timestamp`` (ISO-8601 UTC string) and
+        ``drift_score`` (float) recorded at the time the re-brief was sent.
+
+        Returns an empty list when no re-briefs have been sent for this agent.
+
+        Reference: DESIGN.md §10.50 (v1.1.18 — drift auto re-brief)
+        """
+        return list(reversed(self._drift_rebrief_history.get(agent_id, [])))
+
+    def all_drift_rebrief_stats(self) -> list[dict]:
+        """Return re-brief histories for all agents that have received at least one.
+
+        Returns a list of ``{agent_id, rebrief_count, last_sent, history}`` dicts.
+        """
+        result = []
+        for agent_id, history in self._drift_rebrief_history.items():
+            result.append({
+                "agent_id": agent_id,
+                "rebrief_count": len(history),
+                "last_sent": history[-1]["timestamp"] if history else None,
+                "history": list(reversed(history)),
+            })
+        return result
+
+    async def _handle_drift_warning(self, agent_id: str, drift_score: float) -> None:
+        """Send an automatic role reminder to a drifted agent.
+
+        Called by ``_route_loop`` whenever an ``agent_drift_warning`` STATUS
+        event is received from the DriftMonitor.  Respects the per-agent
+        cooldown configured in ``config.drift_rebrief_cooldown`` to avoid
+        spamming agents that remain drifted.
+
+        The re-brief message is composed of:
+        1. ``config.drift_rebrief_message`` — the role reminder prefix.
+        2. A snippet (first 200 chars) of the agent's current task prompt, if
+           the agent is currently executing a task.
+
+        The message is delivered via ``agent.notify_stdin()`` so it appears
+        directly in the agent's tmux pane — the same channel used for task
+        prompts and P2P notifications.
+
+        Reference:
+            Rath arXiv:2601.04170 — "drift-aware routing" behavioral anchoring.
+            arXiv:2603.03258 — "goal reminder injection" prevents contextual drift.
+            DESIGN.md §10.50 (v1.1.18)
+        """
+        if not self.config.drift_rebrief_enabled:
+            return
+        now = time.monotonic()
+        last_sent = self._drift_rebrief_last_sent.get(agent_id, 0.0)
+        if now - last_sent < self.config.drift_rebrief_cooldown:
+            logger.debug(
+                "Drift re-brief for %s skipped (cooldown %.0f s remaining)",
+                agent_id,
+                self.config.drift_rebrief_cooldown - (now - last_sent),
+            )
+            return
+        agent = self.registry.get(agent_id)
+        if agent is None:
+            return
+        # Build re-brief message
+        rebrief = self.config.drift_rebrief_message
+        if agent._current_task is not None:
+            prompt_snippet = agent._current_task.prompt[:200]
+            rebrief = f"{rebrief}\n\nYour current task:\n{prompt_snippet}"
+        # Send to agent pane
+        try:
+            await agent.notify_stdin(rebrief)
+        except Exception:  # noqa: BLE001
+            logger.exception("Drift re-brief: notify_stdin failed for agent %s", agent_id)
+            return
+        # Record
+        self._drift_rebrief_last_sent[agent_id] = now
+        ts = datetime.now(timezone.utc).isoformat()
+        self._drift_rebrief_history.setdefault(agent_id, []).append({
+            "timestamp": ts,
+            "drift_score": drift_score,
+        })
+        logger.info(
+            "Drift re-brief sent to agent %s (drift_score=%.3f)", agent_id, drift_score
+        )
 
     # ------------------------------------------------------------------
     # Rate limiter
@@ -1964,6 +2057,20 @@ class Orchestrator:
                         }),
                         name=f"wh-agent-status-{msg.from_id[:8]}-{event_name}",
                     )
+                elif event_name == "agent_drift_warning":
+                    # Automatic re-brief: inject a role reminder into the drifted
+                    # agent's pane.  The handler respects the per-agent cooldown
+                    # to avoid spamming agents that remain below the drift threshold.
+                    # Reference: Rath arXiv:2601.04170 — drift-aware routing;
+                    # arXiv:2603.03258 — goal reminder injection.
+                    # DESIGN.md §10.50 (v1.1.18)
+                    drifted_agent_id = msg.payload.get("agent_id", "")
+                    drift_score = msg.payload.get("drift_score", 0.0)
+                    if drifted_agent_id:
+                        asyncio.create_task(
+                            self._handle_drift_warning(drifted_agent_id, drift_score),
+                            name=f"drift-rebrief-{drifted_agent_id[:16]}",
+                        )
             self._bus_queue.task_done()
 
     # ------------------------------------------------------------------

@@ -141,6 +141,22 @@ class OrchestratorConfig:
     drift_threshold: float = 0.6
     drift_idle_threshold: float = 300.0
     drift_monitor_poll: float = 10.0
+    # --- Drift auto re-brief ---
+    # drift_rebrief_enabled: when True, the orchestrator automatically sends a
+    #   role reminder to agents whose drift score drops below drift_threshold.
+    # drift_rebrief_cooldown: minimum seconds between successive re-briefs for
+    #   the same agent (default 60).  Prevents spam when the agent remains drifted.
+    # drift_rebrief_message: prefix injected before the task prompt snippet.
+    #   The final message is: "{drift_rebrief_message}\n\nYour current task:\n{prompt[:200]}"
+    # Reference: Rath arXiv:2601.04170 — "drift-aware routing" re-brief pattern.
+    # Reference: arXiv:2603.03258 — "goal reminder injection" for drift prevention.
+    # DESIGN.md §10.50 (v1.1.18)
+    drift_rebrief_enabled: bool = True
+    drift_rebrief_cooldown: float = 60.0
+    drift_rebrief_message: str = (
+        "⚠ ROLE REMINDER from orchestrator: You appear to be drifting from your "
+        "assigned role. Please refocus on your task."
+    )
     # --- Queue-depth autoscaling ---
     # autoscale_min: minimum number of autoscaled agents (0 = scale to zero).
     # autoscale_max: maximum number of autoscaled agents (0 = disabled).
@@ -379,6 +395,15 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         drift_threshold=data.get("drift_threshold", 0.6),
         drift_idle_threshold=data.get("drift_idle_threshold", 300.0),
         drift_monitor_poll=data.get("drift_monitor_poll", 10.0),
+        drift_rebrief_enabled=data.get("drift_rebrief_enabled", True),
+        drift_rebrief_cooldown=data.get("drift_rebrief_cooldown", 60.0),
+        drift_rebrief_message=data.get(
+            "drift_rebrief_message",
+            (
+                "⚠ ROLE REMINDER from orchestrator: You appear to be drifting from your "
+                "assigned role. Please refocus on your task."
+            ),
+        ),
         autoscale_min=data.get("autoscale_min", 0),
         autoscale_max=data.get("autoscale_max", 0),
         autoscale_threshold=data.get("autoscale_threshold", 3),

@@ -2225,6 +2225,51 @@
         "summary": "Per-agent behavioral drift stats"
       }
     },
+    "/agents/{agent_id}/drift-rebriefs": {
+      "get": {
+        "description": "Return the list of automatic role re-briefs sent to *agent_id*.\n\nEach entry contains:\n- ``timestamp``: ISO-8601 UTC string when the re-brief was sent.\n- ``drift_score``: composite drift score at the time of re-brief.\n\nReturns an empty list if no re-briefs have been sent for this agent.\n\nDesign reference: Rath arXiv:2601.04170 \"drift-aware routing\" re-brief;\narXiv:2603.03258 \"goal reminder injection\";\nDESIGN.md \u00a710.50 (v1.1.18).",
+        "operationId": "agent_drift_rebriefs_agents__agent_id__drift_rebriefs_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response Agent Drift Rebriefs Agents  Agent Id  Drift Rebriefs Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Per-agent drift auto re-brief history"
+      }
+    },
     "/agents/{agent_id}/history": {
       "get": {
         "description": "Return the last *limit* completed task records for *agent_id*.\n\nEach record contains:\n- ``task_id``: unique task identifier\n- ``prompt``: the task prompt text\n- ``started_at``: ISO timestamp when the task was dispatched\n- ``finished_at``: ISO timestamp when the RESULT arrived\n- ``duration_s``: wall-clock seconds from dispatch to RESULT\n- ``status``: ``\"success\"`` or ``\"error\"``\n- ``error``: error message string, or null on success\n\nResults are ordered most-recent-first.  Pass ``?limit=N`` to control\nhow many records are returned (default 50, capped at 200).\n\nDesign reference: TAMAS (IBM, 2025) \"Beyond Black-Box Benchmarking:\nObservability, Analytics, and Optimization of Agentic Systems\"\narXiv:2503.06745 \u2014 per-agent task history enables bottleneck analysis.\nLangfuse \"AI Agent Observability\" (2024): tracing decision paths.",
