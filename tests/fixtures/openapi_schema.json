@@ -550,6 +550,47 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "PairWorkflowSubmit": {
+        "description": "Request body for POST /workflows/pair \u2014 PairCoder (Navigator + Driver) workflow.\n\nSubmits a 2-agent Pair Programming Workflow DAG modelled on the Navigator /\nDriver pattern from Extreme Programming (Beck & Fowler 1999):\n\n  - **navigator**: reads the task description, produces a structured\n    ``PLAN.md`` (architecture, interfaces, acceptance criteria, step-by-step\n    implementation guide) and stores it in the shared scratchpad.\n  - **driver**: reads the navigator's PLAN.md, implements the code, writes\n    tests, runs them, and stores the implementation summary in the scratchpad.\n\nScratchpad keys (Blackboard pattern):\n\n- ``{scratchpad_prefix}_plan``   : navigator's PLAN.md content\n- ``{scratchpad_prefix}_result`` : driver's implementation summary\n\nArtifacts produced by agents:\n\n- ``PLAN.md``           \u2014 navigator's structured plan (in navigator worktree)\n- ``<impl_file>.py``    \u2014 driver's implementation (in driver worktree)\n- ``test_<impl>.py``    \u2014 driver's tests (in driver worktree)\n- ``driver_summary.md`` \u2014 driver's completion summary (in driver worktree)\n\nDesign references:\n- Beck & Fowler \"Extreme Programming Explained\" (1999): Navigator/Driver roles.\n- FlowHunt \"TDD with AI Agents\" (2025): PairCoder improves code quality vs\n  single-agent baseline.\n- Tweag \"Agentic Coding Handbook \u2014 TDD\" (2025): context-separated pair\n  programming approach.\n- DESIGN.md \u00a710.27 (v1.0.27)",
+        "properties": {
+          "driver_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Driver Tags",
+            "type": "array"
+          },
+          "navigator_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Navigator Tags",
+            "type": "array"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "task": {
+            "title": "Task",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task"
+        ],
+        "title": "PairWorkflowSubmit",
+        "type": "object"
+      },
       "PhaseSpecModel": {
         "description": "A single phase in a declarative workflow submission.\n\nAttributes\n----------\nname:\n    Human-readable phase label.\npattern:\n    Execution strategy: ``single`` | ``parallel`` | ``competitive`` | ``debate``.\nagents:\n    Agent selector for the primary role.\ncritic_agents:\n    Agent selector for the critic role (debate only).\njudge_agents:\n    Agent selector for the judge role (debate only).\ndebate_rounds:\n    Number of advocate/critic rounds (debate only, default 1).\ncontext:\n    Optional per-phase context override.\n\nDesign references:\n- arXiv:2512.19769 (PayPal DSL 2025): declarative phase \u2192 task expansion\n- \u00a712\u300c\u30ef\u30fc\u30af\u30d5\u30ed\u30fc\u8a2d\u8a08\u306e\u5c64\u69cb\u9020\u300d\u5c641\u30fb2\u30fb3\n- DESIGN.md \u00a710.15 (v0.48.0)",
         "properties": {
@@ -3589,6 +3630,47 @@
           }
         },
         "summary": "Submit a 5-agent Full Software Development Lifecycle workflow"
+      }
+    },
+    "/workflows/pair": {
+      "post": {
+        "description": "Submit a 2-agent PairCoder Workflow DAG.\n\nPipeline (strictly sequential):\n\n  1. **navigator**: analyses the task, writes a structured ``PLAN.md``\n     (architecture decisions, interfaces, step-by-step guide, acceptance\n     criteria).  Stores the plan in the shared scratchpad.\n  2. **driver**: reads the navigator's plan from the scratchpad,\n     implements the code, writes tests, runs them, and writes\n     ``driver_summary.md`` with a pass/fail report.\n\nReturns:\n- ``workflow_id``: workflow run UUID for status polling\n- ``name``: human-readable name (``pair/<task[:40]>``)\n- ``task_ids``: dict with keys ``navigator``, ``driver``\n- ``scratchpad_prefix``: scratchpad namespace for this run\n\nDesign references:\n- Beck & Fowler \"Extreme Programming Explained\" (1999).\n- FlowHunt \"TDD with AI Agents\" (2025): PairCoder quality gains.\n- DESIGN.md \u00a710.27 (v1.0.27)",
+        "operationId": "submit_pair_workflow_workflows_pair_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Pair Workflow Workflows Pair Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a 2-agent PairCoder (Navigator + Driver) workflow"
       }
     },
     "/workflows/redblue": {

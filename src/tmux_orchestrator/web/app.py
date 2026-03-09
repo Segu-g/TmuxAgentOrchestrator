@@ -749,6 +749,56 @@ class SocraticWorkflowSubmit(BaseModel):
         return v
 
 
+class PairWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/pair — PairCoder (Navigator + Driver) workflow.
+
+    Submits a 2-agent Pair Programming Workflow DAG modelled on the Navigator /
+    Driver pattern from Extreme Programming (Beck & Fowler 1999):
+
+      - **navigator**: reads the task description, produces a structured
+        ``PLAN.md`` (architecture, interfaces, acceptance criteria, step-by-step
+        implementation guide) and stores it in the shared scratchpad.
+      - **driver**: reads the navigator's PLAN.md, implements the code, writes
+        tests, runs them, and stores the implementation summary in the scratchpad.
+
+    Scratchpad keys (Blackboard pattern):
+
+    - ``{scratchpad_prefix}_plan``   : navigator's PLAN.md content
+    - ``{scratchpad_prefix}_result`` : driver's implementation summary
+
+    Artifacts produced by agents:
+
+    - ``PLAN.md``           — navigator's structured plan (in navigator worktree)
+    - ``<impl_file>.py``    — driver's implementation (in driver worktree)
+    - ``test_<impl>.py``    — driver's tests (in driver worktree)
+    - ``driver_summary.md`` — driver's completion summary (in driver worktree)
+
+    Design references:
+    - Beck & Fowler "Extreme Programming Explained" (1999): Navigator/Driver roles.
+    - FlowHunt "TDD with AI Agents" (2025): PairCoder improves code quality vs
+      single-agent baseline.
+    - Tweag "Agentic Coding Handbook — TDD" (2025): context-separated pair
+      programming approach.
+    - DESIGN.md §10.27 (v1.0.27)
+    """
+
+    task: str
+    # Optional per-role required_tags for agent capability routing
+    navigator_tags: list[str] = []
+    driver_tags: list[str] = []
+    # When set, the driver's RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    from pydantic import field_validator
+
+    @field_validator("task")
+    @classmethod
+    def task_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("task must not be empty")
+        return v
+
+
 class FulldevWorkflowSubmit(BaseModel):
     """Request body for POST /workflows/fulldev — Full Software Development Lifecycle.
 
@@ -3474,6 +3524,180 @@ def create_app(
             "questioner": questioner_task.id,
             "responder": responder_task.id,
             "synthesizer": synthesizer_task.id,
+        }
+
+        all_task_ids = list(task_ids_map.values())
+        run = wm.submit(name=wf_name, task_ids=all_task_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids_map,
+            "scratchpad_prefix": scratchpad_prefix,
+        }
+
+    @app.post(
+        "/workflows/pair",
+        summary="Submit a 2-agent PairCoder (Navigator + Driver) workflow",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_pair_workflow(body: PairWorkflowSubmit) -> dict:
+        """Submit a 2-agent PairCoder Workflow DAG.
+
+        Pipeline (strictly sequential):
+
+          1. **navigator**: analyses the task, writes a structured ``PLAN.md``
+             (architecture decisions, interfaces, step-by-step guide, acceptance
+             criteria).  Stores the plan in the shared scratchpad.
+          2. **driver**: reads the navigator's plan from the scratchpad,
+             implements the code, writes tests, runs them, and writes
+             ``driver_summary.md`` with a pass/fail report.
+
+        Returns:
+        - ``workflow_id``: workflow run UUID for status polling
+        - ``name``: human-readable name (``pair/<task[:40]>``)
+        - ``task_ids``: dict with keys ``navigator``, ``driver``
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+
+        Design references:
+        - Beck & Fowler "Extreme Programming Explained" (1999).
+        - FlowHunt "TDD with AI Agents" (2025): PairCoder quality gains.
+        - DESIGN.md §10.27 (v1.0.27)
+        """
+        import uuid as _uuid  # noqa: PLC0415
+
+        wm = orchestrator.get_workflow_manager()
+        # Use first 40 chars of task as name suffix
+        task_slug = body.task[:40].strip().replace("\n", " ")
+        wf_name = f"pair/{task_slug}"
+
+        pre_run_id = str(_uuid.uuid4())
+        scratchpad_prefix = f"pair_{pre_run_id[:8]}"
+
+        # Shared bash snippets for reading context and API key
+        _ctx_snippet = (
+            "WEB_BASE_URL=$(python3 -c \""
+            "import json; d=json.load(open('__orchestrator_context__.json')); "
+            "print(d['web_base_url'])\")\n"
+            "   API_KEY=$(cat __orchestrator_api_key__ 2>/dev/null || "
+            "echo \"$TMUX_ORCHESTRATOR_API_KEY\")"
+        )
+
+        def _scratchpad_key(suffix: str) -> str:
+            return f"{scratchpad_prefix}_{suffix}"
+
+        def _write_snippet(key: str, var: str = "CONTENT") -> str:
+            return (
+                f"   curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     -H 'Content-Type: application/json' \\\n"
+                f"     -d '{{\"value\": \"'${var}'\"}}'  "
+            )
+
+        def _read_snippet(key: str, varname: str) -> str:
+            return (
+                f"   {varname}=$(curl -s -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"value\"])')\n"
+            )
+
+        plan_key = _scratchpad_key("plan")
+        result_key = _scratchpad_key("result")
+
+        # --- Navigator prompt ---
+        navigator_prompt = (
+            f"You are the NAVIGATOR agent in a PairCoder workflow.\n"
+            f"\n"
+            f"**Task:** {body.task}\n"
+            f"\n"
+            f"Your role is to produce a thorough, structured PLAN.md that the Driver\n"
+            f"agent will use to implement the task.  Do NOT write any implementation\n"
+            f"code yourself — your job is to plan, not to code.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Write `PLAN.md` in your working directory with these sections:\n"
+            f"   ```markdown\n"
+            f"   # Plan: <task title>\n"
+            f"   ## Goal\n"
+            f"   ## Architecture & Design Decisions\n"
+            f"   ## Module / File Layout\n"
+            f"   ## Public Interfaces\n"
+            f"   ## Step-by-step Implementation Guide\n"
+            f"   ## Acceptance Criteria\n"
+            f"   ## Edge Cases & Gotchas\n"
+            f"   ```\n"
+            f"2. Store PLAN.md in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            f"   CONTENT=$(cat PLAN.md)\n"
+            + _write_snippet(plan_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Be precise and concrete — the Driver must be able to implement from your\n"
+            f"plan without additional context.  Max 500 words."
+        )
+
+        # --- Driver prompt ---
+        driver_prompt = (
+            f"You are the DRIVER agent in a PairCoder workflow.\n"
+            f"\n"
+            f"**Task:** {body.task}\n"
+            f"\n"
+            f"Your role is to implement the task strictly following the Navigator's\n"
+            f"PLAN.md.  Write the code, tests, run the tests, and report results.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read the Navigator's plan from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(plan_key, "PLAN")
+            + f"   echo \"$PLAN\" > PLAN.md\n"
+            f"   cat PLAN.md\n"
+            f"   ```\n"
+            f"2. Implement the code exactly as described in PLAN.md.\n"
+            f"   - Create the implementation file(s) in your working directory.\n"
+            f"   - Create test file(s) following the acceptance criteria in PLAN.md.\n"
+            f"3. Run the tests and capture the result:\n"
+            f"   ```bash\n"
+            f"   python -m pytest test_*.py -v 2>&1 | tee test_output.txt || true\n"
+            f"   ```\n"
+            f"4. Write `driver_summary.md` with:\n"
+            f"   ```markdown\n"
+            f"   # Driver Summary\n"
+            f"   ## Implementation\n"
+            f"   ## Test Results\n"
+            f"   ## Deviations from Plan\n"
+            f"   ## Status: PASS | FAIL\n"
+            f"   ```\n"
+            f"5. Store the summary in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   CONTENT=$(cat driver_summary.md)\n"
+            + _write_snippet(result_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Follow the plan faithfully.  If a step is unclear, make the simplest\n"
+            f"reasonable interpretation and document it in Deviations from Plan."
+        )
+
+        # Submit tasks in pipeline order
+        navigator_task = await orchestrator.submit_task(
+            navigator_prompt,
+            required_tags=body.navigator_tags or None,
+            depends_on=[],
+        )
+
+        driver_task = await orchestrator.submit_task(
+            driver_prompt,
+            required_tags=body.driver_tags or None,
+            depends_on=[navigator_task.id],
+            reply_to=body.reply_to,
+        )
+
+        task_ids_map = {
+            "navigator": navigator_task.id,
+            "driver": driver_task.id,
         }
 
         all_task_ids = list(task_ids_map.values())
