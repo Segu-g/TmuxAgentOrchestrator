@@ -1,0 +1,42 @@
+# Socratic Dialogue Workflow Template
+# =====================================
+# Socratic method: Questioner probes assumptions → Responder elaborates → Synthesizer concludes.
+#
+# Pipeline:
+#   questioner → responder → synthesizer
+#
+# Scratchpad keys (written by agents):
+#   {scratchpad_prefix}_dialogue   — full Q&A dialogue log
+#   {scratchpad_prefix}_synthesis  — synthesizer's structured conclusion
+#
+# Output file: synthesis.md
+#
+# Endpoint: POST /workflows/socratic
+# Reference: SocraSynth arXiv:2402.06634 (2024); KELE arXiv:2409.05511 EMNLP 2025
+
+workflow:
+  endpoint: /workflows/socratic
+
+# --- Required fields ---
+
+# Topic for the Socratic dialogue
+# (e.g. "Should microservices replace the monolith in this codebase?")
+topic: "Should we decompose this monolith into microservices?"
+
+# --- Optional fields ---
+
+# Agent capability routing (empty = any available agent)
+questioner_tags: []
+responder_tags: []
+synthesizer_tags: []
+
+# If set, the synthesizer's RESULT is delivered to this agent's mailbox
+reply_to: null
+
+# --- Curl example ---
+# curl -s -X POST http://localhost:8000/workflows/socratic \
+#   -H "Content-Type: application/json" \
+#   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+#   -d '{
+#     "topic": "Should we decompose this monolith into microservices?"
+#   }'

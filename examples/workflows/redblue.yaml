@@ -1,0 +1,41 @@
+# Red Team / Blue Team Workflow Template
+# ========================================
+# Adversarial evaluation: Blue Team design → Red Team attack → Arbiter report.
+#
+# Pipeline:
+#   blue_team → red_team → arbiter
+#
+# Scratchpad keys (written by agents):
+#   {scratchpad_prefix}_blue_design  — blue-team's design/proposal
+#   {scratchpad_prefix}_red_findings — red-team's vulnerabilities list
+#   {scratchpad_prefix}_risk_report  — arbiter's risk assessment report
+#
+# Endpoint: POST /workflows/redblue
+# Reference: Farzulla DISSENSUS DAI-2513 (2025); arXiv:2502.14847 ACL 2025
+
+workflow:
+  endpoint: /workflows/redblue
+
+# --- Required fields ---
+
+# Topic to evaluate adversarially
+# (e.g. "authentication system design using JWT tokens")
+topic: "Authentication system design using JWT tokens and refresh token rotation"
+
+# --- Optional fields ---
+
+# Agent capability routing (empty = any available agent)
+blue_tags: []
+red_tags: []
+arbiter_tags: []
+
+# If set, the arbiter's RESULT is delivered to this agent's mailbox
+reply_to: null
+
+# --- Curl example ---
+# curl -s -X POST http://localhost:8000/workflows/redblue \
+#   -H "Content-Type: application/json" \
+#   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+#   -d '{
+#     "topic": "Authentication system design using JWT tokens and refresh token rotation"
+#   }'

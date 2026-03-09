@@ -1,0 +1,48 @@
+# Clean Architecture Workflow Template
+# ======================================
+# 4-layer Clean Architecture decomposition: Domain → UseCases → Adapters → Framework.
+#
+# Pipeline:
+#   domain-designer → usecase-designer → adapter-designer → framework-designer
+#
+# Scratchpad keys (written by agents):
+#   {scratchpad_prefix}_domain    — domain entities, value objects, aggregates
+#   {scratchpad_prefix}_usecases  — use case interactors, DTOs, port interfaces
+#   {scratchpad_prefix}_adapters  — concrete adapters (repositories, presenters)
+#   {scratchpad_prefix}_arch      — final ARCHITECTURE.md + Python skeleton
+#
+# Output file: ARCHITECTURE.md
+#
+# Endpoint: POST /workflows/clean-arch
+# Reference: Martin "Clean Architecture" (2017); AgentMesh arXiv:2507.19902 (2025)
+
+workflow:
+  endpoint: /workflows/clean-arch
+
+# --- Required fields ---
+
+# Feature to decompose into Clean Architecture layers
+feature: "user authentication and session management"
+
+# --- Optional fields ---
+
+# Programming language for the skeleton code
+language: python
+
+# Agent capability routing (empty = any available agent)
+domain_designer_tags: []
+usecase_designer_tags: []
+adapter_designer_tags: []
+framework_designer_tags: []
+
+# If set, the framework-designer's RESULT is delivered to this agent's mailbox
+reply_to: null
+
+# --- Curl example ---
+# curl -s -X POST http://localhost:8000/workflows/clean-arch \
+#   -H "Content-Type: application/json" \
+#   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+#   -d '{
+#     "feature": "user authentication and session management",
+#     "language": "python"
+#   }'

@@ -1,0 +1,38 @@
+# PairCoder Workflow Template
+# ============================
+# 2-agent Navigator + Driver pair-programming pipeline.
+#
+# Pipeline:
+#   navigator → driver
+#
+# Scratchpad keys (written by agents):
+#   {scratchpad_prefix}_plan    — navigator's PLAN.md content
+#   {scratchpad_prefix}_result  — driver's implementation summary
+#
+# Endpoint: POST /workflows/pair
+# Reference: Beck & Fowler "XP Explained" (1999); FlowHunt "TDD with AI Agents" (2025)
+
+workflow:
+  endpoint: /workflows/pair
+
+# --- Required fields ---
+
+# Task description (e.g. "implement a binary search function with full tests")
+task: "implement a binary search function with full unit tests in Python"
+
+# --- Optional fields ---
+
+# Agent capability routing (empty = any available agent)
+navigator_tags: []
+driver_tags: []
+
+# If set, the driver's RESULT is delivered to this agent's mailbox
+reply_to: null
+
+# --- Curl example ---
+# curl -s -X POST http://localhost:8000/workflows/pair \
+#   -H "Content-Type: application/json" \
+#   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+#   -d '{
+#     "task": "implement a binary search function with full unit tests in Python"
+#   }'

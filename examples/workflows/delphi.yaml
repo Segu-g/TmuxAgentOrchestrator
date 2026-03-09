@@ -1,0 +1,52 @@
+# Delphi Workflow Template
+# =========================
+# Multi-round Delphi consensus-building workflow.
+#
+# Pipeline (per round):
+#   expert_{persona} (parallel, 2-5 experts) → moderator
+# Final:
+#   consensus agent → consensus.md
+#
+# Scratchpad keys (written by agents):
+#   {scratchpad_prefix}_r{n}_{expert}   — each expert's opinion in round n
+#   {scratchpad_prefix}_r{n}_moderator  — moderator's synthesis for round n
+#   {scratchpad_prefix}_consensus       — final consensus document
+#
+# Endpoint: POST /workflows/delphi
+# Reference: RT-AID ScienceDirect 2025; Du et al. ICML 2024 arXiv:2305.14325
+
+workflow:
+  endpoint: /workflows/delphi
+
+# --- Required fields ---
+
+# Topic for expert consensus (e.g. "API rate limiting strategy")
+topic: "Best approach for API rate limiting in a multi-tenant SaaS application"
+
+# --- Optional fields ---
+
+# Expert personas (2-5 items)
+experts:
+  - security
+  - performance
+  - maintainability
+
+# Number of rounds of expert debate (1-3)
+max_rounds: 2
+
+# Agent capability routing (empty = any available agent)
+expert_tags: []
+moderator_tags: []
+
+# If set, the consensus RESULT is delivered to this agent's mailbox
+reply_to: null
+
+# --- Curl example ---
+# curl -s -X POST http://localhost:8000/workflows/delphi \
+#   -H "Content-Type: application/json" \
+#   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+#   -d '{
+#     "topic": "Best approach for API rate limiting",
+#     "experts": ["security", "performance", "maintainability"],
+#     "max_rounds": 2
+#   }'

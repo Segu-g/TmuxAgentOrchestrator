@@ -2976,3 +2976,88 @@ class AgentStatusMachine(RuleBasedStateMachine):
 
 **33/33 チェック PASSED**
 
+
+
+---
+
+## §10.48 — v1.1.16: `examples/workflows/` YAML テンプレートライブラリ
+
+### Step 0 — 選定理由
+
+**選択: `examples/workflows/` YAML テンプレートライブラリ**
+
+**候補比較:**
+
+| 候補 | 優先度 | 選択理由 / 見送り理由 |
+|------|--------|----------------------|
+| **`examples/workflows/` YAML テンプレートライブラリ** | **選択** | §11「低〜中」優先度。しかし、高優先度の「チェックポイント永続化 SQLite」「ProcessPort 抽象インターフェース」はどちらも1イテレーションで完結しない大規模スコープ。`/deliberate` および `POST /workflows/clean-arch` は調査の結果すでに実装済み。YAML テンプレートライブラリは (1) コード変更量が少ない (2) 全ワークフロー (TDD / PairCoder / CleanArch / DDD / SpecFirst / Debate / ADR / Delphi / RedBlue / Socratic / Competition) を使いやすい自己完結 YAML として収録することでユーザー価値が高い (3) デモとして 2 エージェントが YAML テンプレートを使って実際に協調するシナリオを容易に設計できる。 |
+| チェックポイント永続化 SQLite | 見送り | SQLite スキーマ設計・`--resume` フラグ・ワークフロー状態再構築と範囲が広すぎる。1イテレーションに収まらない。 |
+| ProcessPort 抽象インターフェース | 見送り | `ClaudeCodeAgent` 全体の依存方向逆転を伴う大規模リファクタリング。リグレッションリスクが高い。 |
+| `/deliberate` スラッシュコマンド | 見送り | `agent_plugin/commands/deliberate.md` + `tests/test_deliberate_command.py` として実装済み (v1.0.32)。 |
+| DriftMonitor セマンティック類似度 | 見送り | `sentence-transformers` の重いモデル依存が入る。デモでの再現性が低い。 |
+| `POST /workflows/clean-arch` | 見送り | `web/routers/workflows.py` に `submit_clean_arch_workflow` として実装済み。`tests/test_workflow_clean_arch.py` が存在する。 |
+| Hypothesis ステートフルテスト | 見送り | 本番コード変更なしで価値は認められるが、デモでの multi-agent 協調を示しにくい。 |
+
+**実装スコープ:**
+1. `examples/workflows/` ディレクトリを新規作成
+2. 各ワークフローエンドポイントに対応する自己完結 YAML テンプレートを収録 (11 ファイル)
+3. `examples/workflows/README.md` — 使い方ガイド
+4. `tests/test_workflow_yaml_templates.py` — 各 YAML のロード・スキーマ検証テスト
+5. `pyproject.toml` version = "1.1.16"
+
+### Step 1 — Research
+
+**Query 1**: "YAML workflow templates multi-agent orchestration best practices 2025 LLM agents"
+
+主要知見:
+- **Haystack Pipeline YAML Serialization (deepset 2025)**: パイプライン全体を YAML にシリアライズ。バージョン管理・チームコラボレーションに直結。YAML が「ドキュメントとしての設定ファイル」として機能する。
+- **Microsoft Agent Framework Declarative Workflows (2025)**: `kind: Workflow` + `trigger` + `actions` 構造による宣言的ワークフロー。YAMLによる定義を CI/CD パイプラインに統合。「Declarative > Imperative」の原則。
+- **ZenML Best Practices (2025)**: 「まずシンプルに始め、段階的に複雑さを追加する」。エージェントのロールを明確に定義し、JSON/YAML で通信を構造化することを推奨。
+
+**References**:
+- LLM Orchestration Best Practices: https://orq.ai/blog/llm-orchestration
+- ZenML Best LLM Orchestration Frameworks: https://www.zenml.io/blog/best-llm-orchestration-frameworks
+- Microsoft Declarative Workflows: https://learn.microsoft.com/en-us/agent-framework/user-guide/workflows/declarative-workflows
+
+**Query 2**: "CrewAI YAML-driven workflow configuration agents tasks 2025"
+
+主要知見:
+- **CrewAI YAML Configuration (2025)**: `agents.yaml` と `tasks.yaml` の2ファイル構成。プロパティ (role / goal / backstory) と動的プレースホルダ (`{topic}`) をサポート。設定をコードから分離してメンテナンス性を向上させる。
+- **CrewAI Orchestration Engine**: `sequential` / `parallel` / `conditional` の3種タスク実行モデル。YAML で宣言的に定義し、Python API で高度な制御を追加できる。
+- **Running a CrewAI Agent from YAML** (rodtrent.substack.com): 「まず YAML で宣言的に定義、必要に応じて Python API にアップグレード」というアプローチ。
+
+**References**:
+- CrewAI Tasks: https://docs.crewai.com/en/concepts/tasks
+- Configuring CrewAI with YAML: https://codesignal.com/learn/courses/getting-started-with-crewai-agents-and-tasks/lessons/configuring-crewai-agents-and-tasks-with-yaml-files
+- Running CrewAI from YAML: https://rodtrent.substack.com/p/running-a-crewai-agent-from-a-yaml
+
+**Query 3**: "workflow template library YAML schema validation Python pydantic pytest 2025"
+
+主要知見:
+- **pydantic-yaml (PyPI)**: Pydantic モデルに YAML 機能を追加するライブラリ。`model_validate_yaml()` でファイルを読み込みバリデーションを実行。
+- **yaml2pydantic (PyPI, 2025)**: YAML/JSON 定義から動的 Pydantic v2 モデルを生成。宣言的な YAML とコードの Pydantic の両方の利点を活用。
+- **Pydantic as Schema for YAML Files**: YAML 設定を読み込み `model_validate()` でバリデーション。`ValidationError` をキャッチしてユーザーフレンドリーなエラーメッセージを提供するパターン。
+
+**References**:
+- pydantic-yaml PyPI: https://pypi.org/project/pydantic-yaml/
+- yaml2pydantic PyPI: https://pypi.org/project/yaml2pydantic/
+- Pydantic YAML validation guide: https://betterprogramming.pub/validating-yaml-configs-made-easy-with-pydantic-594522612db5
+
+**Query 4**: "multi-agent workflow configuration as code YAML declarative TDFlow TDD debate 2025"
+
+主要知見:
+- **TDFlow arXiv:2510.23761 (2025)**: Test-Driven Agentic Workflow。複数の LLM サブエージェントが context-engineered environment で動作し、88.8% SWE-Bench Lite スコアを達成。
+- **Microsoft Foundry Multi-Agent Workflows (2025)**: YAML による宣言的定義 + ビジュアル設計の両方をサポート。バージョン管理・CI/CD との統合が主目的。
+- **Declarative > Imperative 原則**: YAML で役割・ツール・トポロジーのワイアリングを宣言的に保つことで、レビュー・テスト・デプロイが容易になる。
+
+**References**:
+- TDFlow arXiv:2510.23761: https://arxiv.org/html/2510.23761v1
+- Microsoft Foundry Multi-Agent Workflows: https://devblogs.microsoft.com/foundry/introducing-multi-agent-workflows-in-foundry-agent-service/
+- Microsoft Declarative Agents: https://learn.microsoft.com/en-us/agent-framework/agents/declarative
+
+**実装への示唆**:
+1. 各ワークフローの YAML テンプレートは `required_fields` と `optional_fields` をコメントで明示し、`curl` コマンド例を含める
+2. 既存の Pydantic スキーマ (`TddWorkflowSubmit` 等) を使って YAML をバリデーションするテストを書く
+3. YAML テンプレートは「設定をコードから分離する」原則に従い、フィールドに詳細なコメントを付ける
+4. README.md は各ワークフローの agents/pipeline 構造・scratchpad キー・出力ファイルを一覧化する
+

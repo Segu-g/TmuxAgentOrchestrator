@@ -1,0 +1,54 @@
+# Spec-First Workflow Template
+# ==============================
+# Formal specification before implementation: Spec-Writer → Implementer.
+#
+# Pipeline:
+#   spec-writer → implementer
+#
+# Scratchpad keys (written by agents):
+#   {scratchpad_prefix}_spec  — SPEC.md content (spec-writer)
+#   {scratchpad_prefix}_impl  — implementation completion summary
+#
+# Output files:
+#   SPEC.md           — formal specification with preconditions/postconditions
+#   <feature>.py      — implementation satisfying all acceptance criteria
+#   test_<feature>.py — tests verifying acceptance criteria
+#
+# Endpoint: POST /workflows/spec-first
+# Reference: Vasilopoulos arXiv:2602.20478 (2026); Hou et al. "Formal Methods" (2025)
+
+workflow:
+  endpoint: /workflows/spec-first
+
+# --- Required fields ---
+
+# Short topic/module name (used in file naming)
+topic: "password_validator"
+
+# Detailed requirements in natural language
+requirements: |
+  A password validator module with the following rules:
+  - Minimum 8 characters
+  - At least one uppercase letter
+  - At least one lowercase letter
+  - At least one digit
+  - At least one special character from: !@#$%^&*
+  - Returns a list of violated rule messages (empty list = valid)
+
+# --- Optional fields ---
+
+# Agent capability routing (empty = any available agent)
+spec_tags: []
+impl_tags: []
+
+# If set, the implementer's RESULT is delivered to this agent's mailbox
+reply_to: null
+
+# --- Curl example ---
+# curl -s -X POST http://localhost:8000/workflows/spec-first \
+#   -H "Content-Type: application/json" \
+#   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+#   -d '{
+#     "topic": "password_validator",
+#     "requirements": "A password validator that enforces minimum 8 chars, uppercase, digit, and special char."
+#   }'

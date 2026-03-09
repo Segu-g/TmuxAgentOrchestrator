@@ -1,0 +1,43 @@
+# ADR Workflow Template
+# ======================
+# Architecture Decision Record auto-generation: Proposer → Reviewer → Synthesizer.
+#
+# Pipeline:
+#   proposer → reviewer → synthesizer
+#
+# Scratchpad keys (written by agents):
+#   {scratchpad_prefix}_proposal  — proposer's analysis of options
+#   {scratchpad_prefix}_review    — reviewer's technical critique
+#   {scratchpad_prefix}_decision  — synthesizer's final MADR DECISION.md
+#
+# Output file: DECISION.md (MADR 4.0.0 format)
+#
+# Endpoint: POST /workflows/adr
+# Reference: MADR 4.0.0 (2024); AgenticAKM arXiv:2602.04445 (2026)
+
+workflow:
+  endpoint: /workflows/adr
+
+# --- Required fields ---
+
+# Topic for the Architecture Decision Record
+# (e.g. "Choice of database: SQLite vs PostgreSQL vs DynamoDB")
+topic: "Choice of database for task persistence: SQLite vs PostgreSQL"
+
+# --- Optional fields ---
+
+# Agent capability routing (empty = any available agent)
+proposer_tags: []
+reviewer_tags: []
+synthesizer_tags: []
+
+# If set, the synthesizer's RESULT is delivered to this agent's mailbox
+reply_to: null
+
+# --- Curl example ---
+# curl -s -X POST http://localhost:8000/workflows/adr \
+#   -H "Content-Type: application/json" \
+#   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+#   -d '{
+#     "topic": "Choice of database for task persistence: SQLite vs PostgreSQL"
+#   }'

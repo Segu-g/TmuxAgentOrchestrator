@@ -1,0 +1,57 @@
+# Competition (Best-of-N) Workflow Template
+# ==========================================
+# N solvers compete in parallel, then a judge selects the winner.
+#
+# Pipeline:
+#   solver_{strategy} (parallel, all strategies simultaneously) → judge
+#
+# Scratchpad keys (written by agents):
+#   {prefix}_solver_{strategy}  — each solver's solution + SCORE: <number> line
+#   {prefix}_judge              — judge's COMPETITION_RESULT.md
+#
+# Output files:
+#   solver_{strategy}_result.md  — per-solver solution with SCORE line
+#   COMPETITION_RESULT.md        — judge's winner declaration with score table
+#
+# Endpoint: POST /workflows/competition
+# Reference: FusioN arXiv:2510.00931 (2025); M-A-P arXiv:2506.12928 (2025)
+
+workflow:
+  endpoint: /workflows/competition
+
+# --- Required fields ---
+
+# Problem statement for all solvers
+problem: |
+  Write a Python function that finds all prime numbers up to N using the
+  Sieve of Eratosthenes. The function signature should be:
+    def sieve_of_eratosthenes(n: int) -> list[int]
+  Include docstring, type hints, and edge case handling (n < 2 returns []).
+  End your response with: SCORE: <number between 0 and 100>
+
+# Strategies (2-10), each solver receives its strategy as a hint
+strategies:
+  - iterative
+  - numpy_vectorised
+  - bitarray_optimised
+
+# --- Optional fields ---
+
+# Criterion the judge uses to evaluate solutions
+scoring_criterion: "correctness, performance, and code clarity"
+
+# Agent capability routing (empty = any available agent)
+solver_tags: []
+judge_tags: []
+
+# If set, the judge's RESULT is delivered to this agent's mailbox
+reply_to: null
+
+# --- Curl example ---
+# curl -s -X POST http://localhost:8000/workflows/competition \
+#   -H "Content-Type: application/json" \
+#   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+#   -d '{
+#     "problem": "Write a Python sieve_of_eratosthenes(n) function. End with SCORE: <0-100>",
+#     "strategies": ["iterative", "numpy_vectorised", "bitarray_optimised"]
+#   }'

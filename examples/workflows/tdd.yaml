@@ -1,0 +1,43 @@
+# TDD Workflow Template
+# =====================
+# 3-agent Red→Green→Refactor pipeline.
+#
+# Pipeline:
+#   test-writer → implementer → refactorer
+#
+# Scratchpad keys (written by agents):
+#   {scratchpad_prefix}/tests_path  — path to the test file
+#   {scratchpad_prefix}/impl_path   — path to the implementation file
+#
+# Endpoint: POST /workflows/tdd
+# Reference: TDFlow arXiv:2510.23761 (2025); alexop.dev "Forcing Claude Code to TDD" (2025)
+
+workflow:
+  endpoint: /workflows/tdd
+
+# --- Required fields ---
+
+# Feature description (e.g. "a stack data structure with push/pop/peek")
+feature: "a stack data structure with push, pop, and peek operations"
+
+# --- Optional fields ---
+
+# Programming language for the implementation
+language: python
+
+# Agent capability routing (empty = any available agent)
+test_writer_tags: []
+implementer_tags: []
+refactorer_tags: []
+
+# If set, the refactorer's RESULT is delivered to this agent's mailbox
+reply_to: null
+
+# --- Curl example ---
+# curl -s -X POST http://localhost:8000/workflows/tdd \
+#   -H "Content-Type: application/json" \
+#   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+#   -d '{
+#     "feature": "a stack data structure with push, pop, and peek operations",
+#     "language": "python"
+#   }'

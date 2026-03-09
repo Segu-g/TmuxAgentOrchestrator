@@ -1,0 +1,58 @@
+# DDD Bounded Context Workflow Template
+# ========================================
+# DDD EventStorming decomposition: Context-Mapper → Domain-Experts (parallel) → Integration-Designer.
+#
+# Pipeline:
+#   context-mapper → domain-expert-{context} (parallel, one per context) → integration-designer
+#
+# Scratchpad keys (written by agents):
+#   {scratchpad_prefix}_contexts           — list of bounded context names
+#   {scratchpad_prefix}_domain_{context}   — domain model for each context
+#   {scratchpad_prefix}_integration        — context map with integration patterns
+#
+# Output files:
+#   EVENTSTORMING.md     — event storming analysis
+#   BOUNDED_CONTEXTS.md  — bounded context definitions with ubiquitous language
+#   DOMAIN_{CONTEXT}.md  — per-context domain model
+#   CONTEXT_MAP.md       — context map with ACL / Shared Kernel / Customer-Supplier patterns
+#
+# Endpoint: POST /workflows/ddd
+# Reference: Evans "DDD" (2003); IJCSE V12I3P102 (2025); Russ Miles "DICE Framework" (2025)
+
+workflow:
+  endpoint: /workflows/ddd
+
+# --- Required fields ---
+
+# Topic to decompose using DDD
+topic: "e-commerce order management platform"
+
+# --- Optional fields ---
+
+# Explicit Bounded Context names (leave empty for context-mapper to discover autonomously)
+contexts: []
+# contexts:
+#   - Orders
+#   - Inventory
+#   - Shipping
+#   - Payments
+
+# Programming language for domain model sketches
+language: python
+
+# Agent capability routing (empty = any available agent)
+context_mapper_tags: []
+domain_expert_tags: []
+integration_designer_tags: []
+
+# If set, the integration-designer's RESULT is delivered to this agent's mailbox
+reply_to: null
+
+# --- Curl example ---
+# curl -s -X POST http://localhost:8000/workflows/ddd \
+#   -H "Content-Type: application/json" \
+#   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+#   -d '{
+#     "topic": "e-commerce order management platform",
+#     "contexts": ["Orders", "Inventory", "Shipping"]
+#   }'
