@@ -19,7 +19,7 @@ import pytest
 # ------------------------------------------------------------------
 
 DOMAIN_DIR = Path(__file__).parent.parent / "src" / "tmux_orchestrator" / "domain"
-DOMAIN_FILES = ["agent.py", "task.py", "message.py"]
+DOMAIN_FILES = ["agent.py", "task.py", "message.py", "workflow.py", "phase_strategy.py"]
 
 # sys.stdlib_module_names is available from Python 3.10+
 STDLIB_NAMES: frozenset[str] = frozenset(sys.stdlib_module_names)
@@ -209,3 +209,296 @@ def test_message_is_same_class() -> None:
     from tmux_orchestrator.domain.message import Message as DomainMsg
 
     assert ShimMsg is DomainMsg
+
+
+# ------------------------------------------------------------------
+# domain/workflow.py — WorkflowRun, WorkflowPhase, WorkflowStatus
+# ------------------------------------------------------------------
+
+
+def test_workflow_status_values() -> None:
+    """WorkflowStatus has the expected string values."""
+    from tmux_orchestrator.domain.workflow import WorkflowStatus
+
+    assert WorkflowStatus.PENDING == "pending"
+    assert WorkflowStatus.RUNNING == "running"
+    assert WorkflowStatus.COMPLETE == "complete"
+    assert WorkflowStatus.FAILED == "failed"
+    assert WorkflowStatus.CANCELLED == "cancelled"
+
+
+def test_workflow_run_create_factory() -> None:
+    """WorkflowRun.create() assigns a UUID and correct defaults."""
+    from tmux_orchestrator.domain.workflow import WorkflowRun
+
+    run = WorkflowRun.create("my-wf", ["t1", "t2"])
+    assert run.name == "my-wf"
+    assert run.task_ids == ["t1", "t2"]
+    assert run.status == "pending"
+    assert len(run.id) == 36  # UUID format
+    assert run.completed_at is None
+    assert run.phases == []
+
+
+def test_workflow_run_to_dict() -> None:
+    """WorkflowRun.to_dict() contains expected keys."""
+    from tmux_orchestrator.domain.workflow import WorkflowRun
+
+    run = WorkflowRun.create("wf", ["a", "b", "c"])
+    d = run.to_dict()
+    assert d["name"] == "wf"
+    assert d["task_ids"] == ["a", "b", "c"]
+    assert d["status"] == "pending"
+    assert d["tasks_total"] == 3
+    assert d["tasks_done"] == 0
+    assert d["tasks_failed"] == 0
+    assert "phases" not in d  # empty phases not included
+
+
+def test_workflow_phase_lifecycle() -> None:
+    """WorkflowPhase transitions correctly."""
+    from tmux_orchestrator.domain.workflow import WorkflowPhase
+
+    phase = WorkflowPhase(name="analysis", pattern="single", task_ids=["t1"])
+    assert phase.status == "pending"
+
+    phase.mark_running()
+    assert phase.status == "running"
+    assert phase.started_at is not None
+
+    phase.mark_complete()
+    assert phase.status == "complete"
+    assert phase.completed_at is not None
+
+
+def test_workflow_phase_failed() -> None:
+    """WorkflowPhase.mark_failed() transitions to failed."""
+    from tmux_orchestrator.domain.workflow import WorkflowPhase
+
+    phase = WorkflowPhase(name="build", pattern="parallel", task_ids=["t1", "t2"])
+    phase.mark_failed()
+    assert phase.status == "failed"
+    assert phase.completed_at is not None
+
+
+def test_workflow_phase_to_dict() -> None:
+    """WorkflowPhase.to_dict() is JSON-serialisable."""
+    from tmux_orchestrator.domain.workflow import WorkflowPhase
+
+    phase = WorkflowPhase(name="test", pattern="competitive", task_ids=["x", "y"])
+    d = phase.to_dict()
+    assert d["name"] == "test"
+    assert d["pattern"] == "competitive"
+    assert d["task_ids"] == ["x", "y"]
+    assert d["status"] == "pending"
+
+
+def test_workflow_run_shim_same_class() -> None:
+    """workflow_manager.WorkflowRun is the same class as domain.workflow.WorkflowRun."""
+    from tmux_orchestrator.domain.workflow import WorkflowRun as DomainRun
+    from tmux_orchestrator.workflow_manager import WorkflowRun as ShimRun
+
+    assert ShimRun is DomainRun
+
+
+def test_domain_package_exports_workflow_run() -> None:
+    """domain package exports WorkflowRun."""
+    from tmux_orchestrator.domain import WorkflowRun
+
+    run = WorkflowRun.create("wf", ["t1"])
+    assert run.name == "wf"
+
+
+def test_domain_package_exports_workflow_status() -> None:
+    """domain package exports WorkflowStatus."""
+    from tmux_orchestrator.domain import WorkflowStatus
+
+    assert WorkflowStatus.COMPLETE == "complete"
+
+
+def test_domain_package_exports_workflow_phase() -> None:
+    """domain package exports WorkflowPhase."""
+    from tmux_orchestrator.domain import WorkflowPhase
+
+    phase = WorkflowPhase(name="p1", pattern="single", task_ids=[])
+    assert phase.name == "p1"
+
+
+# ------------------------------------------------------------------
+# domain/phase_strategy.py — Strategy pattern, PhaseSpec, AgentSelector
+# ------------------------------------------------------------------
+
+
+def test_agent_selector_defaults() -> None:
+    """AgentSelector has correct defaults."""
+    from tmux_orchestrator.domain.phase_strategy import AgentSelector
+
+    sel = AgentSelector()
+    assert sel.tags == []
+    assert sel.count == 1
+    assert sel.target_agent is None
+    assert sel.target_group is None
+
+
+def test_phase_spec_valid_patterns() -> None:
+    """PhaseSpec accepts all valid patterns."""
+    from tmux_orchestrator.domain.phase_strategy import PhaseSpec
+
+    for pattern in ("single", "parallel", "competitive", "debate"):
+        spec = PhaseSpec(name="p", pattern=pattern)  # type: ignore[arg-type]
+        assert spec.pattern == pattern
+
+
+def test_phase_spec_invalid_pattern() -> None:
+    """PhaseSpec raises ValueError for invalid pattern."""
+    import pytest
+
+    from tmux_orchestrator.domain.phase_strategy import PhaseSpec
+
+    with pytest.raises(ValueError, match="Invalid pattern"):
+        PhaseSpec(name="p", pattern="auction")  # type: ignore[arg-type]
+
+
+def test_single_strategy_produces_one_task() -> None:
+    """SingleStrategy expands to exactly one task."""
+    from tmux_orchestrator.domain.phase_strategy import PhaseSpec, SingleStrategy
+
+    strategy = SingleStrategy()
+    phase = PhaseSpec(name="analyse", pattern="single")
+    tasks, statuses = strategy.expand(phase, [], "Do analysis", "wf/run1")
+    assert len(tasks) == 1
+    assert len(statuses) == 1
+    assert tasks[0]["local_id"] == "phase_analyse_0"
+    assert tasks[0]["depends_on"] == []
+
+
+def test_parallel_strategy_count() -> None:
+    """ParallelStrategy produces N tasks."""
+    from tmux_orchestrator.domain.phase_strategy import AgentSelector, ParallelStrategy, PhaseSpec
+
+    strategy = ParallelStrategy()
+    phase = PhaseSpec(name="solve", pattern="parallel", agents=AgentSelector(count=3))
+    tasks, statuses = strategy.expand(phase, ["prior_task"], "Solve it", "")
+    assert len(tasks) == 3
+    for t in tasks:
+        assert t["depends_on"] == ["prior_task"]
+
+
+def test_competitive_strategy_count() -> None:
+    """CompetitiveStrategy produces N tasks like parallel."""
+    from tmux_orchestrator.domain.phase_strategy import AgentSelector, CompetitiveStrategy, PhaseSpec
+
+    strategy = CompetitiveStrategy()
+    phase = PhaseSpec(name="compete", pattern="competitive", agents=AgentSelector(count=4))
+    tasks, statuses = strategy.expand(phase, [], "Compete", "")
+    assert len(tasks) == 4
+    assert statuses[0].pattern == "competitive"
+
+
+def test_debate_strategy_structure() -> None:
+    """DebateStrategy produces advocate + critic + judge tasks."""
+    from tmux_orchestrator.domain.phase_strategy import DebateStrategy, PhaseSpec
+
+    strategy = DebateStrategy()
+    phase = PhaseSpec(name="debate", pattern="debate", debate_rounds=2)
+    tasks, statuses = strategy.expand(phase, [], "Debate topic", "")
+    # 2 rounds × (advocate + critic) + judge = 5 tasks
+    assert len(tasks) == 5
+    ids = [t["local_id"] for t in tasks]
+    assert "phase_debate_advocate_r1" in ids
+    assert "phase_debate_critic_r1" in ids
+    assert "phase_debate_advocate_r2" in ids
+    assert "phase_debate_critic_r2" in ids
+    assert "phase_debate_judge" in ids
+
+
+def test_get_strategy_valid() -> None:
+    """get_strategy returns the correct strategy instance."""
+    from tmux_orchestrator.domain.phase_strategy import (
+        CompetitiveStrategy,
+        DebateStrategy,
+        ParallelStrategy,
+        SingleStrategy,
+        get_strategy,
+    )
+
+    assert isinstance(get_strategy("single"), SingleStrategy)
+    assert isinstance(get_strategy("parallel"), ParallelStrategy)
+    assert isinstance(get_strategy("competitive"), CompetitiveStrategy)
+    assert isinstance(get_strategy("debate"), DebateStrategy)
+
+
+def test_get_strategy_invalid() -> None:
+    """get_strategy raises ValueError for unknown patterns."""
+    import pytest
+
+    from tmux_orchestrator.domain.phase_strategy import get_strategy
+
+    with pytest.raises(ValueError, match="Unknown phase pattern"):
+        get_strategy("tournament")
+
+
+def test_phase_strategy_protocol_satisfied() -> None:
+    """Concrete strategies satisfy the PhaseStrategy Protocol."""
+    from tmux_orchestrator.domain.phase_strategy import (
+        CompetitiveStrategy,
+        DebateStrategy,
+        ParallelStrategy,
+        PhaseStrategy,
+        SingleStrategy,
+    )
+
+    for cls in (SingleStrategy, ParallelStrategy, CompetitiveStrategy, DebateStrategy):
+        assert isinstance(cls(), PhaseStrategy)
+
+
+def test_phase_executor_shim_re_exports() -> None:
+    """phase_executor shim re-exports all canonical types from domain."""
+    from tmux_orchestrator.domain.phase_strategy import AgentSelector as DomainAgentSelector
+    from tmux_orchestrator.domain.phase_strategy import PhaseSpec as DomainPhaseSpec
+    from tmux_orchestrator.domain.phase_strategy import WorkflowPhaseStatus as DomainWPS
+    from tmux_orchestrator.phase_executor import AgentSelector as ShimAgentSelector
+    from tmux_orchestrator.phase_executor import PhaseSpec as ShimPhaseSpec
+    from tmux_orchestrator.phase_executor import WorkflowPhaseStatus as ShimWPS
+
+    assert ShimAgentSelector is DomainAgentSelector
+    assert ShimPhaseSpec is DomainPhaseSpec
+    assert ShimWPS is DomainWPS
+
+
+def test_phase_executor_expand_phases_works() -> None:
+    """phase_executor.expand_phases still works via shim."""
+    from tmux_orchestrator.phase_executor import PhaseSpec, expand_phases
+
+    phases = [
+        PhaseSpec(name="step1", pattern="single"),
+        PhaseSpec(name="step2", pattern="single"),
+    ]
+    tasks = expand_phases(phases, context="Do the work")
+    assert len(tasks) == 2
+    assert tasks[1]["depends_on"] == ["phase_step1_0"]
+
+
+def test_domain_package_exports_phase_strategy_types() -> None:
+    """domain package exports PhaseStrategy, PhaseSpec, AgentSelector, strategies."""
+    from tmux_orchestrator.domain import (
+        AgentSelector,
+        CompetitiveStrategy,
+        DebateStrategy,
+        ParallelStrategy,
+        PhaseSpec,
+        PhaseStrategy,
+        SingleStrategy,
+        WorkflowPhaseStatus,
+        get_strategy,
+    )
+
+    assert AgentSelector is not None
+    assert PhaseSpec is not None
+    assert PhaseStrategy is not None
+    assert SingleStrategy is not None
+    assert ParallelStrategy is not None
+    assert CompetitiveStrategy is not None
+    assert DebateStrategy is not None
+    assert WorkflowPhaseStatus is not None
+    assert callable(get_strategy)

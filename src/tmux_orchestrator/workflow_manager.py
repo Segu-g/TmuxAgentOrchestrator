@@ -27,66 +27,16 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from tmux_orchestrator.bus import Bus
-    from tmux_orchestrator.phase_executor import WorkflowPhaseStatus
 
-
-@dataclass
-class WorkflowRun:
-    """An in-memory record of a submitted workflow DAG.
-
-    Attributes
-    ----------
-    id:
-        Unique workflow run UUID.
-    name:
-        Human-readable name provided by the submitter.
-    task_ids:
-        Ordered list of global orchestrator task IDs belonging to this run.
-    status:
-        ``"pending"`` → not yet started; ``"running"`` → at least one task
-        dispatched; ``"complete"`` → all tasks succeeded; ``"failed"`` → at
-        least one task errored.
-    created_at:
-        Unix timestamp when the workflow was submitted.
-    completed_at:
-        Unix timestamp when all tasks finished (success or error), or ``None``
-        while still in progress.
-    """
-
-    id: str
-    name: str
-    task_ids: list[str]
-    status: str = "pending"  # pending | running | complete | failed | cancelled
-    created_at: float = field(default_factory=time.time)
-    completed_at: float | None = None
-    _completed: set[str] = field(default_factory=set, repr=False)
-    _failed: set[str] = field(default_factory=set, repr=False)
-    # Phase-level status trackers (set by REST handler when phases= mode is used).
-    # None when submitted via legacy tasks= mode.
-    # Type: list[WorkflowPhaseStatus] — imported lazily to avoid circular dependency.
-    phases: list[Any] = field(default_factory=list, repr=False)
-
-    def to_dict(self) -> dict:
-        """Return a JSON-serialisable snapshot of this run."""
-        d: dict = {
-            "id": self.id,
-            "name": self.name,
-            "task_ids": self.task_ids,
-            "status": self.status,
-            "created_at": self.created_at,
-            "completed_at": self.completed_at,
-            "tasks_total": len(self.task_ids),
-            "tasks_done": len(self._completed) + len(self._failed),
-            "tasks_failed": len(self._failed),
-        }
-        if self.phases:
-            d["phases"] = [p.to_dict() for p in self.phases]
-        return d
+# ---------------------------------------------------------------------------
+# Strangler Fig: WorkflowRun is now canonical in domain/workflow.py.
+# Re-export it here so existing imports continue to work.
+# ---------------------------------------------------------------------------
+from tmux_orchestrator.domain.workflow import WorkflowRun  # noqa: F401, E402
 
 
 class WorkflowManager:

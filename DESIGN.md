@@ -3778,3 +3778,60 @@ References:
 Trust fix: `hasTrustDialogHooksAccepted=true` + `allowedTools=[]` + write-then-verify ループが
 v1.1.21 の intermittent trust dialog ブロック問題を完全解消。
 
+
+## §10.55 — v1.1.23: Clean Architecture Migration Phase 1 — `domain/workflow.py` + `domain/phase_strategy.py`
+
+### Step 0 — 選択理由
+
+**選択した機能**: Clean Architecture Migration Phase 1 — `domain/workflow.py` + `domain/phase_strategy.py`
+
+**理由**:
+- ユーザーが明示的に指定した最高優先度タスク。
+- `WorkflowRun`・`WorkflowPhaseStatus` は現在 `workflow_manager.py` / `phase_executor.py` に散在し、純粋なドメイン型として独立していない。
+- `PhaseStrategy` (単一/並列/競合/討論) は「フェーズをどう実行するか」という純粋なドメイン概念であり、インフラや HTTP に依存すべきでない。
+- Strangler Fig パターンで既存の 2506 テストをすべて緑のまま移行可能。
+
+**選択しなかった候補と理由**:
+- `application/workflow_service.py` の追加リファクタリング: Phase 1 完了後の Phase 2 候補（依存関係が逆転するため先に domain/ を整備する必要がある）。
+- E2E デモ新ワークフロー追加: Phase 1 の構造整備が先決。
+
+### Step 1 — 調査記録
+
+**Query 1**: "Clean Architecture domain layer workflow entity pure Python best practices 2024"
+
+主要知見:
+- Domain entities は pure domain objects であるべき — データベースアノテーションやフレームワーク固有のコードを含まない。
+- Domain layer にはエンティティ・値オブジェクト・アグリゲート・ドメインサービスが属する。
+- Workflow/Use Cases は application layer に属し、domain の上に位置する。依存関係は必ず内向き (domain を指す方向) のみ。
+- dataclass を純粋なビジネスオブジェクトとして使用するのは推奨プラクティス。
+
+References:
+- ThinhDA, "Crafting Maintainable Python Applications with Domain-Driven Design and Clean Architecture", https://thinhdanggroup.github.io/python-code-structure/ (2024)
+- Shaliamekh, "Clean Architecture with Python", Medium, https://medium.com/@shaliamekh/clean-architecture-with-python-d62712fd8d4f (2024)
+- Glukhov, "Python Design Patterns for Clean Architecture", https://www.glukhov.org/post/2025/11/python-design-patterns-for-clean-architecture/ (2025)
+
+**Query 2**: "Strategy pattern Python Protocol ABC domain layer clean architecture orthogonal"
+
+主要知見:
+- Python では `typing.Protocol` を使うことで ABC 継承なしに Strategy パターンを実装できる (PEP 544 structural subtyping)。
+- Strategy は「アルゴリズムをカプセル化する」パターン — PhaseStrategy は「フェーズ実行戦略」をカプセル化するため適切な適用例。
+- Domain layer に Protocol-based strategy を置くことで、infrastructure/web への逆依存を排除できる。
+- Percival & Gregory "Architecture Patterns with Python" (O'Reilly, 2020): Port/Adapter パターンと Protocol の組み合わせが推奨される。
+
+References:
+- Percival, Gregory, "Architecture Patterns with Python", O'Reilly, https://www.oreilly.com/library/view/architecture-patterns-with/9781492052197/ (2020)
+- Glukhov, "Python Design Patterns for Clean Architecture", DEV Community, https://dev.to/rosgluk/python-design-patterns-for-clean-architecture-1jk0 (2025)
+- Python PEP 544 — Protocols: Structural subtyping (static duck typing), https://peps.python.org/pep-0544/
+
+**Query 3**: "Strangler Fig pattern Python module migration incremental refactoring re-export shim"
+
+主要知見:
+- Strangler Fig (Fowler, 2004): 旧システムを壊さずに新実装を徐々に育て、旧モジュールを re-export shim に変換する。
+- Python での適用: 旧モジュールを「facade/shim」として残し、`from new_location import X` を re-export する。既存の import パスを破壊せずに内部実装を新しい場所へ移動できる。
+- AWS Prescriptive Guidance: Intercepting Facade パターン — テスト・ロールバックが容易。
+
+References:
+- Fowler, "Strangler Fig Application", bliki, https://martinfowler.com/bliki/StranglerFigApplication.html (2004)
+- Tiset, "The Strangler fig pattern", Medium, https://medium.com/@sylvain.tiset/the-strangler-fig-pattern-is-what-you-need-to-migrate-monolithic-application-with-legacy-code-to-ec24cf7168eb (2023)
+- AWS Prescriptive Guidance, "Strangler fig pattern", https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/strangler-fig.html
+
