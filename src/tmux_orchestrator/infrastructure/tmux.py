@@ -31,6 +31,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = 0.1  # seconds
+# Minimum seconds between bus publishes for a single pane.
+# Prevents high-output agents (e.g. claude streaming responses) from flooding
+# the asyncio event loop with run_coroutine_threadsafe calls.
+PUBLISH_DEBOUNCE_S = 1.0
 
 
 @dataclass
@@ -66,6 +70,8 @@ class TmuxInterface:
         self._watcher_thread: threading.Thread | None = None
         # Event loop reference captured at construction time for thread-safe scheduling
         self._loop: asyncio.AbstractEventLoop | None = None
+        # pane_id → last publish timestamp (monotonic); for publish-rate throttling
+        self._last_publish: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Session management
@@ -263,20 +269,21 @@ class TmuxInterface:
                         with self._lock:
                             if pane_id in self._watched:
                                 self._watched[pane_id] = (agent_id, h)
-                        event = PaneOutputEvent(
-                            pane_id=pane_id, agent_id=agent_id, text=content
-                        )
                         if self.bus is not None and self._loop is not None:
-                            from tmux_orchestrator.bus import Message, MessageType
+                            now = time.monotonic()
+                            last = self._last_publish.get(pane_id, 0.0)
+                            if now - last >= PUBLISH_DEBOUNCE_S:
+                                self._last_publish[pane_id] = now
+                                from tmux_orchestrator.bus import Message, MessageType
 
-                            msg = Message(
-                                type=MessageType.STATUS,
-                                from_id=agent_id,
-                                payload={"pane_output": content},
-                            )
-                            asyncio.run_coroutine_threadsafe(
-                                self.bus.publish(msg), self._loop
-                            )
+                                msg = Message(
+                                    type=MessageType.STATUS,
+                                    from_id=agent_id,
+                                    payload={"pane_output": content},
+                                )
+                                asyncio.run_coroutine_threadsafe(
+                                    self.bus.publish(msg), self._loop
+                                )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Watcher error for pane %s: %s", pane_id, exc)
             time.sleep(POLL_INTERVAL)

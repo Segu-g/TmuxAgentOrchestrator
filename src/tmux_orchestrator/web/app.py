@@ -568,6 +568,95 @@ class AdrWorkflowSubmit(BaseModel):
         return v
 
 
+class DelphiWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/delphi — multi-round Delphi consensus workflow.
+
+    Submits a Delphi-style multi-round expert consensus DAG.  For each round,
+    *N* expert agents (3–5 personas such as security / performance / maintainability)
+    independently submit opinions to the scratchpad in **parallel**, then a
+    **moderator** agent reads all opinions, synthesises them, and writes feedback.
+    After ``max_rounds``, a final **consensus** agent reads all moderator summaries
+    and writes ``consensus.md``.
+
+    Scratchpad keys (Blackboard pattern):
+
+    - ``{scratchpad_prefix}_r{n}_{expert}`` — expert *expert*'s opinion in round *n*
+    - ``{scratchpad_prefix}_r{n}_moderator`` — moderator's synthesis for round *n*
+    - ``{scratchpad_prefix}_consensus``      — final consensus document
+
+    Artifacts produced by agents:
+
+    - ``expert_{persona}_r{n}.md`` — per-expert opinion file (in expert worktree)
+    - ``delphi_round_{n}.md``      — moderator's round summary (in moderator worktree)
+    - ``consensus.md``             — final consensus (in consensus agent worktree)
+
+    Design references:
+
+    - DelphiAgent (ScienceDirect 2025): multiple LLM agents emulate the Delphi
+      method, reaching consensus through iterative feedback and synthesis.
+      https://www.sciencedirect.com/science/article/abs/pii/S0306457325001827
+    - RT-AID (ScienceDirect 2025): Real-Time AI Delphi — AI-assisted opinions
+      accelerate convergence in the Delphi process.
+      https://www.sciencedirect.com/science/article/pii/S0016328725001661
+    - Du et al. "Improving Factuality and Reasoning in Language Models through
+      Multiagent Debate" ICML 2024 (arXiv:2305.14325): even if all agents are
+      wrong in round 1, debate across rounds converges to correct answer.
+    - CONSENSAGENT ACL 2025: sycophancy-mitigation prompts improve consensus
+      quality while maintaining efficiency.
+      https://aclanthology.org/2025.findings-acl.1141/
+    - DESIGN.md §10.22 (v1.0.23)
+    """
+
+    topic: str
+    experts: list[str] = ["security", "performance", "maintainability"]
+    max_rounds: int = 2
+    # Optional per-role required_tags for agent capability routing
+    expert_tags: list[str] = []
+    moderator_tags: list[str] = []
+    # When set, the consensus RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    from pydantic import field_validator
+
+    @field_validator("topic")
+    @classmethod
+    def topic_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("topic must not be empty")
+        return v
+
+    @field_validator("experts")
+    @classmethod
+    def experts_must_be_valid(cls, v: list[str]) -> list[str]:
+        import re as _re
+        if len(v) < 2:
+            raise ValueError("experts must contain at least 2 personas")
+        if len(v) > 5:
+            raise ValueError("experts must contain at most 5 personas")
+        for expert in v:
+            if not expert.strip():
+                raise ValueError("expert persona names must not be empty")
+            if expert != expert.strip():
+                raise ValueError(
+                    f"expert persona name {expert!r} must not have leading/trailing whitespace"
+                )
+            if not _re.match(r"^[a-zA-Z0-9_-]+$", expert):
+                raise ValueError(
+                    f"expert persona name {expert!r} must contain only "
+                    "alphanumeric characters, hyphens, and underscores"
+                )
+        if len(v) != len(set(v)):
+            raise ValueError("expert persona names must be unique")
+        return v
+
+    @field_validator("max_rounds")
+    @classmethod
+    def max_rounds_must_be_valid(cls, v: int) -> int:
+        if v < 1 or v > 3:
+            raise ValueError("max_rounds must be between 1 and 3")
+        return v
+
+
 class FulldevWorkflowSubmit(BaseModel):
     """Request body for POST /workflows/fulldev — Full Software Development Lifecycle.
 
@@ -2593,6 +2682,294 @@ def create_app(
         }
 
         all_task_ids = list(task_ids_map.values())
+        run = wm.submit(name=wf_name, task_ids=all_task_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids_map,
+            "scratchpad_prefix": scratchpad_prefix,
+        }
+
+    @app.post(
+        "/workflows/delphi",
+        summary="Submit a multi-round Delphi expert-consensus workflow",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_delphi_workflow(body: DelphiWorkflowSubmit) -> dict:
+        """Submit a Delphi-style multi-round expert consensus Workflow DAG.
+
+        For each round *n* in 1..max_rounds:
+
+        1. **expert_{persona}_r{n}** (parallel, one per persona): Each expert
+           agent reads the previous moderator's feedback (if round > 1) from the
+           scratchpad, then independently produces an opinion on ``topic`` from
+           their persona's perspective.  Writes ``expert_{persona}_r{n}.md`` and
+           stores it to the scratchpad.
+        2. **moderator_r{n}**: Reads all expert opinions for round *n*, synthesises
+           them into a structured summary with convergence/divergence analysis, and
+           writes ``delphi_round_{n}.md``.  Stores the summary to scratchpad.
+
+        Final step:
+
+        - **consensus**: Reads all moderator summaries, identifies points of
+          consensus and remaining disagreements, and writes ``consensus.md``
+          containing a structured final agreement.
+
+        Returns:
+
+        - ``workflow_id``: workflow run UUID for status polling
+        - ``name``: human-readable name (``delphi/<topic>``)
+        - ``task_ids``: dict mapping role keys to global task IDs.
+          Keys: ``expert_{e}_r{n}`` for each expert/round, ``moderator_r{n}``,
+          ``consensus``
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+
+        Design references:
+
+        - DelphiAgent (ScienceDirect 2025): multiple LLM agents emulate the
+          Delphi method with iterative feedback and synthesis.
+        - RT-AID (ScienceDirect 2025): AI-assisted opinions accelerate Delphi
+          convergence even with limited expert samples.
+        - Du et al. ICML 2024 (arXiv:2305.14325): multi-round debate converges
+          to correct answer even when all agents are initially wrong.
+        - CONSENSAGENT ACL 2025: sycophancy-mitigation in multi-agent consensus.
+        - DESIGN.md §10.22 (v1.0.23)
+        """
+        import uuid as _uuid  # noqa: PLC0415
+
+        wm = orchestrator.get_workflow_manager()
+        wf_name = f"delphi/{body.topic}"
+
+        pre_run_id = str(_uuid.uuid4())
+        scratchpad_prefix = f"delphi_{pre_run_id[:8]}"
+
+        # Shared bash snippets for reading context and API key
+        _ctx_snippet = (
+            "WEB_BASE_URL=$(python3 -c \""
+            "import json; d=json.load(open('__orchestrator_context__.json')); "
+            "print(d['web_base_url'])\")\n"
+            "   API_KEY=$(cat __orchestrator_api_key__ 2>/dev/null || "
+            "echo \"$TMUX_ORCHESTRATOR_API_KEY\")"
+        )
+
+        def _scratchpad_key(suffix: str) -> str:
+            """Derive a flat scratchpad key (no slashes)."""
+            return f"{scratchpad_prefix}_{suffix}"
+
+        def _write_snippet(key: str, filename: str) -> str:
+            """Python3-based snippet to safely write a file's content to scratchpad.
+
+            Uses python3 json.dumps for correct escaping of quotes, newlines, and
+            special characters — avoiding the shell-quoting fragility of:
+                -d '{"value": "'$CONTENT'"}'
+            which breaks when file content contains quotes or newlines.
+
+            The ``_ctx_snippet`` must be run in the same shell session beforehand
+            to set $API_KEY and $WEB_BASE_URL.
+            """
+            return (
+                f"   python3 -c \"\n"
+                f"import json, urllib.request, os, sys\n"
+                f"content = open('{filename}', 'r', errors='replace').read()\n"
+                f"payload = json.dumps({{'value': content}}).encode()\n"
+                f"api_key = os.environ.get('TMUX_ORCHESTRATOR_API_KEY', '')\n"
+                f"if not api_key:\n"
+                f"    try: api_key = open('__orchestrator_api_key__').read().strip()\n"
+                f"    except: pass\n"
+                f"ctx = json.load(open('__orchestrator_context__.json'))\n"
+                f"base_url = ctx['web_base_url']\n"
+                f"req = urllib.request.Request(base_url + '/scratchpad/{key}', data=payload, method='PUT')\n"
+                f"req.add_header('Content-Type', 'application/json')\n"
+                f"req.add_header('X-API-Key', api_key)\n"
+                f"urllib.request.urlopen(req, timeout=15)\n"
+                f"print('Stored to scratchpad: {key}')\n"
+                f"\"  "
+            )
+
+        def _read_snippet(key: str, varname: str) -> str:
+            """Bash snippet that reads scratchpad key into $varname."""
+            return (
+                f"   {varname}=$(curl -s -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"value\"])')\n"
+            )
+
+        task_ids_map: dict[str, str] = {}
+        all_task_ids: list[str] = []
+
+        # prev_moderator_task_id: the previous round's moderator task (or None for round 1)
+        prev_moderator_task_id: str | None = None
+
+        for rn in range(1, body.max_rounds + 1):
+            expert_task_ids: list[str] = []
+
+            for persona in body.experts:
+                expert_key = _scratchpad_key(f"r{rn}_{persona}")
+
+                if rn == 1:
+                    feedback_section = (
+                        f"This is Round 1 — there is no prior feedback. "
+                        f"Present your initial expert opinion on the topic below.\n"
+                    )
+                else:
+                    prev_mod_key = _scratchpad_key(f"r{rn - 1}_moderator")
+                    feedback_section = (
+                        f"This is Round {rn}. Read the moderator's Round {rn - 1} "
+                        f"feedback from the scratchpad:\n"
+                        f"   ```bash\n"
+                        f"   {_ctx_snippet}\n"
+                        + _read_snippet(prev_mod_key, "MODERATOR_FEEDBACK")
+                        + f"   echo \"Moderator feedback: $MODERATOR_FEEDBACK\"\n"
+                        f"   ```\n"
+                        f"Revise your opinion taking the moderator's synthesis into account.\n"
+                        f"Maintain your expert perspective — do NOT simply agree with everyone.\n"
+                    )
+
+                expert_prompt = (
+                    f"You are an expert agent representing the **{persona.upper()}** "
+                    f"perspective in a Delphi consensus workflow.\n"
+                    f"\n"
+                    f"**Topic:** {body.topic}\n"
+                    f"**Round:** {rn} of {body.max_rounds}\n"
+                    f"**Your persona:** {persona} specialist\n"
+                    f"\n"
+                    f"{feedback_section}\n"
+                    f"Your tasks:\n"
+                    f"1. Analyse '{body.topic}' strictly from the **{persona}** "
+                    f"specialist perspective.\n"
+                    f"   - Identify risks, trade-offs, requirements, and recommendations "
+                    f"specific to your domain.\n"
+                    f"   - Be concrete and technical. Avoid generic statements.\n"
+                    f"   - Keep your opinion to 200-350 words.\n"
+                    f"2. Write your opinion to `expert_{persona}_r{rn}.md`.\n"
+                    f"3. Store your opinion in the shared scratchpad using this Python script:\n"
+                    f"   ```python\n"
+                    + _write_snippet(expert_key, f"expert_{persona}_r{rn}.md")
+                    + f"\n"
+                    f"   ```\n"
+                )
+
+                expert_task = await orchestrator.submit_task(
+                    expert_prompt,
+                    required_tags=body.expert_tags or None,
+                    depends_on=[prev_moderator_task_id] if prev_moderator_task_id else [],
+                )
+                role_key = f"expert_{persona}_r{rn}"
+                task_ids_map[role_key] = expert_task.id
+                all_task_ids.append(expert_task.id)
+                expert_task_ids.append(expert_task.id)
+
+            # --- Moderator prompt ---
+            mod_key = _scratchpad_key(f"r{rn}_moderator")
+            round_expert_keys_desc = "\n".join(
+                f"   - {persona} opinion: key `{_scratchpad_key(f'r{rn}_{persona}')}`"
+                for persona in body.experts
+            )
+
+            moderator_prompt = (
+                f"You are the MODERATOR agent in a Delphi consensus workflow.\n"
+                f"\n"
+                f"**Topic:** {body.topic}\n"
+                f"**Round:** {rn} of {body.max_rounds}\n"
+                f"**Expert personas:** {', '.join(body.experts)}\n"
+                f"\n"
+                f"Your tasks:\n"
+                f"1. Read all expert opinions for Round {rn} from the scratchpad:\n"
+                f"   ```bash\n"
+                f"   {_ctx_snippet}\n"
+                f"   ```\n"
+                f"   Keys to read:\n"
+                f"{round_expert_keys_desc}\n"
+                f"   Use curl to read each key:\n"
+                f"   `curl -s -H \"X-API-Key: $API_KEY\" \"$WEB_BASE_URL/scratchpad/<key>\"`\n"
+                f"\n"
+                f"2. Write `delphi_round_{rn}.md` containing:\n"
+                f"   - **Round {rn} Summary**: 2-3 sentence overview of expert opinions\n"
+                f"   - **Points of Convergence**: where experts agree (bullet list)\n"
+                f"   - **Points of Divergence**: where experts disagree (bullet list)\n"
+                f"   - **Key Insights per Persona**: one paragraph per expert persona\n"
+            )
+            if rn < body.max_rounds:
+                moderator_prompt += (
+                    f"   - **Feedback for Round {rn + 1}**: questions/areas for experts "
+                    f"to refine in the next round (3-5 bullet points)\n"
+                )
+            moderator_prompt += (
+                f"\n"
+                f"3. Store the round summary in the shared scratchpad using this Python script:\n"
+                f"   ```python\n"
+                + _write_snippet(mod_key, f"delphi_round_{rn}.md")
+                + f"\n"
+                f"   ```\n"
+                f"\n"
+                f"Be objective. Accurately represent each expert's position. "
+                f"Do not favour any single perspective."
+            )
+
+            moderator_task = await orchestrator.submit_task(
+                moderator_prompt,
+                required_tags=body.moderator_tags or None,
+                depends_on=expert_task_ids,
+            )
+            mod_role_key = f"moderator_r{rn}"
+            task_ids_map[mod_role_key] = moderator_task.id
+            all_task_ids.append(moderator_task.id)
+            prev_moderator_task_id = moderator_task.id
+
+        # --- Consensus prompt ---
+        consensus_key = _scratchpad_key("consensus")
+        all_mod_keys_desc = "\n".join(
+            f"   - Round {rn} moderator summary: key `{_scratchpad_key(f'r{rn}_moderator')}`"
+            for rn in range(1, body.max_rounds + 1)
+        )
+
+        consensus_prompt = (
+            f"You are the CONSENSUS agent in a Delphi consensus workflow.\n"
+            f"\n"
+            f"**Topic:** {body.topic}\n"
+            f"**Rounds completed:** {body.max_rounds}\n"
+            f"**Expert personas:** {', '.join(body.experts)}\n"
+            f"\n"
+            f"Your tasks:\n"
+            f"1. Read all moderator round summaries from the scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            f"   ```\n"
+            f"   Keys to read:\n"
+            f"{all_mod_keys_desc}\n"
+            f"   Use curl to read each: "
+            f"`curl -s -H \"X-API-Key: $API_KEY\" \"$WEB_BASE_URL/scratchpad/<key>\"`\n"
+            f"\n"
+            f"2. Write `consensus.md` containing:\n"
+            f"   - **Topic**: {body.topic}\n"
+            f"   - **Expert Perspectives**: brief summary of each persona's view\n"
+            f"   - **Consensus Points**: areas of strong agreement across all experts\n"
+            f"   - **Remaining Disagreements**: unresolved tensions and why\n"
+            f"   - **Recommended Decision**: the most defensible position given all "
+            f"expert input\n"
+            f"   - **Key Trade-offs**: top 3-5 trade-offs decision-makers should know\n"
+            f"   - **Caveats**: conditions under which the recommendation changes\n"
+            f"\n"
+            f"3. Store the consensus document in the shared scratchpad using this Python script:\n"
+            f"   ```python\n"
+            + _write_snippet(consensus_key, "consensus.md")
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Write a balanced, well-structured consensus.md. "
+            f"Represent all expert perspectives fairly."
+        )
+
+        consensus_task = await orchestrator.submit_task(
+            consensus_prompt,
+            required_tags=body.moderator_tags or None,
+            depends_on=[prev_moderator_task_id] if prev_moderator_task_id else [],
+            reply_to=body.reply_to,
+        )
+        task_ids_map["consensus"] = consensus_task.id
+        all_task_ids.append(consensus_task.id)
+
         run = wm.submit(name=wf_name, task_ids=all_task_ids)
 
         return {

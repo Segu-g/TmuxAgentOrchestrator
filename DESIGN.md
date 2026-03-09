@@ -807,3 +807,62 @@ AI エージェントにとって TDD は「ガードレール」として機能
 **唯一の FAIL**: agent-verifier が作業完了後に `/task-complete` を呼ばず IDLE に戻らなかった（成果物は正常）。
 根本原因: エージェントが明示的完了シグナルを送り忘れるケース → スラッシュコマンド自動コピー (§11) で改善予定。
 
+---
+
+### 10.22 v1.0.23 — POST /workflows/delphi — 多ラウンド合意形成ワークフロー
+
+#### 選定理由
+
+**選択: `POST /workflows/delphi` — 多ラウンド合意形成ワークフロー (v1.0.23)**
+
+§11「層3：ステージの実行方式」で**中**優先度として挙げられているが、高優先度の上位アイテムが既に実装済みのため、次の実装候補として選択した:
+
+1. **高優先度アイテムの実装状況**: スラッシュコマンド自動コピー（v1.0.12完了）、DI化（v1.0.14完了）、application層（v1.0.15完了）、domain/純粋型（v1.0.11完了）、infrastructure層（v1.0.16/17完了）、エージェントドリフト検出（v1.0.9完了）、webhook retry（v1.0.22完了）。チェックポイント永続化・OpenTelemetryは実装規模が大きく、本イテレーションには適さない。
+2. **debate ワークフロー基盤の活用**: v0.37.0 で `POST /workflows/debate` (advocate/critic/judge 3役割) を実装済み。Delphi は debate の自然な拡張として、複数ラウンドのイテレーション構造を追加するだけで実現できる。
+3. **研究的裏付けが強い**: RT-AID (ScienceDirect 2025) が LLM による Delphi 法の自動化を実証。Du et al. (ICML 2024) が「エージェントが全員誤りでも討論で正解に収束する」ことを実証。複数ラウンドの価値が学術的に証明されている。
+4. **デモシナリオが明確**: 3–5 名の専門家ペルソナ（セキュリティ / パフォーマンス / 保守性 / UX / コスト）が匿名で意見提出し、モデレーターが集計・フィードバックするサイクルを可視化できる。
+5. **成果物が具体的**: `delphi_round_{n}.md` + `consensus.md` という明確な出力物がある。
+
+**選択しなかった候補:**
+- スラッシュコマンド自動コピー: v1.0.12 で既に実装済み（`_copy_commands()` メソッド、`test_slash_commands_worktree.py` のテスト群）。
+- チェックポイント永続化: 実装規模が大きい（SQLite + resume フラグ + API変更）。次イテレーション候補。
+- OpenTelemetry: 外部依存（OTel SDK）の追加が必要。セットアップコストが高い。
+- `POST /workflows/redblue`: delphi より設計が複雑（攻撃者視点のシミュレーションが難しい）。
+
+#### 調査結果 (Step 1 — Research)
+
+**Query 1**: "Delphi method LLM multi-agent consensus formation rounds anonymous expert opinions RT-AID 2025"
+
+主要知見:
+- **Real-Time AI Delphi (RT-AID)** (ScienceDirect 2025): LLM を Delphi 法の支援エージェントとして使用し、専門家意見の収束を加速させる手法。AI 支援意見が収束プロセスを大幅に加速させることを実証。
+- **DelphiAgent** (ScienceDirect 2025): 複数の LLM エージェントが人間の専門家を模倣し、匿名性を保ちながら反復的フィードバックと統合を通じて合意を形成。各エージェントが個別に判断し、複数ラウンドのフィードバック・統合サイクルで合意到達。
+- **CONSENSAGENT** (ACL 2025): エージェントインタラクションに基づいてプロンプトを動的に洗練し、迎合（sycophancy）を抑制。討論の精度を向上させながら効率を維持。
+
+**References**:
+- "Real-Time AI Delphi: A novel method for decision-making and foresight contexts", ScienceDirect 2025, https://www.sciencedirect.com/science/article/pii/S0016328725001661
+- "DelphiAgent: A trustworthy multi-agent verification framework", ScienceDirect 2025, https://www.sciencedirect.com/science/article/abs/pii/S0306457325001827
+- "CONSENSAGENT: Towards Efficient and Effective Consensus in Multi-Agent LLM Interactions", ACL Anthology 2025, https://aclanthology.org/2025.findings-acl.1141/
+
+**Query 2**: "Du et al ICML 2024 improving factuality LLM multi-agent debate society of mind rounds convergence"
+
+主要知見:
+- Du, Li, Torralba, Tenenbaum, Mordatch "Improving Factuality and Reasoning in Language Models through Multiagent Debate" (ICML 2024): 複数の LLM インスタンスが自分の応答を提案・討論し、複数ラウンドを経て共通の最終回答に到達。数学・推論タスクで精度向上、幻覚（hallucination）削減を実証。「Society of Minds」として異なる LLM インスタンスをマルチエージェント社会として扱う。
+- 複数ラウンドが重要: 初回ラウンドでは全員が誤りでも、討論ラウンドを経ることで正解に収束するケースが多数存在することを実証。
+
+**References**:
+- Du et al., "Improving Factuality and Reasoning in Language Models through Multiagent Debate", ICML 2024, arXiv:2305.14325, https://arxiv.org/abs/2305.14325
+- GitHub: composable-models/llm_multiagent_debate, https://github.com/composable-models/llm_multiagent_debate
+
+**Query 3**: "Claude Code custom slash commands .claude/commands directory agent worktree auto-copy 2025"
+
+主要知見:
+- Claude Code の `.claude/commands/` はプロジェクトスコープのカスタムスラッシュコマンドを収録する。ファイル名がコマンド名になる（`.md` 拡張子なし）。
+- `~/.claude/commands/` はユーザースコープのコマンドで全プロジェクトで利用可能。
+- v2.1.3 以降、コマンドはスキルシステムに統合されたが、`.claude/commands/` の既存ファイルは引き続き動作。
+- ワークツリーで `--worktree` フラグ使用時、各エージェントは分離された git ワークツリーで動作し、`.claude/commands/` を独自に保持する。
+
+**References**:
+- "Slash commands - Claude Code Docs", https://code.claude.com/docs/en/slash-commands
+- "How to Create Custom Slash Commands in Claude Code", BioErrorLog Tech Blog, https://en.bioerrorlog.work/entry/claude-code-custom-slash-command
+- "Slash Commands in the SDK - Claude API Docs", https://platform.claude.com/docs/en/agent-sdk/slash-commands
+

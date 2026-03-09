@@ -264,6 +264,64 @@
         "title": "DebateWorkflowSubmit",
         "type": "object"
       },
+      "DelphiWorkflowSubmit": {
+        "description": "Request body for POST /workflows/delphi \u2014 multi-round Delphi consensus workflow.\n\nSubmits a Delphi-style multi-round expert consensus DAG.  For each round,\n*N* expert agents (3\u20135 personas such as security / performance / maintainability)\nindependently submit opinions to the scratchpad in **parallel**, then a\n**moderator** agent reads all opinions, synthesises them, and writes feedback.\nAfter ``max_rounds``, a final **consensus** agent reads all moderator summaries\nand writes ``consensus.md``.\n\nScratchpad keys (Blackboard pattern):\n\n- ``{scratchpad_prefix}_r{n}_{expert}`` \u2014 expert *expert*'s opinion in round *n*\n- ``{scratchpad_prefix}_r{n}_moderator`` \u2014 moderator's synthesis for round *n*\n- ``{scratchpad_prefix}_consensus``      \u2014 final consensus document\n\nArtifacts produced by agents:\n\n- ``expert_{persona}_r{n}.md`` \u2014 per-expert opinion file (in expert worktree)\n- ``delphi_round_{n}.md``      \u2014 moderator's round summary (in moderator worktree)\n- ``consensus.md``             \u2014 final consensus (in consensus agent worktree)\n\nDesign references:\n\n- DelphiAgent (ScienceDirect 2025): multiple LLM agents emulate the Delphi\n  method, reaching consensus through iterative feedback and synthesis.\n  https://www.sciencedirect.com/science/article/abs/pii/S0306457325001827\n- RT-AID (ScienceDirect 2025): Real-Time AI Delphi \u2014 AI-assisted opinions\n  accelerate convergence in the Delphi process.\n  https://www.sciencedirect.com/science/article/pii/S0016328725001661\n- Du et al. \"Improving Factuality and Reasoning in Language Models through\n  Multiagent Debate\" ICML 2024 (arXiv:2305.14325): even if all agents are\n  wrong in round 1, debate across rounds converges to correct answer.\n- CONSENSAGENT ACL 2025: sycophancy-mitigation prompts improve consensus\n  quality while maintaining efficiency.\n  https://aclanthology.org/2025.findings-acl.1141/\n- DESIGN.md \u00a710.22 (v1.0.23)",
+        "properties": {
+          "expert_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Expert Tags",
+            "type": "array"
+          },
+          "experts": {
+            "default": [
+              "security",
+              "performance",
+              "maintainability"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "title": "Experts",
+            "type": "array"
+          },
+          "max_rounds": {
+            "default": 2,
+            "title": "Max Rounds",
+            "type": "integer"
+          },
+          "moderator_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Moderator Tags",
+            "type": "array"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "topic": {
+            "title": "Topic",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic"
+        ],
+        "title": "DelphiWorkflowSubmit",
+        "type": "object"
+      },
       "DirectorChat": {
         "properties": {
           "message": {
@@ -3351,6 +3409,47 @@
           }
         },
         "summary": "Submit a multi-round Advocate/Critic/Judge debate workflow"
+      }
+    },
+    "/workflows/delphi": {
+      "post": {
+        "description": "Submit a Delphi-style multi-round expert consensus Workflow DAG.\n\nFor each round *n* in 1..max_rounds:\n\n1. **expert_{persona}_r{n}** (parallel, one per persona): Each expert\n   agent reads the previous moderator's feedback (if round > 1) from the\n   scratchpad, then independently produces an opinion on ``topic`` from\n   their persona's perspective.  Writes ``expert_{persona}_r{n}.md`` and\n   stores it to the scratchpad.\n2. **moderator_r{n}**: Reads all expert opinions for round *n*, synthesises\n   them into a structured summary with convergence/divergence analysis, and\n   writes ``delphi_round_{n}.md``.  Stores the summary to scratchpad.\n\nFinal step:\n\n- **consensus**: Reads all moderator summaries, identifies points of\n  consensus and remaining disagreements, and writes ``consensus.md``\n  containing a structured final agreement.\n\nReturns:\n\n- ``workflow_id``: workflow run UUID for status polling\n- ``name``: human-readable name (``delphi/<topic>``)\n- ``task_ids``: dict mapping role keys to global task IDs.\n  Keys: ``expert_{e}_r{n}`` for each expert/round, ``moderator_r{n}``,\n  ``consensus``\n- ``scratchpad_prefix``: scratchpad namespace for this run\n\nDesign references:\n\n- DelphiAgent (ScienceDirect 2025): multiple LLM agents emulate the\n  Delphi method with iterative feedback and synthesis.\n- RT-AID (ScienceDirect 2025): AI-assisted opinions accelerate Delphi\n  convergence even with limited expert samples.\n- Du et al. ICML 2024 (arXiv:2305.14325): multi-round debate converges\n  to correct answer even when all agents are initially wrong.\n- CONSENSAGENT ACL 2025: sycophancy-mitigation in multi-agent consensus.\n- DESIGN.md \u00a710.22 (v1.0.23)",
+        "operationId": "submit_delphi_workflow_workflows_delphi_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DelphiWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Delphi Workflow Workflows Delphi Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a multi-round Delphi expert-consensus workflow"
       }
     },
     "/workflows/fulldev": {
