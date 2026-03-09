@@ -431,6 +431,112 @@
         "title": "DynamicAgentCreate",
         "type": "object"
       },
+      "Episode": {
+        "description": "A persisted episode record returned by the memory API.",
+        "properties": {
+          "agent_id": {
+            "description": "The agent that owns this episode.",
+            "title": "Agent Id",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "ISO 8601 UTC creation timestamp.",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "description": "Auto-generated UUID for this episode.",
+            "title": "Id",
+            "type": "string"
+          },
+          "lessons": {
+            "default": "",
+            "description": "Free-text knowledge to carry forward (optional).",
+            "title": "Lessons",
+            "type": "string"
+          },
+          "outcome": {
+            "description": "Task outcome classification.",
+            "enum": [
+              "success",
+              "failure",
+              "partial"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "summary": {
+            "description": "1\u20132 sentence summary of what was accomplished.",
+            "title": "Summary",
+            "type": "string"
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The task ID that produced this episode (for correlation).",
+            "title": "Task Id"
+          }
+        },
+        "required": [
+          "summary",
+          "outcome",
+          "id",
+          "agent_id",
+          "created_at"
+        ],
+        "title": "Episode",
+        "type": "object"
+      },
+      "EpisodeCreate": {
+        "description": "Request body for ``POST /agents/{id}/memory``.",
+        "properties": {
+          "lessons": {
+            "default": "",
+            "description": "Free-text knowledge to carry forward (optional).",
+            "title": "Lessons",
+            "type": "string"
+          },
+          "outcome": {
+            "description": "Task outcome classification.",
+            "enum": [
+              "success",
+              "failure",
+              "partial"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "summary": {
+            "description": "1\u20132 sentence summary of what was accomplished.",
+            "title": "Summary",
+            "type": "string"
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The task ID that produced this episode (for correlation).",
+            "title": "Task Id"
+          }
+        },
+        "required": [
+          "summary",
+          "outcome"
+        ],
+        "title": "EpisodeCreate",
+        "type": "object"
+      },
       "FulldevWorkflowSubmit": {
         "description": "Request body for POST /workflows/fulldev \u2014 Full Software Development Lifecycle.\n\nSubmits a 5-agent sequential pipeline DAG:\n\n  1. ``spec-writer``: writes feature requirements specification (SPEC.md) and\n     stores it in ``{scratchpad_prefix}_spec``.\n  2. ``architect``: reads spec, writes ADR/design document (DESIGN.md) and\n     stores it in ``{scratchpad_prefix}_design``.\n  3. ``tdd-test-writer``: reads spec + design, writes failing pytest tests and\n     stores them in ``{scratchpad_prefix}_tests``.\n  4. ``tdd-implementer``: reads spec + tests, writes implementation that makes\n     tests pass, stores it in ``{scratchpad_prefix}_impl``.\n  5. ``reviewer``: reads all artifacts, writes code review to\n     ``{scratchpad_prefix}_review``.\n\nAll handoffs use the shared scratchpad (Blackboard pattern). Each task\n``depends_on`` the previous task, forming a linear pipeline.\n\nDesign references:\n- MetaGPT arXiv:2308.00352 (2023/2024): PM \u2192 Architect \u2192 Engineer SOP pipeline.\n- AgentMesh arXiv:2507.19902 (2025): Planner \u2192 Coder \u2192 Debugger \u2192 Reviewer.\n- arXiv:2508.00083 \"Survey on Code Generation with LLM-based Agents\" (2025):\n  Pipeline-based labor division + Blackboard model for inter-agent handoff.\n- arXiv:2505.16339 \"Rethinking Code Review Workflows\" (2025): LLM code review\n  integrated into automated pipelines.\n- DESIGN.md \u00a710.16 (v0.42.0)",
         "properties": {
@@ -1707,6 +1813,159 @@
           }
         },
         "summary": "Per-agent task history"
+      }
+    },
+    "/agents/{agent_id}/memory": {
+      "get": {
+        "description": "Return the most recent *limit* episodic memory entries for *agent_id*.\n\nEpisodic memory records past task completions with a human-readable\nsummary, outcome classification (success/failure/partial), and lessons\nlearned.  Entries are returned newest-first.\n\nDesign reference:\n- Wang & Chen, \"MIRIX: Multi-Agent Memory System for LLM-Based Agents\",\n  arXiv:2507.07957, 2025 \u2014 episodic memory achieves 35% higher accuracy\n  than RAG baseline while reducing storage by 99.9%.\n- \"Position: Episodic Memory is the Missing Piece for Long-Term LLM\n  Agents\", arXiv:2502.06975, 2025.\n\nThe 404 is only raised when the agent is completely unknown to the\nregistry.  A known agent with *no* episodes returns an empty list.\nPass ``?limit=N`` to control how many entries are returned (default 20).",
+        "operationId": "list_episodes_agents__agent_id__memory_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Episode"
+                  },
+                  "title": "Response List Episodes Agents  Agent Id  Memory Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List episodic memory entries for an agent"
+      },
+      "post": {
+        "description": "Append a new episodic memory entry for *agent_id*.\n\nAgents call this endpoint after completing a task to record what they\naccomplished, whether it succeeded, and any lessons learned.\n\nThe ``task_id`` field is optional but recommended for correlation\nwith task history (``GET /agents/{id}/history``).\n\nDesign reference: MIRIX \u00a74.2 \u2014 \"each completed task episode is\nappended to the agent's episodic log; the log is never overwritten,\npreserving full recall history.\"  Contrasts with NOTES.md (single\nsummary file that is overwritten on ``/summarize``).",
+        "operationId": "add_episode_agents__agent_id__memory_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EpisodeCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Episode"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add an episodic memory entry for an agent"
+      }
+    },
+    "/agents/{agent_id}/memory/{episode_id}": {
+      "delete": {
+        "description": "Delete the episode identified by *episode_id* from *agent_id*'s log.\n\nRewrites the JSONL file atomically \u2014 all other episodes are preserved.\nReturns 404 when the agent or episode is not found.\n\nUse case: agents can prune obsolete or incorrect episodes to keep the\nmemory store relevant.  Unlike NOTES.md, individual episodes can be\nremoved without losing the entire history.",
+        "operationId": "delete_episode_agents__agent_id__memory__episode_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "episode_id",
+            "required": true,
+            "schema": {
+              "title": "Episode Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Delete Episode Agents  Agent Id  Memory  Episode Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete a specific episodic memory entry"
       }
     },
     "/agents/{agent_id}/message": {

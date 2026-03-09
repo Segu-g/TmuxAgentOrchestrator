@@ -32,6 +32,8 @@ from webauthn.helpers.structs import (
 from tmux_orchestrator.agents.base import Task
 from tmux_orchestrator.bus import Message, MessageType
 from tmux_orchestrator.config import AgentRole
+from tmux_orchestrator.episode_store import EpisodeNotFoundError, EpisodeStore
+from tmux_orchestrator.schemas import Episode, EpisodeCreate
 from tmux_orchestrator.web.ws import WebSocketHub
 
 logger = logging.getLogger(__name__)
@@ -5157,6 +5159,111 @@ def create_app(
                 detail=f"Agent {agent_id!r} is not a member of group {group_name!r}",
             )
         return {"name": group_name, "agent_id": agent_id, "removed": True}
+
+    # ------------------------------------------------------------------
+    # Episodic memory — MIRIX-inspired per-agent episode log (v1.0.28)
+    # DESIGN.md §10.28; arXiv:2507.07957 (Wang & Chen, 2025)
+    # ------------------------------------------------------------------
+
+    _orch_config = getattr(orchestrator, "config", None)
+    _episode_store = EpisodeStore(
+        root_dir=getattr(_orch_config, "mailbox_dir", "~/.tmux_orchestrator"),
+        session_name=getattr(_orch_config, "session_name", "orchestrator"),
+    )
+
+    @app.get(
+        "/agents/{agent_id}/memory",
+        summary="List episodic memory entries for an agent",
+        dependencies=[Depends(auth)],
+    )
+    async def list_episodes(agent_id: str, limit: int = 20) -> list[Episode]:
+        """Return the most recent *limit* episodic memory entries for *agent_id*.
+
+        Episodic memory records past task completions with a human-readable
+        summary, outcome classification (success/failure/partial), and lessons
+        learned.  Entries are returned newest-first.
+
+        Design reference:
+        - Wang & Chen, "MIRIX: Multi-Agent Memory System for LLM-Based Agents",
+          arXiv:2507.07957, 2025 — episodic memory achieves 35% higher accuracy
+          than RAG baseline while reducing storage by 99.9%.
+        - "Position: Episodic Memory is the Missing Piece for Long-Term LLM
+          Agents", arXiv:2502.06975, 2025.
+
+        The 404 is only raised when the agent is completely unknown to the
+        registry.  A known agent with *no* episodes returns an empty list.
+        Pass ``?limit=N`` to control how many entries are returned (default 20).
+        """
+        if orchestrator.get_agent(agent_id) is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Agent {agent_id!r} not found",
+            )
+        records = _episode_store.list(agent_id, limit=min(limit, 200))
+        return [Episode(**r) for r in records]
+
+    @app.post(
+        "/agents/{agent_id}/memory",
+        summary="Add an episodic memory entry for an agent",
+        status_code=201,
+        dependencies=[Depends(auth)],
+    )
+    async def add_episode(agent_id: str, body: EpisodeCreate) -> Episode:
+        """Append a new episodic memory entry for *agent_id*.
+
+        Agents call this endpoint after completing a task to record what they
+        accomplished, whether it succeeded, and any lessons learned.
+
+        The ``task_id`` field is optional but recommended for correlation
+        with task history (``GET /agents/{id}/history``).
+
+        Design reference: MIRIX §4.2 — "each completed task episode is
+        appended to the agent's episodic log; the log is never overwritten,
+        preserving full recall history."  Contrasts with NOTES.md (single
+        summary file that is overwritten on ``/summarize``).
+        """
+        if orchestrator.get_agent(agent_id) is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Agent {agent_id!r} not found",
+            )
+        record = _episode_store.append(
+            agent_id,
+            summary=body.summary,
+            outcome=body.outcome,
+            lessons=body.lessons,
+            task_id=body.task_id,
+        )
+        return Episode(**record)
+
+    @app.delete(
+        "/agents/{agent_id}/memory/{episode_id}",
+        summary="Delete a specific episodic memory entry",
+        dependencies=[Depends(auth)],
+    )
+    async def delete_episode(agent_id: str, episode_id: str) -> dict:
+        """Delete the episode identified by *episode_id* from *agent_id*'s log.
+
+        Rewrites the JSONL file atomically — all other episodes are preserved.
+        Returns 404 when the agent or episode is not found.
+
+        Use case: agents can prune obsolete or incorrect episodes to keep the
+        memory store relevant.  Unlike NOTES.md, individual episodes can be
+        removed without losing the entire history.
+        """
+        if orchestrator.get_agent(agent_id) is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Agent {agent_id!r} not found",
+            )
+        try:
+            _episode_store.delete(agent_id, episode_id)
+        except EpisodeNotFoundError:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Episode {episode_id!r} not found for agent {agent_id!r}",
+            )
+        return {"agent_id": agent_id, "episode_id": episode_id, "deleted": True}
 
     # ------------------------------------------------------------------
     # WebSocket — session cookie OR API key query param

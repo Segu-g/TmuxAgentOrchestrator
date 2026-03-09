@@ -329,6 +329,12 @@ class _MockOrchestratorForHistory:
         }
         self._director_pending: list = []
         self._dispatch_task = None
+        # Minimal config stub required by create_app (EpisodeStore, etc.)
+        self.config = OrchestratorConfig(
+            session_name="test",
+            agents=[],
+            mailbox_dir="~/.tmux_orchestrator",
+        )
 
     def list_agents(self) -> list:
         return [{"id": "agent-1", "status": "IDLE"}]

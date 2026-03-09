@@ -9,7 +9,7 @@ Reference: Pydantic v2 model validation (https://docs.pydantic.dev/latest/)
 """
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -154,3 +154,33 @@ def parse_status_payload(payload: dict[str, Any]) -> _BasePayload:
 def parse_result_payload(payload: dict[str, Any]) -> TaskResultPayload:
     """Validate and return a typed RESULT payload model."""
     return TaskResultPayload.model_validate(payload)
+
+
+# ---------------------------------------------------------------------------
+# Episodic memory (MIRIX-inspired, arXiv:2507.07957)
+# ---------------------------------------------------------------------------
+
+
+class EpisodeCreate(BaseModel):
+    """Request body for ``POST /agents/{id}/memory``."""
+
+    summary: str = Field(..., description="1–2 sentence summary of what was accomplished.")
+    outcome: Literal["success", "failure", "partial"] = Field(
+        ..., description="Task outcome classification."
+    )
+    lessons: str = Field(
+        default="",
+        description="Free-text knowledge to carry forward (optional).",
+    )
+    task_id: Optional[str] = Field(
+        default=None,
+        description="The task ID that produced this episode (for correlation).",
+    )
+
+
+class Episode(EpisodeCreate):
+    """A persisted episode record returned by the memory API."""
+
+    id: str = Field(..., description="Auto-generated UUID for this episode.")
+    agent_id: str = Field(..., description="The agent that owns this episode.")
+    created_at: str = Field(..., description="ISO 8601 UTC creation timestamp.")
