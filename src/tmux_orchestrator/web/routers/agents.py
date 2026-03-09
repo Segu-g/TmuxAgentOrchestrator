@@ -17,6 +17,12 @@ from pydantic import BaseModel, Field
 
 from tmux_orchestrator.agents.base import Task
 from tmux_orchestrator.application.context_compression import TfIdfContextCompressor
+from tmux_orchestrator.application.use_cases import (
+    GetAgentDTO,
+    GetAgentUseCase,
+    ListAgentsDTO,
+    ListAgentsUseCase,
+)
 from tmux_orchestrator.bus import Message, MessageType
 from tmux_orchestrator.config import AgentRole
 from tmux_orchestrator.web.schemas import (
@@ -122,7 +128,9 @@ def build_agents_router(
 
     @router.get("/agents", summary="List agents and their status", dependencies=[Depends(auth)])
     async def list_agents() -> list[dict]:
-        return orchestrator.list_agents()
+        uc = ListAgentsUseCase(orchestrator)
+        result = await uc.execute(ListAgentsDTO())
+        return result.to_list()
     
     @router.get("/agents/tree", summary="Agent hierarchy as nested tree", dependencies=[Depends(auth)])
     async def agents_tree() -> list[dict]:
@@ -156,13 +164,14 @@ def build_agents_router(
     
         Reference: DESIGN.md §10.40 (v1.1.4).
         """
-        agent_dict = orchestrator.get_agent_dict(agent_id)
-        if agent_dict is None:
+        uc = GetAgentUseCase(orchestrator)
+        result = await uc.execute(GetAgentDTO(agent_id=agent_id))
+        if not result.found:
             raise HTTPException(
                 status_code=404,
                 detail=f"Agent {agent_id!r} not found",
             )
-        return agent_dict
+        return result.to_dict()
     
     @router.delete("/agents/{agent_id}", summary="Stop an agent", dependencies=[Depends(auth)])
     async def stop_agent(agent_id: str) -> AgentKillResponse:

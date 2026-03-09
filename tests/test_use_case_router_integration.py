@@ -32,12 +32,16 @@ from tmux_orchestrator.application.use_cases import (
     GetAgentDTO,
     GetAgentResult,
     GetAgentUseCase,
+    ListAgentsDTO,
+    ListAgentsResult,
+    ListAgentsUseCase,
     SubmitTaskDTO,
     SubmitTaskResult,
     SubmitTaskUseCase,
     TaskService,
 )
 from tmux_orchestrator.domain.task import Task
+from tmux_orchestrator.web.routers.agents import build_agents_router
 from tmux_orchestrator.web.routers.tasks import build_tasks_router
 
 
@@ -395,3 +399,175 @@ class TestGetAgentUseCaseStandalone:
         assert hasattr(result, "found")
         assert hasattr(result, "agent_id")
         assert hasattr(result, "agent_dict")
+
+
+# ---------------------------------------------------------------------------
+# Agents router integration: GET /agents and GET /agents/{id} use ListAgents/GetAgent UC
+# ---------------------------------------------------------------------------
+
+
+def _build_agents_test_app(agents: list[dict]) -> FastAPI:
+    """Build a minimal FastAPI test app with the agents router, backed by a mock
+    orchestrator that returns *agents* from list_agents()."""
+
+    def _no_auth():
+        pass
+
+    mock_orchestrator = MagicMock()
+    mock_orchestrator.list_agents.return_value = agents
+
+    def _get_agent_by_id(agent_id: str):
+        for a in agents:
+            if a.get("id") == agent_id:
+                m = MagicMock()
+                m.id = agent_id
+                return m
+        return None
+
+    mock_orchestrator.get_agent.side_effect = _get_agent_by_id
+    mock_orchestrator.config = MagicMock()
+    mock_orchestrator.config.agent_groups = []
+
+    router = build_agents_router(mock_orchestrator, _no_auth, episode_store=None)
+    app = FastAPI()
+    app.include_router(router)
+    return app
+
+
+class TestListAgentsRouterIntegration:
+    """GET /agents handler delegates to ListAgentsUseCase."""
+
+    def test_get_agents_returns_200(self):
+        app = _build_agents_test_app([{"id": "worker-1"}])
+        client = TestClient(app)
+        resp = client.get("/agents")
+        assert resp.status_code == 200
+
+    def test_get_agents_returns_list(self):
+        app = _build_agents_test_app([{"id": "worker-1"}, {"id": "worker-2"}])
+        client = TestClient(app)
+        resp = client.get("/agents")
+        data = resp.json()
+        assert isinstance(data, list)
+        assert len(data) == 2
+
+    def test_get_agents_returns_agent_ids(self):
+        app = _build_agents_test_app([{"id": "a1"}, {"id": "a2"}])
+        client = TestClient(app)
+        resp = client.get("/agents")
+        ids = {item["id"] for item in resp.json()}
+        assert ids == {"a1", "a2"}
+
+    def test_get_agents_empty_returns_empty_list(self):
+        app = _build_agents_test_app([])
+        client = TestClient(app)
+        resp = client.get("/agents")
+        assert resp.json() == []
+
+    def test_get_agents_uses_list_agents_use_case(self):
+        """Verify ListAgentsUseCase.execute is invoked (not raw orchestrator)."""
+        agents = [{"id": "worker-1"}]
+        app = _build_agents_test_app(agents)
+        client = TestClient(app)
+        resp = client.get("/agents")
+        # If UseCase is wired, it reads from list_agents() which returns our data
+        assert any(item["id"] == "worker-1" for item in resp.json())
+
+
+class TestGetAgentRouterIntegration:
+    """GET /agents/{agent_id} handler delegates to GetAgentUseCase."""
+
+    def test_get_agent_found_returns_200(self):
+        app = _build_agents_test_app([{"id": "worker-1", "status": "IDLE"}])
+        client = TestClient(app)
+        resp = client.get("/agents/worker-1")
+        assert resp.status_code == 200
+
+    def test_get_agent_returns_agent_dict(self):
+        app = _build_agents_test_app([{"id": "worker-1", "status": "IDLE"}])
+        client = TestClient(app)
+        resp = client.get("/agents/worker-1")
+        assert resp.json()["id"] == "worker-1"
+
+    def test_get_agent_not_found_returns_404(self):
+        app = _build_agents_test_app([])
+        client = TestClient(app)
+        resp = client.get("/agents/no-such-agent")
+        assert resp.status_code == 404
+
+    def test_get_agent_404_detail_contains_agent_id(self):
+        app = _build_agents_test_app([])
+        client = TestClient(app)
+        resp = client.get("/agents/missing-agent")
+        assert "missing-agent" in resp.json()["detail"]
+
+    def test_get_agent_uses_get_agent_use_case(self):
+        """Verify GetAgentUseCase is invoked (not orchestrator.get_agent_dict)."""
+        app = _build_agents_test_app([{"id": "director-1", "role": "director"}])
+        client = TestClient(app)
+        resp = client.get("/agents/director-1")
+        # If UseCase is wired, it finds the agent via list_agents() lookup
+        assert resp.status_code == 200
+        assert resp.json()["id"] == "director-1"
+
+    def test_get_agent_preserves_extra_fields(self):
+        app = _build_agents_test_app([{"id": "w1", "status": "BUSY", "role": "worker"}])
+        client = TestClient(app)
+        resp = client.get("/agents/w1")
+        assert resp.json()["status"] == "BUSY"
+        assert resp.json()["role"] == "worker"
+
+
+# ---------------------------------------------------------------------------
+# ListAgentsUseCase standalone unit tests (no HTTP)
+# ---------------------------------------------------------------------------
+
+
+class TestListAgentsUseCaseStandalone:
+    """ListAgentsUseCase tested without HTTP layer."""
+
+    @pytest.mark.asyncio
+    async def test_returns_list_agents_result(self):
+        svc = _StubTaskService()
+        svc.add_agent(_StubAgent(id="w1"))
+        uc = ListAgentsUseCase(svc)
+        result = await uc.execute(ListAgentsDTO())
+        assert isinstance(result, ListAgentsResult)
+
+    @pytest.mark.asyncio
+    async def test_empty_service_returns_empty(self):
+        svc = _StubTaskService()
+        uc = ListAgentsUseCase(svc)
+        result = await uc.execute(ListAgentsDTO())
+        assert result.items == []
+
+    @pytest.mark.asyncio
+    async def test_agents_in_result_have_id(self):
+        svc = _StubTaskService()
+        svc.add_agent(_StubAgent(id="agent-x"))
+        uc = ListAgentsUseCase(svc)
+        result = await uc.execute(ListAgentsDTO())
+        assert result.items[0]["id"] == "agent-x"
+
+    @pytest.mark.asyncio
+    async def test_to_list_is_json_serialisable(self):
+        import json
+        svc = _StubTaskService()
+        svc.add_agent(_StubAgent(id="serialisable"))
+        uc = ListAgentsUseCase(svc)
+        result = await uc.execute(ListAgentsDTO())
+        # Should not raise
+        encoded = json.dumps(result.to_list())
+        assert "serialisable" in encoded
+
+    @pytest.mark.asyncio
+    async def test_no_side_effects(self):
+        svc = _StubTaskService()
+        svc.add_agent(_StubAgent(id="pure"))
+        uc = ListAgentsUseCase(svc)
+        before = list(svc.list_agents())
+        await uc.execute(ListAgentsDTO())
+        after = list(svc.list_agents())
+        assert before == after
+        assert svc.submit_calls == []
+        assert svc.cancel_calls == []

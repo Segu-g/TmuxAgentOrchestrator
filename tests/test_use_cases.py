@@ -29,6 +29,9 @@ from tmux_orchestrator.application.use_cases import (
     GetAgentDTO,
     GetAgentResult,
     GetAgentUseCase,
+    ListAgentsDTO,
+    ListAgentsResult,
+    ListAgentsUseCase,
     SubmitTaskDTO,
     SubmitTaskResult,
     SubmitTaskUseCase,
@@ -503,3 +506,132 @@ class TestGetAgentUseCase:
         assert GDTO is GetAgentDTO
         assert GR is GetAgentResult
         assert GUC is GetAgentUseCase
+
+
+# ---------------------------------------------------------------------------
+# ListAgentsUseCase tests
+# ---------------------------------------------------------------------------
+
+
+class TestListAgentsUseCase:
+    """Tests for ListAgentsUseCase — query use case for listing all agents."""
+
+    @pytest.mark.asyncio
+    async def test_execute_returns_list_agents_result(self):
+        svc = StubTaskService()
+        uc = ListAgentsUseCase(svc)
+        result = await uc.execute(ListAgentsDTO())
+        assert isinstance(result, ListAgentsResult)
+
+    @pytest.mark.asyncio
+    async def test_empty_service_returns_empty_list(self):
+        svc = StubTaskService()
+        uc = ListAgentsUseCase(svc)
+        result = await uc.execute(ListAgentsDTO())
+        assert result.items == []
+
+    @pytest.mark.asyncio
+    async def test_single_agent_returned(self):
+        svc = StubTaskService()
+        svc.add_agent(_StubAgent(id="worker-1"))
+        uc = ListAgentsUseCase(svc)
+        result = await uc.execute(ListAgentsDTO())
+        assert len(result.items) == 1
+        assert result.items[0]["id"] == "worker-1"
+
+    @pytest.mark.asyncio
+    async def test_multiple_agents_returned(self):
+        svc = StubTaskService()
+        svc.add_agent(_StubAgent(id="a1"))
+        svc.add_agent(_StubAgent(id="a2"))
+        svc.add_agent(_StubAgent(id="a3"))
+        uc = ListAgentsUseCase(svc)
+        result = await uc.execute(ListAgentsDTO())
+        ids = {item["id"] for item in result.items}
+        assert ids == {"a1", "a2", "a3"}
+
+    @pytest.mark.asyncio
+    async def test_to_list_returns_plain_list(self):
+        svc = StubTaskService()
+        svc.add_agent(_StubAgent(id="w1"))
+        uc = ListAgentsUseCase(svc)
+        result = await uc.execute(ListAgentsDTO())
+        lst = result.to_list()
+        assert isinstance(lst, list)
+        assert lst[0]["id"] == "w1"
+
+    @pytest.mark.asyncio
+    async def test_to_list_is_copy(self):
+        """to_list() returns a new list — mutating it does not affect result.items."""
+        svc = StubTaskService()
+        svc.add_agent(_StubAgent(id="w1"))
+        uc = ListAgentsUseCase(svc)
+        result = await uc.execute(ListAgentsDTO())
+        lst = result.to_list()
+        lst.clear()
+        assert len(result.items) == 1  # original untouched
+
+    @pytest.mark.asyncio
+    async def test_does_not_mutate_service(self):
+        """ListAgentsUseCase is a pure query — no state changes."""
+        svc = StubTaskService()
+        svc.add_agent(_StubAgent(id="a1"))
+        uc = ListAgentsUseCase(svc)
+        before_agents = list(svc.list_agents())
+        await uc.execute(ListAgentsDTO())
+        after_agents = list(svc.list_agents())
+        assert before_agents == after_agents
+
+    @pytest.mark.asyncio
+    async def test_accepts_service_in_constructor(self):
+        svc = StubTaskService()
+        uc = ListAgentsUseCase(svc)
+        assert uc._service is svc
+
+    @pytest.mark.asyncio
+    async def test_successive_calls_return_fresh_snapshot(self):
+        """Each execute() call reflects current state — not a cached snapshot."""
+        svc = StubTaskService()
+        uc = ListAgentsUseCase(svc)
+        r1 = await uc.execute(ListAgentsDTO())
+        assert len(r1.items) == 0
+
+        svc.add_agent(_StubAgent(id="a1"))
+        r2 = await uc.execute(ListAgentsDTO())
+        assert len(r2.items) == 1
+
+    @pytest.mark.asyncio
+    async def test_list_agents_dto_empty_pass(self):
+        """ListAgentsDTO can be constructed without arguments."""
+        dto = ListAgentsDTO()
+        assert dto is not None
+
+    @pytest.mark.asyncio
+    async def test_list_agents_result_exported_from_package(self):
+        """ListAgentsUseCase and DTOs are importable from application package."""
+        from tmux_orchestrator.application import ListAgentsDTO as LDTO
+        from tmux_orchestrator.application import ListAgentsResult as LR
+        from tmux_orchestrator.application import ListAgentsUseCase as LUC
+        assert LDTO is ListAgentsDTO
+        assert LR is ListAgentsResult
+        assert LUC is ListAgentsUseCase
+
+    @pytest.mark.asyncio
+    async def test_result_items_contains_correct_fields(self):
+        """Each item dict contains at least the 'id' key from the service."""
+        svc = StubTaskService()
+        svc.add_agent(_StubAgent(id="worker-99"))
+        uc = ListAgentsUseCase(svc)
+        result = await uc.execute(ListAgentsDTO())
+        assert "id" in result.items[0]
+
+    @pytest.mark.asyncio
+    async def test_execute_called_twice_same_agents_count(self):
+        """Multiple calls with the same state return the same count."""
+        svc = StubTaskService()
+        svc.add_agent(_StubAgent(id="a"))
+        svc.add_agent(_StubAgent(id="b"))
+        uc = ListAgentsUseCase(svc)
+        r1 = await uc.execute(ListAgentsDTO())
+        r2 = await uc.execute(ListAgentsDTO())
+        assert len(r1.items) == len(r2.items) == 2

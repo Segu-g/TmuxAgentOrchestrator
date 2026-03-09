@@ -2880,3 +2880,73 @@ class AgentStatusMachine(RuleBasedStateMachine):
 **31/31 チェック PASSED**
 
 
+## §10.47 — v1.1.15: クエリ Use Case 層の完成 (`GetAgentUseCase` 配線 + `ListAgentsUseCase`)
+
+### Step 0 — 選定理由
+
+**選択: `GET /agents/{id}` → `GetAgentUseCase` 配線 + `ListAgentsUseCase` 追加**
+
+**候補比較:**
+
+| 候補 | 優先度 | 選択理由 / 見送り理由 |
+|------|--------|----------------------|
+| **`GET /agents/{id}` → `GetAgentUseCase` 配線 + `ListAgentsUseCase`** | **選択** | v1.1.14 で `GetAgentUseCase` を実装したが `web/routers/agents.py` の `GET /agents/{agent_id}` ハンドラーがまだ `orchestrator.get_agent_dict()` を直接呼んでいる。UseCase 層を完成させる最小スコープ。`ListAgentsUseCase` を追加することでクエリ側 CQRS を対称的に整理できる。実装コストは低く、テスト追加が容易で既存テストを壊さない。 |
+| チェックポイント永続化 SQLite | 見送り | SQLite スキーマ・`--resume` フラグ・ワークフロー状態再構築と範囲が広すぎる。 |
+| ProcessPort 抽象インターフェース | 見送り | `ClaudeCodeAgent` 全体の依存方向逆転を伴う大規模リファクタリング。 |
+| `/deliberate` スラッシュコマンド | 見送り | v1.0.32 で実装済み（`agent_plugin/commands/deliberate.md` が存在する）。 |
+| DriftMonitor セマンティック類似度 | 見送り | `sentence-transformers` 新依存が入る。コストパフォーマンスが低い。 |
+
+**選択しなかった理由:**
+- `GetAgentUseCase` 単体の配線のみでは実装が小さすぎ、デモの意義が薄い。
+  `ListAgentsUseCase` を追加することでコマンドとクエリの両 UseCase を完備し、イテレーションとして完結する。
+
+**実装スコープ:**
+1. `application/use_cases.py` に `ListAgentsUseCase` / `ListAgentsDTO` / `ListAgentsResult` を追加
+2. `web/routers/agents.py` の `GET /agents/{agent_id}` → `GetAgentUseCase` 委譲
+3. `web/routers/agents.py` の `GET /agents` → `ListAgentsUseCase` 委譲
+4. `tests/test_use_cases.py` に新 UseCase テスト追加 (目標 +20テスト)
+5. `tests/test_use_case_router_integration.py` に統合テスト追加 (目標 +10テスト)
+
+### Step 1 — Research
+
+**Query 1**: "CQRS query use case ListAgents GetAgent FastAPI Clean Architecture Python 2025"
+
+主要知見:
+- **Architecture Patterns with Python (cosmicpython.com)**: CQRS は「読み取り (クエリ) と書き込み (コマンド) を分離する」というシンプルな原則。`ListAgents` / `GetAgent` はクエリハンドラーとして実装し、読み取り専用モデルに作用させる。
+- **ivan-borovets/fastapi-clean-example** (GitHub 2025): CQRS パターン + FastAPI の参考実装。Interactor は `execute()` メソッドを持ち、リポジトリを DI で受け取る。
+- **python-cqrs** (PyPI, v5.0.0+): クエリの DTO / Result は `frozen=True` のデータクラスとして定義する。クエリ結果をドメインエンティティとして公開してはいけない。
+
+**References**:
+- cosmicpython CQRS chapter: https://www.cosmicpython.com/book/chapter_12_cqrs.html
+- ivan-borovets/fastapi-clean-example: https://github.com/ivan-borovets/fastapi-clean-example
+- python-cqrs PyPI: https://pypi.org/project/python-cqrs/
+
+**Query 2**: "query use case interactor read-only CQRS Python dataclass DTO list single resource 2025"
+
+主要知見:
+- **diator** (GitHub, Murad Akhundov): クエリハンドラーは `RequestHandler[Query, Result]` インターフェースを実装し、frozen dataclass を返す。リスト取得と単件取得は別クラスとして定義する。
+- **oneuptime CQRS 実装ガイド** (2026-01-22): 読み取り専用 UseCase は副作用を持ってはならない。List クエリは `Sequence[ItemDTO]` を、単件クエリは `Optional[ItemDTO]` を返す。
+- **CQRS with Python DEV Community** (akhundMurad): Query と Command の分離により、List/Get エンドポイントを Command 側の変更なしに最適化できる。
+
+**References**:
+- diator GitHub: https://github.com/akhundMurad/diator
+- How to Implement CQRS Pattern in Python: https://oneuptime.com/blog/post/2026-01-22-cqrs-pattern-python/view
+- Implementing CQRS in Python DEV: https://dev.to/akhundmurad/implementing-cqrs-in-python-41aj
+
+**Query 3**: "FastAPI router handler thin delegation use case layer separation concerns REST API best practices 2025"
+
+主要知見:
+- **Camillo Visini "Implementing FastAPI Services – Abstraction and Separation of Concerns"**: FastAPI ルーターハンドラーは「可能な限り薄く (thin)」設計し、入力受け取り・UseCase 呼び出し・例外変換・レスポンス整形の4ステップのみを担う。
+- **Medium "Building Production-Ready FastAPI Applications"** (2025): 本番 FastAPI アプリにはサービス/UseCase 層が不可欠。ハンドラーにビジネスロジックを書くと単体テストが困難になる。
+- **DEV Community "Layered Architecture & DI"**: 依存注入で UseCase を FastAPI ハンドラーに渡すと、テスト時にモックに差し替え可能になる。`orchestrator` オブジェクトをハンドラーの closure でキャプチャする既存パターンも同様に DI と見なせる。
+
+**References**:
+- Camillo Visini: https://camillovisini.com/coding/abstracting-fastapi-services
+- Production-Ready FastAPI 2025: https://medium.com/@abhinav.dobhal/building-production-ready-fastapi-applications-with-service-layer-architecture-in-2025-f3af8a6ac563
+- DEV Layered Architecture: https://dev.to/markoulis/layered-architecture-dependency-injection-a-recipe-for-clean-and-testable-fastapi-code-3ioo
+
+**実装への示唆:**
+1. `ListAgentsUseCase.execute(dto)` は `service.list_agents()` を呼び出し、`ListAgentsResult(items=list_of_dicts)` を返す。
+2. `GET /agents` ハンドラーを `ListAgentsUseCase` に委譲するだけで HTTP/ビジネスロジック分離が実現する。
+3. `GET /agents/{agent_id}` は `GetAgentUseCase` に委譲し、`not found` の場合にのみ HTTPException を raise する。
+

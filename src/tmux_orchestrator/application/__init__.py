@@ -30,6 +30,8 @@ Public re-exports:
         CancelTaskResult,
         SubmitTaskUseCase,
         CancelTaskUseCase,
+        ListAgentsUseCase,
+        GetAgentUseCase,
     )
 
 References:
@@ -60,6 +62,9 @@ from tmux_orchestrator.application.use_cases import (
     GetAgentDTO,
     GetAgentResult,
     GetAgentUseCase,
+    ListAgentsDTO,
+    ListAgentsResult,
+    ListAgentsUseCase,
     SubmitTaskDTO,
     SubmitTaskResult,
     SubmitTaskUseCase,
@@ -83,6 +88,9 @@ __all__ = [
     "GetAgentDTO",
     "GetAgentResult",
     "GetAgentUseCase",
+    "ListAgentsDTO",
+    "ListAgentsResult",
+    "ListAgentsUseCase",
     "NullAutoScaler",
     "NullCheckpointStore",
     "NullContextMonitor",

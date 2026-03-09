@@ -343,3 +343,70 @@ class GetAgentUseCase:
                     agent_dict=agent_info,
                 )
         return GetAgentResult(found=False, agent_id=dto.agent_id)
+
+
+# ---------------------------------------------------------------------------
+# ListAgentsUseCase
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ListAgentsDTO:
+    """Input DTO for ``ListAgentsUseCase``.
+
+    Currently carries no filter fields; the use case returns all registered
+    agents.  Fields can be added here in future (e.g. ``status_filter``,
+    ``tag_filter``) without touching the Web layer.
+    """
+
+    pass  # no filters for v1.1.15; extend here without breaking callers
+
+
+@dataclass
+class ListAgentsResult:
+    """Output DTO for ``ListAgentsUseCase``.
+
+    ``items`` is a list of agent state dicts with the same shape as the items
+    returned by ``TaskService.list_agents()`` and the ``GET /agents`` endpoint.
+
+    Usage::
+
+        uc = ListAgentsUseCase(orchestrator)
+        result = await uc.execute(ListAgentsDTO())
+        return result.items   # JSON-serialisable list[dict]
+    """
+
+    items: list[dict[str, Any]] = field(default_factory=list)
+
+    def to_list(self) -> list[dict[str, Any]]:
+        """Return a plain list suitable for JSON serialisation."""
+        return list(self.items)
+
+
+class ListAgentsUseCase:
+    """Return a snapshot list of all registered agents.
+
+    This is a **query** use case — it never mutates state and is safe to call
+    concurrently.  The result is a ``ListAgentsResult`` whose ``items`` list
+    mirrors ``TaskService.list_agents()``.
+
+    Design note: separating this from the FastAPI handler lets the TUI and CLI
+    adapters use the same logic without duplicating the ``list_agents()`` call.
+
+    Usage::
+
+        uc = ListAgentsUseCase(orchestrator)
+        result = await uc.execute(ListAgentsDTO())
+        return result.to_list()
+
+    Reference: CQRS query handler pattern (cosmicpython.com ch. 12, 2025);
+    DESIGN.md §10.47 (v1.1.15 — query use case layer completion).
+    """
+
+    def __init__(self, service: TaskService) -> None:
+        self._service = service
+
+    async def execute(self, dto: ListAgentsDTO) -> ListAgentsResult:  # noqa: ARG002
+        """Return all agents as a ``ListAgentsResult``."""
+        items = list(self._service.list_agents())
+        return ListAgentsResult(items=items)
