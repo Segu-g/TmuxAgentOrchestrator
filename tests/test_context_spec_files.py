@@ -324,8 +324,8 @@ agents:
         from unittest.mock import patch, MagicMock
 
         with (
-            patch("tmux_orchestrator.factory.TmuxInterface") as MockTmux,
-            patch("tmux_orchestrator.factory.WorktreeManager", side_effect=RuntimeError),
+            patch("tmux_orchestrator.application.factory.TmuxInterface") as MockTmux,
+            patch("tmux_orchestrator.application.factory.WorktreeManager", side_effect=RuntimeError),
             patch("tmux_orchestrator.agents.claude_code.ClaudeCodeAgent") as MockAgent,
         ):
             MockTmux.return_value = MagicMock()

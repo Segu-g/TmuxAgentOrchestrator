@@ -4098,4 +4098,61 @@ References:
 | `config.py` | `application/config.py` | YAML + dataclasses — filesystem 読み取りのみ、infra サービス依存なし |
 | `factory.py` | `application/factory.py` | Composition Root — application/infrastructure を配線する Application Service |
 | `orchestrator.py` | `application/orchestrator.py` | 純粋 asyncio dispatch loop — TmuxInterface は TYPE_CHECKING のみ (Protocol DI 済み) |
+
+
+## §10.60 — v1.1.28: Clean Architecture Migration Phase 6 — Final Cleanup (factory.py migration + test patch updates)
+
+### Step 0 — 選択理由
+
+**選択した機能**: Clean Architecture Migration Phase 6 — `factory.py` 実装の `application/factory.py` への移動と、18テストのパッチパスを `tmux_orchestrator.factory.*` → `tmux_orchestrator.application.factory.*` に更新。
+
+**理由**:
+- Phase 5 (v1.1.27) にて `application/factory.py` は re-export shim として存在するが、実装は ROOT `factory.py` に留まっていた。これを「実装は canonical location (`application/factory.py`) にあり、ROOT `factory.py` が shim になる」正しい Strangler Fig 構造に転換する。
+- 18テストが `tmux_orchestrator.factory.TmuxInterface` 等をパッチしているため、実装移動前にパッチパスの更新が必要。
+- `test_application_purity.py` の `_CROSS_LAYER_FILES` から `factory.py` を除去できる（移動後は purity rule に従うため）。
+- 循環インポート問題 (`Orchestrator` を `application/__init__` から除外) はすでに Phase 5 で解決済み — `application/__init__.py` には NOTE コメントで明示。
+
+**選択しなかったこと**:
+- ROOT `factory.py` shim の削除 — Strangler Fig 原則に従い既存の import パスを保護。shim は backward compat のため保持。
+- `application/__init__` への `Orchestrator` 再追加 — 循環インポートチェーンが深く、現在は NOTE コメントで直接 import を案内している。複雑なので GitHub Issue に記録。
+
+### Step 1 — Research
+
+**Query 1**: "Python circular import resolution lazy import TYPE_CHECKING clean architecture 2025"
+
+主要知見:
+- `TYPE_CHECKING` ガード: Instagram チームが開拓。型チェック時のみ import を実行、ランタイムでは実行しない。循環インポートの type-only 依存を解消。
+- Lazy import (関数内 import): PEP 810 で標準化の動きあり。関数呼び出し時のみ依存を解決する。`factory.py` では既に `from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent  # noqa: PLC0415` として実装済み。
+- Clean Architecture: MVC / Layered Architecture は自然に循環インポートを防ぐ — 依存の方向を一方向に強制する。
+
+References:
+- Volokh, "The Circular Import Trap in Python", https://medium.com/@denis.volokh/the-circular-import-trap-in-python-and-how-to-escape-it-9fb22925dab6 (2025)
+- Stefaan Lippens, "Yet another solution for circular imports with type hints in Python", https://www.stefaanlippens.net/circular-imports-type-hints-python.html (2025)
+- PEP 810 — Explicit lazy imports, https://peps.python.org/pep-0810/ (2025)
+
+**Query 2**: "Python unittest.mock patch module relocation test backward compatibility 2025"
+
+主要知見:
+- `patch("module.Symbol")` はシンボルが *bind されている場所* をパッチする。定義されている場所ではない。
+- 実装を移動する場合、テストのパッチパスも新しい canonical location に更新する必要がある。
+- ROOT shim が re-export した場合、パッチは ROOT shim をターゲットにしても動作することがある（Python の import メカニズムによる）が、確実性のためには canonical location を明示的にパッチすべき。
+- Python GitHub issue #117860: unittest.mock.patch がモジュールパス解決に関して 3.11+ で挙動変更あり。
+
+References:
+- Python docs, "unittest.mock", https://docs.python.org/3/library/unittest.mock.html (2025)
+- Python issue #117860, https://github.com/python/cpython/issues/117860 (2025)
+- Real Python, "Understanding the Python Mock Object Library", https://realpython.com/python-mock-library/ (2025)
+
+**Query 3**: "Python Composition Root factory pattern test patches canonical module location 2026"
+
+主要知見:
+- Factory Method / Composition Root は Application layer に配置するのが Clean Architecture の推奨。
+- テストは canonical location をパッチすることで、実装の移動に追随する。shim を経由したパッチは brittle。
+- faif/python-patterns (GitHub): Python パターンの標準的なコレクション — Factory, Abstract Factory が収録。
+- freecodecamp "How to Use the Factory Pattern in Python": Composition Root としての factory は依存グラフの配線責務を持つ。
+
+References:
+- faif/python-patterns, https://github.com/faif/python-patterns (2025)
+- freecodecamp, "How to Use the Factory Pattern in Python", https://www.freecodecamp.org/news/how-to-use-the-factory-pattern-in-python-a-practical-guide/ (2025)
+- refactoring.guru, "Factory Method in Python", https://refactoring.guru/design-patterns/factory-method/python/example (2025)
 | `main.py` | ROOT に留まる | CLI エントリポイント (typer) — Composition Root の最外殻 |

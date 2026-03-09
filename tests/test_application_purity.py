@@ -38,9 +38,10 @@ APP_DIR = Path(__file__).parent.parent / "src" / "tmux_orchestrator" / "applicat
 # dispatch loop that references infrastructure via TYPE_CHECKING-only imports or
 # root-level shims).  These are excluded from the strict purity check.
 # DESIGN.md §10.59 (v1.1.27 — Clean Architecture Phase 5)
+# DESIGN.md §10.60 (v1.1.28 — factory.py moved to canonical location; removed from exclusions)
 _CROSS_LAYER_FILES = frozenset([
     "config.py",       # uses yaml (stdlib-equivalent but classified as infra here)
-    "factory.py",      # Composition Root — wires application + infrastructure together
+    "factory.py",      # Composition Root — intentionally crosses layers (imports TmuxInterface, WorktreeManager)
     "orchestrator.py", # dispatch loop — imports via root shims (bus, registry, etc.)
 ])
 

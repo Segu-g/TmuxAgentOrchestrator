@@ -38,8 +38,8 @@ def _write_config(tmp_path: Path, content: str = BASIC_CONFIG) -> Path:
 def test_build_system_returns_three_components(tmp_path):
     cfg = _write_config(tmp_path)
     with (
-        patch("tmux_orchestrator.factory.TmuxInterface") as MockTmux,
-        patch("tmux_orchestrator.factory.WorktreeManager", side_effect=RuntimeError("not git")),
+        patch("tmux_orchestrator.application.factory.TmuxInterface") as MockTmux,
+        patch("tmux_orchestrator.application.factory.WorktreeManager", side_effect=RuntimeError("not git")),
         patch("tmux_orchestrator.agents.claude_code.ClaudeCodeAgent") as MockAgent,
     ):
         MockTmux.return_value = MagicMock()
@@ -57,8 +57,8 @@ def test_build_system_returns_three_components(tmp_path):
 def test_build_system_registers_agents(tmp_path):
     cfg = _write_config(tmp_path)
     with (
-        patch("tmux_orchestrator.factory.TmuxInterface") as MockTmux,
-        patch("tmux_orchestrator.factory.WorktreeManager", side_effect=RuntimeError("not git")),
+        patch("tmux_orchestrator.application.factory.TmuxInterface") as MockTmux,
+        patch("tmux_orchestrator.application.factory.WorktreeManager", side_effect=RuntimeError("not git")),
         patch("tmux_orchestrator.agents.claude_code.ClaudeCodeAgent") as MockAgent,
     ):
         MockTmux.return_value = MagicMock()
@@ -80,8 +80,8 @@ agents:
 """
     cfg = _write_config(tmp_path, bad_config)
     with (
-        patch("tmux_orchestrator.factory.TmuxInterface") as MockTmux,
-        patch("tmux_orchestrator.factory.WorktreeManager", side_effect=RuntimeError("not git")),
+        patch("tmux_orchestrator.application.factory.TmuxInterface") as MockTmux,
+        patch("tmux_orchestrator.application.factory.WorktreeManager", side_effect=RuntimeError("not git")),
     ):
         MockTmux.return_value = MagicMock()
         with pytest.raises(ValueError, match="Unknown agent type"):
@@ -93,8 +93,8 @@ def test_build_system_confirm_kill_forwarded(tmp_path):
     cfg = _write_config(tmp_path, "session_name: s\nagents: []\n")
     callback = MagicMock(return_value=True)
     with (
-        patch("tmux_orchestrator.factory.TmuxInterface") as MockTmux,
-        patch("tmux_orchestrator.factory.WorktreeManager", side_effect=RuntimeError),
+        patch("tmux_orchestrator.application.factory.TmuxInterface") as MockTmux,
+        patch("tmux_orchestrator.application.factory.WorktreeManager", side_effect=RuntimeError),
     ):
         MockTmux.return_value = MagicMock()
         build_system(cfg, confirm_kill=callback)
@@ -189,8 +189,8 @@ agents: []
             pass
 
     with (
-        patch("tmux_orchestrator.factory.TmuxInterface") as MockTmux,
-        patch("tmux_orchestrator.factory.WorktreeManager", new=_CapturingWM),
+        patch("tmux_orchestrator.application.factory.TmuxInterface") as MockTmux,
+        patch("tmux_orchestrator.application.factory.WorktreeManager", new=_CapturingWM),
     ):
         MockTmux.return_value = MagicMock()
         build_system(cfg_file)
@@ -229,8 +229,8 @@ def test_build_system_config_path_parent_used_when_no_repo_root(tmp_path):
             pass
 
     with (
-        patch("tmux_orchestrator.factory.TmuxInterface") as MockTmux,
-        patch("tmux_orchestrator.factory.WorktreeManager", new=_CapturingWM),
+        patch("tmux_orchestrator.application.factory.TmuxInterface") as MockTmux,
+        patch("tmux_orchestrator.application.factory.WorktreeManager", new=_CapturingWM),
     ):
         MockTmux.return_value = MagicMock()
         build_system(cfg_file)

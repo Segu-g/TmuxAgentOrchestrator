@@ -109,8 +109,8 @@ agents:
         cfg_path.write_text(yaml_content)
 
         with (
-            patch("tmux_orchestrator.factory.TmuxInterface") as MockTmux,
-            patch("tmux_orchestrator.factory.WorktreeManager", side_effect=RuntimeError("not git")),
+            patch("tmux_orchestrator.application.factory.TmuxInterface") as MockTmux,
+            patch("tmux_orchestrator.application.factory.WorktreeManager", side_effect=RuntimeError("not git")),
             patch("tmux_orchestrator.agents.claude_code.ClaudeCodeAgent") as MockAgent,
         ):
             MockTmux.return_value = MagicMock()
@@ -146,8 +146,8 @@ agents:
         cfg_path.write_text(yaml_content)
 
         with (
-            patch("tmux_orchestrator.factory.TmuxInterface") as MockTmux,
-            patch("tmux_orchestrator.factory.WorktreeManager", side_effect=RuntimeError("not git")),
+            patch("tmux_orchestrator.application.factory.TmuxInterface") as MockTmux,
+            patch("tmux_orchestrator.application.factory.WorktreeManager", side_effect=RuntimeError("not git")),
             patch("tmux_orchestrator.agents.claude_code.ClaudeCodeAgent") as MockAgent,
         ):
             MockTmux.return_value = MagicMock()
@@ -174,8 +174,8 @@ agents:
         cfg_path.write_text(yaml_content)
 
         with (
-            patch("tmux_orchestrator.factory.TmuxInterface") as MockTmux,
-            patch("tmux_orchestrator.factory.WorktreeManager", side_effect=RuntimeError("not git")),
+            patch("tmux_orchestrator.application.factory.TmuxInterface") as MockTmux,
+            patch("tmux_orchestrator.application.factory.WorktreeManager", side_effect=RuntimeError("not git")),
         ):
             MockTmux.return_value = MagicMock()
             from tmux_orchestrator.factory import build_system
@@ -201,8 +201,8 @@ agents:
         cfg_path.write_text(yaml_content)
 
         with (
-            patch("tmux_orchestrator.factory.TmuxInterface") as MockTmux,
-            patch("tmux_orchestrator.factory.WorktreeManager", side_effect=RuntimeError("not git")),
+            patch("tmux_orchestrator.application.factory.TmuxInterface") as MockTmux,
+            patch("tmux_orchestrator.application.factory.WorktreeManager", side_effect=RuntimeError("not git")),
             patch("tmux_orchestrator.agents.claude_code.ClaudeCodeAgent") as MockAgent,
         ):
             MockTmux.return_value = MagicMock()
