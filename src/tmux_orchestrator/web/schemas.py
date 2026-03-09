@@ -169,6 +169,41 @@ class TaskCompleteBody(BaseModel):
     exit_code: int = 0
 
 
+class AgentBriefRequest(BaseModel):
+    """Request body for POST /agents/{agent_id}/brief.
+
+    Injects an out-of-band context message into a running agent's worktree.
+    The orchestrator writes ``__brief__/{brief_id}.txt`` into the agent's
+    worktree directory and sends ``__BRIEF__:{brief_id}`` to the agent's tmux
+    pane so it can retrieve the content with the ``/read-brief`` slash command.
+
+    Design references:
+    - OpenAI Agents SDK "Context Management" (2025): adding data to agent
+      instructions must go through the conversation history.
+    - LangChain "Context Engineering in Agents" (2025): runtime context changes
+      are transient (per-call); lifecycle changes persist to state.
+    - Claude Code Hooks Reference — ``additionalContext`` injection (2025).
+    - DESIGN.md §10.43 (v1.1.7)
+    """
+
+    content: str
+    brief_id: str | None = None  # auto-generated UUID when None
+
+    @field_validator("content")
+    @classmethod
+    def content_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("content must not be empty")
+        return v
+
+    @field_validator("content")
+    @classmethod
+    def content_max_length(cls, v: str) -> str:
+        if len(v) > 4096:
+            raise ValueError("content must not exceed 4096 characters")
+        return v
+
+
 class ChangeStrategyRequest(BaseModel):
     """Request body for POST /agents/{agent_id}/change-strategy.
 

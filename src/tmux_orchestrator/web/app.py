@@ -41,6 +41,7 @@ from tmux_orchestrator.web.ws import WebSocketHub
 # Reference: DESIGN.md §10.41 (v1.1.5); FastAPI "Bigger Applications" guide.
 # ---------------------------------------------------------------------------
 from tmux_orchestrator.web.schemas import (  # noqa: E402
+    AgentBriefRequest,
     AgentKillResponse,
     AgentSelectorModel,
     AdrWorkflowSubmit,

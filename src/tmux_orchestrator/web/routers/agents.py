@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -17,6 +18,7 @@ from tmux_orchestrator.agents.base import Task
 from tmux_orchestrator.bus import Message, MessageType
 from tmux_orchestrator.config import AgentRole
 from tmux_orchestrator.web.schemas import (
+    AgentBriefRequest,
     AgentKillResponse,
     ChangeStrategyRequest,
     DirectorChat,
@@ -636,6 +638,73 @@ def build_agents_router(
         checker = WorktreeIntegrityChecker(repo_root=repo_root)
         status = await checker.check_path(agent_id, worktree_path)
         return status.to_dict()
+
+    @router.post(
+        "/agents/{agent_id}/brief",
+        summary="Inject an out-of-band context brief to a running agent",
+        dependencies=[Depends(auth)],
+    )
+    async def brief_agent(agent_id: str, body: AgentBriefRequest) -> dict:
+        """Inject a context message into a running agent without interrupting its task.
+
+        Writes ``__brief__/{brief_id}.txt`` into the agent's worktree directory
+        and sends ``__BRIEF__:{brief_id}`` to the agent's tmux pane.  The agent
+        can retrieve the brief content with the ``/read-brief`` slash command.
+
+        When the agent has no worktree (``isolate: false``), the brief file is
+        written to the orchestrator's current working directory instead.
+
+        Returns:
+        - ``brief_id``: UUID string identifying the brief file.
+        - ``delivered``: ``true`` when ``notify_stdin`` succeeded.
+        - ``worktree_path``: absolute path of the directory where the file was written.
+
+        Returns 404 when *agent_id* is not registered.
+
+        Design references:
+        - OpenAI Agents SDK "Context Management" (2025):
+          https://openai.github.io/openai-agents-python/context/
+        - LangChain "Context Engineering in Agents" (2025):
+          https://docs.langchain.com/oss/python/langchain/context-engineering
+        - DESIGN.md §10.43 (v1.1.7)
+        """
+        agent = orchestrator.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
+
+        brief_id = body.brief_id or str(uuid.uuid4())
+
+        # Determine the directory to write the brief file into.
+        # Priority: agent's worktree_path > orchestrator cwd > process cwd.
+        worktree_path: Path | None = getattr(agent, "worktree_path", None)
+        if worktree_path is None:
+            # isolate: false — fall back to orchestrator working directory
+            worktree_path = Path.cwd()
+
+        brief_dir = worktree_path / "__brief__"
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, brief_dir.mkdir, 0o755, True, True)
+
+        brief_file = brief_dir / f"{brief_id}.txt"
+        await loop.run_in_executor(None, brief_file.write_text, body.content, "utf-8")
+
+        # Notify the agent via its tmux pane (same mechanism as P2P __MSG__).
+        delivered = False
+        try:
+            await agent.notify_stdin(f"__BRIEF__:{brief_id}")
+            delivered = True
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "brief_agent: notify_stdin failed for agent %s brief %s",
+                agent_id,
+                brief_id,
+            )
+
+        return {
+            "brief_id": brief_id,
+            "delivered": delivered,
+            "worktree_path": str(worktree_path),
+        }
 
     @router.post("/agents/{agent_id}/message", summary="Send a message to an agent", dependencies=[Depends(auth)])
     async def send_message(agent_id: str, body: SendMessage) -> dict:

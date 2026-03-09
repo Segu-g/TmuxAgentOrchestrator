@@ -50,6 +50,31 @@
         "title": "AdrWorkflowSubmit",
         "type": "object"
       },
+      "AgentBriefRequest": {
+        "description": "Request body for POST /agents/{agent_id}/brief.\n\nInjects an out-of-band context message into a running agent's worktree.\nThe orchestrator writes ``__brief__/{brief_id}.txt`` into the agent's\nworktree directory and sends ``__BRIEF__:{brief_id}`` to the agent's tmux\npane so it can retrieve the content with the ``/read-brief`` slash command.\n\nDesign references:\n- OpenAI Agents SDK \"Context Management\" (2025): adding data to agent\n  instructions must go through the conversation history.\n- LangChain \"Context Engineering in Agents\" (2025): runtime context changes\n  are transient (per-call); lifecycle changes persist to state.\n- Claude Code Hooks Reference \u2014 ``additionalContext`` injection (2025).\n- DESIGN.md \u00a710.43 (v1.1.7)",
+        "properties": {
+          "brief_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brief Id"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "AgentBriefRequest",
+        "type": "object"
+      },
       "AgentKillResponse": {
         "properties": {
           "agent_id": {
@@ -1803,6 +1828,58 @@
           }
         },
         "summary": "Get a single agent by ID"
+      }
+    },
+    "/agents/{agent_id}/brief": {
+      "post": {
+        "description": "Inject a context message into a running agent without interrupting its task.\n\nWrites ``__brief__/{brief_id}.txt`` into the agent's worktree directory\nand sends ``__BRIEF__:{brief_id}`` to the agent's tmux pane.  The agent\ncan retrieve the brief content with the ``/read-brief`` slash command.\n\nWhen the agent has no worktree (``isolate: false``), the brief file is\nwritten to the orchestrator's current working directory instead.\n\nReturns:\n- ``brief_id``: UUID string identifying the brief file.\n- ``delivered``: ``true`` when ``notify_stdin`` succeeded.\n- ``worktree_path``: absolute path of the directory where the file was written.\n\nReturns 404 when *agent_id* is not registered.\n\nDesign references:\n- OpenAI Agents SDK \"Context Management\" (2025):\n  https://openai.github.io/openai-agents-python/context/\n- LangChain \"Context Engineering in Agents\" (2025):\n  https://docs.langchain.com/oss/python/langchain/context-engineering\n- DESIGN.md \u00a710.43 (v1.1.7)",
+        "operationId": "brief_agent_agents__agent_id__brief_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentBriefRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Brief Agent Agents  Agent Id  Brief Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Inject an out-of-band context brief to a running agent"
       }
     },
     "/agents/{agent_id}/change-strategy": {
