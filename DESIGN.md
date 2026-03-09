@@ -728,6 +728,61 @@ AI エージェントにとって TDD は「ガードレール」として機能
 
 ## 10. 調査記録
 
+### 10.32 v1.0.32 — `/deliberate` スラッシュコマンド
+
+#### 選定理由
+
+**選択: `/deliberate <question>` スラッシュコマンド (v1.0.32)**
+
+§11「機能・ワークフロー」の**中**優先度候補。v1.0.31 で `ddd` ワークフローが完成し、主要ワークフローテンプレートがすべて実装済みとなった。未実装の中優先度候補の中で、最も実装コストが低く汎用価値が高い `/deliberate` を選択する。
+
+**選択理由:**
+1. **長期保留**: v1.0.27〜v1.0.31 の5イテレーションにわたり「次候補」として挙げながら毎回より優先度の高い項目に押しのけられてきた。`debate`・`ddd` ワークフローが完成した今、前提条件（役割テンプレートライブラリ・`debate` ワークフロー）が揃っており実装ブロッカーはない。
+2. **汎用ツール**: 単一エージェントが `/deliberate "should we use SQLite or PostgreSQL?"` と呼ぶだけで内部 2エージェント討論を起動し、`DELIBERATION.md` に根拠付き結論を得られる。ワークフロー知識がなくてもアドホックな設計決定に使える。
+3. **新規 REST エンドポイント不要**: 既存の `POST /tasks`（`target_agent` + `reply_to`）+ `/spawn-subagent` + P2P メッセージングを組み合わせて実現する。インフラ変更なしに純粋スラッシュコマンドとして実装できる。
+4. **デモパターンの多様化**: ワークフロー系デモに比べ「エージェントが動的に内部討論を自己組織化する」という新しいパターンを実証できる。
+
+**選択しなかった候補:**
+- `watchdog_poll` バリデーション: スコープが非常に小さくデモが単調になる。Pydantic validator 1行 + テスト数件で完結するため、後続イテレーションの「おまけ」として含める。
+- Semantic RAG for episode injection: `sentence-transformers` 外部ライブラリ依存が増え、オフライン環境での信頼性が低下する。現状の keyword/recent で十分機能している。
+- `UseCaseInteractor` 抽出: 規模が大きく本イテレーションには不適（ハンドラー全件リファクタリング）。
+
+#### 調査結果 (Step 1 — Research)
+
+**Query 1**: "Devil's Advocate multi-agent debate slash command LLM internal deliberation 2024 2025"
+
+主要知見:
+- **DEBATE Framework (ACL 2024, arXiv:2405.09935)**: Devil's Advocate（悪魔の弁護人）役エージェントが他エージェントの論拠を批判的に検証するマルチエージェント評価フレームワーク。NLG評価ベンチマーク SummEval・TopicalChat で SOTA を上回る。「エージェント間討論の広がりと各エージェントのペルソナが評価品質を決定する最重要因子」。単一エージェントによる偏りをバイアスとして定義し、反論役の導入で解消。
+- **DEVIL'S ADVOCATE: Anticipatory Reflection for LLM Agents (EMNLP 2024)**: 単一エージェントが自分自身の推論を事前に批判的に検討する「先取り的反省」アプローチ。マルチエージェント版より軽量だがバイアス解消効果は限定的。マルチエージェント討論の方が「外部視点」として効果的。
+- **Enhancing AI-Assisted Group Decision Making through LLM-Powered Devil's Advocate (IUI 2024)**: GPT-3.5-turbo ベースの悪魔の弁護人が批判的質問と反論コメントを生成するグループ意思決定支援システム。人間グループの意思決定品質が統計的有意に向上。LLM エージェントが人間の偏りをリアルタイムで中断し、見落とされた視点を提示する。
+
+**References**:
+- Kim, Kim, Yoon, "DEBATE: Devil's Advocate-Based Assessment and Text Evaluation", ACL Findings 2024, https://arxiv.org/abs/2405.09935
+- "DEVIL'S ADVOCATE: Anticipatory Reflection for LLM Agents", EMNLP Findings 2024, https://aclanthology.org/2024.findings-emnlp.53.pdf
+- Yin et al., "Enhancing AI-Assisted Group Decision Making through LLM-Powered Devil's Advocate", IUI 2024, https://dl.acm.org/doi/10.1145/3640543.3645199
+
+**Query 2**: "CONSENSAGENT ACL 2025 multi-agent deliberation sycophancy suppression consensus"
+
+主要知見:
+- **CONSENSAGENT (ACL 2025)**: マルチエージェント LLM 討論における「迎合（sycophancy）」—エージェントが批判的検討なしに他エージェントの意見に同調する現象—を動的プロンプト精緻化で抑制するフレームワーク。6つのベンチマーク推論データセットで単一エージェント・従来 MAD を上回る精度と効率を実現。「迎合が追加討論ラウンドを必要とし計算コストを肥大化させる」という知見は `/deliberate` の実装でも考慮が必要（2ラウンド固定・role=critic の明示指定）。
+- **Voting or Consensus? Decision-Making in Multi-Agent Debate (ACL 2025)**: 推論タスクでは投票が有効、知識タスクでは合意形成が有効という経験的知見。設計決定（推論タスク）には advocate/critic による論点整理 + synthesizer による合意文書生成が最適。
+
+**References**:
+- Pitre, Ramakrishnan, Wang, "CONSENSAGENT: Towards Efficient and Effective Consensus in Multi-Agent LLM Interactions Through Sycophancy Mitigation", ACL Findings 2025, https://aclanthology.org/2025.findings-acl.1141/
+- "Voting or Consensus? Decision-Making in Multi-Agent Debate", ACL 2025, https://aclanthology.org/2025.findings-acl.606/
+
+**Query 3**: "DEBATE ACL 2024 arXiv:2405.09935 Devil's Advocate bias reduction single LLM"
+
+主要知見:
+- **DEBATE の核心設計**: 通常の評価エージェント（judge）に加え、「Devil's Advocate」エージェントが judge の評価を批判的に検討し、構造化された反論を提示する。最終スコアは複数エージェントの討論後に決定される。`advocate`（主張役）+ `critic`（批判役）+ 任意の `synthesizer`（統合役）の3ロールが基本パターン。ラウンド数が多いほど精度は上がるが2ラウンドでも単一エージェント比で有意な改善が得られる。
+- **ACL 2024 での実証**: SummEval ベンチマーク Spearman 相関 0.847（従来 SOTA 0.762 比 11% 向上）。2エージェント・2ラウンドの最小構成でも効果を実証—`/deliberate` の実装パラメータ（2エージェント・2ラウンド）の根拠となる。
+
+**References**:
+- Kim, Kim, Yoon, "DEBATE: Devil's Advocate-Based Assessment and Text Evaluation", ACL Findings 2024, pages 1885–1897, https://arxiv.org/html/2405.09935v1
+- ACL Anthology, https://aclanthology.org/2024.findings-acl.112/
+
+---
+
 ### 10.31 v1.0.31 — POST /workflows/ddd — DDD Bounded Context 分解ワークフロー
 
 #### 選定理由
