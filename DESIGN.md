@@ -3959,3 +3959,77 @@ References:
 - 4geeks, "Deconstructing the Monolith: Implementing the Strangler Fig Pattern", https://blog.4geeks.io/deconstructing-the-monolith-implementing-the-strangler-fig-pattern-for-high-availability-migrations/ (2025)
 - Laminas Project, "The Strangler Fig Pattern: A Viable Approach for Migrating MVC to Middleware", https://getlaminas.org/blog/2025-08-06-strangler-fig-pattern.html (2025)
 
+
+## §10.58 — v1.1.26: Clean Architecture Migration Phase 4 — Small Root Files + orchestrator.py
+
+### Step 0 — 選択理由
+
+**選択した機能**: Clean Architecture Migration Phase 4 — 残存 ROOT ファイル群 (`task_queue`, `rate_limiter`, `group_manager`, `webhook_manager`, `slash_notify`, `security`, `telemetry`, `logging_config`) の application/infrastructure 層への移動。
+
+**理由**:
+- Phase 1-3 完了後、domain/ と application/ の主要コンポーネントは全て移動済み。
+- 残る ROOT レベルファイルのうち、純粋 asyncio ロジック (`task_queue`, `rate_limiter`, `group_manager`, `slash_notify`) は application layer に属する。
+- 外部依存を持つファイル (`webhook_manager`: httpx HTTP, `security`: Starlette middleware, `telemetry`: OpenTelemetry SDK, `logging_config`: sys/logging) は infrastructure layer に属する。
+- 全 2554 テストを Strangler Fig パターンで green に保ちながら段階的に移行可能。
+- `orchestrator.py` は dispatch loop、P2P routing、watchdog、idempotency 等が混在する最大のファイルであり、本 Phase で着手するが完全移動は Phase 5 に延期する可能性がある。
+
+**選択しなかったこと**:
+- `config.py` / `factory.py` / `schemas.py` / `main.py` は REST API / CLI の設定とエントリポイントであり、複数レイヤーをまたぐ。Phase 5 以降に延期。
+
+### Step 1 — Research
+
+**Query 1**: "Clean Architecture Python application layer vs infrastructure layer classification token bucket rate limiter task queue 2024"
+
+主要知見:
+- Application Layer: ビジネスロジック（ユースケース）、純粋な asyncio ロジック（rate limiter, task queue, group manager）はここに属する。外部 I/O を持たない。
+- Infrastructure Layer: 外部サービスとの通信（HTTP webhook, OTel exporter, filesystem, Starlette middleware）。
+- TokenBucketRateLimiter は asyncio.Lock + time.monotonic のみ — 外部依存なし → application layer。
+- AsyncPriorityTaskQueue は asyncio.PriorityQueue のラッパー — 外部依存なし → application layer。
+- WebhookManager は httpx.AsyncClient を使う HTTP I/O → infrastructure layer。
+- AuditLogMiddleware は Starlette BaseHTTPMiddleware を継承 → infrastructure layer。
+- OpenTelemetry SDK (TracerProvider, SpanExporter) は外部 SDK → infrastructure layer。
+- logging_config は sys/logging の設定 → infrastructure layer。
+
+References:
+- Dan Does Code, "Unpacking the Layers of Clean Architecture", https://www.dandoescode.com/blog/unpacking-the-layers-of-clean-architecture-domain-application-and-infrastructure-services (2024)
+- DevIQ, "Strangler Fig Design Pattern", https://deviq.com/design-patterns/strangler-fig-pattern/ (2025)
+- System Design Handbook, "Design a Rate Limiter", https://www.systemdesignhandbook.com/guides/design-a-rate-limiter/ (2025)
+
+**Query 2**: "Python strangler fig pattern module re-export shim migration clean architecture 2025"
+
+主要知見:
+- Strangler Fig: 旧モジュールを `from tmux_orchestrator.<layer>.<module> import *` に変換し、新 canonical 場所に実装を移動する (Fowler 2004)。
+- AWS Prescriptive Guidance: Intercepting Facade が旧実装と新実装の橋渡し役 — Python の re-export shim がこの役割。
+- 段階的移行でリスク最小化、いつでもロールバック可能。テストが常に green であることが安全網。
+
+References:
+- Fowler, "Strangler Fig Application", https://martinfowler.com/bliki/StranglerFigApplication.html (2004)
+- AWS Prescriptive Guidance, "Strangler fig pattern", https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/strangler-fig.html (2025)
+- Swimm, "Strangler Fig Pattern: Modernizing It Without Losing It", https://swimm.io/learn/legacy-code/strangler-fig-pattern-modernizing-it-without-losing-it (2025)
+- 4geeks, "Deconstructing the Monolith", https://blog.4geeks.io/deconstructing-the-monolith-implementing-the-strangler-fig-pattern-for-high-availability-migrations/ (2025)
+
+**Query 3**: "OpenTelemetry infrastructure layer classification Python clean architecture external dependency 2025"
+
+主要知見:
+- OpenTelemetry SDK (TracerProvider, SpanExporter, BatchSpanProcessor) は外部依存であり infrastructure layer に属する。
+- OTel は cross-cutting concern — 純粋な business logic (domain/application) を汚染してはいけない。
+- API と SDK を分離: API は軽量で application layer から使用可能、SDK は infrastructure layer に配置。
+- Python では `from opentelemetry.sdk.trace import TracerProvider` が infrastructure 依存を示す。
+
+References:
+- OpenTelemetry, "OpenTelemetry API vs SDK: Understanding the Architecture", https://last9.io/blog/opentelemetry-api-vs-sdk/ (2025)
+- OpenTelemetry, "Documentation", https://opentelemetry.io/docs/ (2025)
+- Mezmo, "A guide to OpenTelemetry architecture", https://www.mezmo.com/learn-observability/a-guide-to-opentelemetry-architecture-logs-and-implementation-best-practices (2025)
+
+### 層分類サマリー
+
+| ファイル | 移動先 | 理由 |
+|---|---|---|
+| `task_queue.py` | `application/task_queue.py` | 純粋 asyncio.PriorityQueue ラッパー、外部依存なし |
+| `rate_limiter.py` | `application/rate_limiter.py` | asyncio.Lock + time.monotonic のみ、外部依存なし |
+| `group_manager.py` | `application/group_manager.py` | 純粋 in-memory dict、外部依存なし |
+| `slash_notify.py` | `application/slash_notify.py` | urllib.request (stdlib のみ)、filesystem 読み取り — application |
+| `webhook_manager.py` | `infrastructure/webhook_manager.py` | httpx HTTP I/O、外部依存あり |
+| `security.py` | `infrastructure/security.py` | Starlette middleware、外部依存あり |
+| `telemetry.py` | `infrastructure/telemetry.py` | OpenTelemetry SDK、外部依存あり |
+| `logging_config.py` | `infrastructure/logging_config.py` | sys/logging 設定、infrastructure 横断関心事 |
