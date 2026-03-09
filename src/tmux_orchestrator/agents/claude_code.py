@@ -652,6 +652,11 @@ use the plain form without a namespace prefix.
     # Task dispatch
     # ------------------------------------------------------------------
 
+    # Trigger string sent via send_keys when UserPromptSubmit hook is active.
+    # Short enough to never trigger paste-preview mode (~10 chars, well under the
+    # ~100-char threshold at which tmux starts treating input as a paste).
+    _TASK_TRIGGER = "__TASK__"
+
     async def _dispatch_task(self, task: Task) -> None:
         if self.pane is None or self.process is None:
             raise RuntimeError(f"Agent {self.id} has no pane")
@@ -663,10 +668,27 @@ use the plain form without a namespace prefix.
                 None, self._completion.on_task_dispatch, self._cwd, task.id
             )
         from tmux_orchestrator.security import sanitize_prompt
-        safe_prompt = sanitize_prompt(task.prompt)
+
+        if self._cwd is not None:
+            # Write the full prompt to a file for the UserPromptSubmit hook to
+            # inject as additionalContext.  Only the short trigger is sent via
+            # send_keys, avoiding tmux paste-preview entirely.
+            # Reference: DESIGN.md §10.38 (v1.1.2 — UserPromptSubmit hook injection)
+            prompt_file = self._cwd / f"__task_prompt__{self.id}__.txt"
+            # Use lambda to pass encoding as keyword arg (cleaner than positional).
+            await loop.run_in_executor(
+                None,
+                lambda p=prompt_file, t=task.prompt: p.write_text(t, encoding="utf-8"),
+            )
+            keys_to_send = self._TASK_TRIGGER
+        else:
+            # Fallback: no cwd (no worktree) → send the sanitized prompt directly.
+            # v1.1.1 paste-preview polling in send_keys() handles this path.
+            keys_to_send = sanitize_prompt(task.prompt)
+
         # Use ProcessPort instead of self._tmux.send_keys(self.pane, ...)
         # Reference: DESIGN.md §10.34 (v1.0.34 — ProcessPort canonical interface).
-        await loop.run_in_executor(None, self.process.send_keys, safe_prompt)
+        await loop.run_in_executor(None, self.process.send_keys, keys_to_send)
         await self._completion.wait(self, task)
 
     async def _wait_for_ready(self) -> None:

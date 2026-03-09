@@ -1825,3 +1825,88 @@ Claude CLI が `[Pasted text #N]` 確認を待っている間にさらに Enter 
 **References**:
 - Ubuntu tmux manpage: https://manpages.ubuntu.com/manpages/xenial/man1/tmux.1.html
 - tmux man7.org: https://man7.org/linux/man-pages/man1/tmux.1.html
+
+## §10.38 — v1.1.2: UserPromptSubmit フックによるタスクプロンプト注入
+
+**選択日**: 2026-03-09
+
+### 選択理由
+
+v1.1.1 の `[Pasted text #1]` 修正はポーリングによる workaround。根本的な解決として `UserPromptSubmit` フックを調査し、実装する。
+
+**選択しなかった候補**:
+- スライディングウィンドウ + TF-IDF コンテキスト圧縮: 外部ライブラリ依存が大きい
+- AgentRegistry 完全分離: 規模が大きくデモ価値が低い
+
+### Research — Query 1: UserPromptSubmit フック仕様
+
+**Query**: "Claude Code UserPromptSubmit hook specification 2026"
+
+**公式ドキュメント** (https://code.claude.com/docs/en/hooks):
+
+UserPromptSubmit フックの仕様:
+- `UserPromptSubmit` はプロンプト送信時（Claude 処理前）に起動する
+- **stdin JSON**: `{ "session_id", "transcript_path", "cwd", "permission_mode", "hook_event_name", "prompt" }`
+  - `"prompt"` フィールドにユーザーが送信したテキストが含まれる
+- **stdout の扱い**:
+  - Exit 0 + plaintext stdout → Claude の **コンテキストとして追加** (プロンプトの置換ではない)
+  - Exit 0 + JSON stdout + `additionalContext` フィールド → より離散的にコンテキストとして追加
+  - **Exit 2** → プロンプトをブロック・消去する
+- **マッチャー**: 非対応。常に全プロンプトで発火する
+- **決定フィールド**: `decision: "block"` でプロンプトをブロック可能
+
+**重要な制約**: `UserPromptSubmit` の stdout は**プロンプトを置換しない**。元のプロンプトは保持されたまま、stdout がコンテキストとして **追加される**。
+
+**References**:
+- Claude Code Hooks reference: https://code.claude.com/docs/en/hooks
+- Claude Code hooks guide: https://claude.com/blog/how-to-configure-hooks
+
+### Research — Query 2: stdout 注入 vs プロンプト置換
+
+**Query**: "Claude Code hooks stdout injection prompt replacement UserPromptSubmit"
+
+公式ドキュメントの引用:
+> "The exceptions are UserPromptSubmit and SessionStart, where stdout is added as context that Claude can see and act on."
+
+egghead.io のレッスン "Rewrite Prompts on the Fly with UserPromptSubmit Hooks" では「console.log したものがプロンプトを書き換える」と述べているが、公式ドキュメントの記述と矛盾する。**公式ドキュメントを優先**: stdout はコンテキストとして追加されるのみ。
+
+**References**:
+- egghead.io lesson: https://egghead.io/lessons/rewrite-prompts-on-the-fly-with-user-prompt-submit-hooks~76rrt
+- Hooks reference (official): https://code.claude.com/docs/en/hooks
+
+### Research — Query 3: paste-preview 根本解決の代替アプローチ
+
+**Query**: "Claude Code UserPromptSubmit hook cwd stdin prompt replacement injection 2026"
+
+**調査結論**: `UserPromptSubmit` フックは stdout でプロンプトを**置換できない**。ただし以下のアーキテクチャが機能する:
+
+1. オーケストレーターがタスクプロンプトを `__task_prompt__.txt` に書き込む
+2. `send_keys()` で短いトリガー文字列 (`"__TASK__"`) のみ送信 → paste-preview 発生なし
+3. `UserPromptSubmit` フックが起動し `cwd` フィールドから作業ディレクトリを取得
+4. `__task_prompt__.txt` が存在すれば読み込んで削除し、`additionalContext` として出力
+5. Claude は「`__TASK__` + コンテキストのタスク内容」を受け取り、タスクを実行する
+
+この方式では長いプロンプトが `send_keys` を通らないため、paste-preview は根本的に解消される。
+
+**References**:
+- Claude Code Hooks reference: https://code.claude.com/docs/en/hooks
+- dagger/container-use issue #253: https://github.com/dagger/container-use/issues/253
+
+### 実装方針
+
+1. `agent_plugin/hooks/hooks.json` に `UserPromptSubmit` フックを追加
+2. `agent_plugin/hooks/user-prompt-submit.py` を実装:
+   - stdin JSON から `cwd` を取得
+   - `{cwd}/__task_prompt__{agent_id}__.txt` が存在すれば読み込んで削除
+   - `additionalContext` として JSON で出力
+   - ファイルが存在しない場合は何も出力せず exit 0 (pass-through)
+3. `ClaudeCodeAgent._dispatch_task()` を変更:
+   - プロンプトを `__task_prompt__{agent_id}__.txt` に書き込む
+   - `send_keys("__TASK__")` のみ送信 (短いトリガー、paste-preview なし)
+4. `TmuxInterface.send_keys()` の paste-preview ポーリングはフォールバックとして維持
+
+### テスト方針
+
+- `test_user_prompt_submit_hook.py`: フックスクリプトの動作単体テスト
+- `test_dispatch_task_prompt_file.py` または既存テストへの追加: `_dispatch_task` がファイルを書き込み短いトリガーを送信することを検証
+- 全既存テスト (1827+) が green であること
