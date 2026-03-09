@@ -640,12 +640,12 @@ AI エージェントにとって TDD は「ガードレール」として機能
 
 | 優先度 | 課題 | 層 |
 |--------|------|----|
-| **高** | **チェックポイント永続化による中断再開** — SQLite による状態永続化、`--resume` フラグ（v0.45.0 実装中） | 層5 |
-| **高** | **`ProcessPort` 抽象インターフェース抽出** — `ClaudeCodeAgent` の libtmux 直接依存を排除（v0.46.0 予定） | 層5 |
-| **高** | **OpenTelemetry GenAI Semantic Conventions** — `gen_ai.*` 属性 + OTLP エクスポーター（v0.47.0 予定） | 層5 |
+| ~~**高**~~ | ~~**チェックポイント永続化による中断再開**~~ | ~~完了 v0.45.0 — SQLite CheckpointStore + `--resume` フラグ。~~ |
+| ~~**高**~~ | ~~**`ProcessPort` 抽象インターフェース抽出**~~ | ~~完了 v1.0.34 — `ProcessPort` protocol + `TmuxProcessAdapter` / `StdioProcessAdapter`。~~ |
+| ~~**高**~~ | ~~**OpenTelemetry GenAI Semantic Conventions**~~ | ~~完了 v1.1.10 — `workflow_span()` + `RingBufferSpanExporter` + `GET /telemetry/spans`。25テスト。~~ |
 | ~~**高**~~ | ~~**エージェントドリフト検出 (Agent Stability Index)**~~ | ~~完了 v1.0.9 — `DriftMonitor` (role/idle/length 3サブスコア)、`agent_drift_warning` イベント、`GET /drift`・`GET /agents/{id}/drift` エンドポイント。34テスト。17/17デモPASS。~~ |
 | ~~中~~ | ~~**`UseCaseInteractor` 層の抽出** — FastAPI ハンドラーから業務ロジックを分離~~ | ~~完了 v1.1.14 (SubmitTaskUseCase / CancelTaskUseCase) + v1.1.15 (ListAgentsUseCase / GetAgentUseCase wiring)~~ |
-| 中 | **エージェント状態機械の Hypothesis ステートフルテスト** — `AgentStatus` 遷移シーケンスの自動生成テスト | 層5 |
+| ~~中~~ | ~~**エージェント状態機械の Hypothesis ステートフルテスト**~~ | ~~完了 v1.0.33 — `AgentStatus` / `CircuitBreaker` / `AgentRegistry` 3ステートマシン。~~ |
 | 低 | **構造化デバッグ: トレースリプレイ CLI** — `ResultStore` JSONL から過去実行を再現 | 層5 |
 
 ---
@@ -654,9 +654,9 @@ AI エージェントにとって TDD は「ガードレール」として機能
 
 | 優先度 | 課題 |
 |--------|------|
-| 中 | **`examples/workflows/` YAML テンプレートライブラリ** — 各ワークフローを自己完結 YAML として収録 |
-| 中 | **`POST /workflows/clean-arch`** — 4レイヤー分解ワークフロー（domain/usecase/adapter/framework） |
-| 中 | **`POST /workflows/pair`** — Navigator + Driver ペアプログラミング |
+| ~~中~~ | ~~**`examples/workflows/` YAML テンプレートライブラリ**~~ | ~~完了 v1.1.16 — 12ワークフロー YAML + README。~~ |
+| ~~中~~ | ~~**`POST /workflows/clean-arch`**~~ | ~~完了 v1.0.30 — 4エージェント Clean Architecture パイプライン。~~ |
+| ~~中~~ | ~~**`POST /workflows/pair`**~~ | ~~完了 v1.0.27 — Navigator + Driver ペアプログラミング。~~ |
 | 中 | ~~**`POST /workflows/socratic`**~~ — questioner + responder + synthesizer ソクラテス的対話 (**v1.0.25完了**) |
 | 低 | **`DECISION.md` 標準フォーマット** — 全ワークフロー共通の出力フォーマット策定 |
 
@@ -701,7 +701,7 @@ AI エージェントにとって TDD は「ガードレール」として機能
 | ~~**高**~~ | ~~**OpenTelemetry GenAI Semantic Conventions 準拠トレース出力**~~ | ~~完了 v1.1.10 — `workflow_span()` + `RingBufferSpanExporter` + `GET /telemetry/spans` + `gen_ai.agent.description/version` + `BatchSpanProcessor` 本番パス + OTel→structlog 伝播。25テスト追加。25/25 デモ PASS。~~ |
 | ~~**高**~~ | ~~**エージェントドリフト検出 (Agent Stability Index)**~~ | ~~完了 v1.0.9 — `DriftMonitor` (role/idle/length 3サブスコア)、`agent_drift_warning` イベント。34テスト。17/17デモPASS。~~ |
 | 中 | **DriftMonitor — セマンティック類似度ベースの role_score 強化** — 現行のキーワードマッチを embedding コサイン類似度に置き換え、system_prompt と pane 出力の意味的乖離をより精密に測定する。`sentence-transformers` の軽量モデル (paraphrase-MiniLM-L6-v2, 22MB) を使用してランタイム外部 API 依存を回避する | Rath arXiv:2601.04170: ASI の Role Adherence 次元は「agent_id とタスクタイプの相互情報量」を使用。v1.0.9 のキーワードマッチは role_score = 1.0 に張り付く傾向（スコアが役割逸脱を検出しにくい）。embedding 距離により「形式は合っているが内容が違う」ドリフトを検出可能。 |
-| 中 | **Director の `agent_drift_warning` 購読による自動 re-brief** — Director エージェントが bus の `agent_drift_warning` イベントを購読し、ドリフトを検出したワーカーに自動で re-brief メッセージを送信する仕組みを追加する。v1.0.8 の「ディレクター投票が遅い」問題の根本解決。`/delegate` スラッシュコマンドで受信後に再ブリーフィングを実行 | v1.0.9 build-log: drift_warnings=0 は正常動作だが、将来の曖昧タスクでワーカーがドリフトする場合に Director が自動介入できる仕組みが必要。v1.0.8 build-log: 「Director polling が遅い (11分ループ)」根本原因は能動的な完了通知の欠如。`agent_drift_warning` bus イベントを Director が購読することで同様の問題を予防できる。 |
+| ~~中~~ | ~~**Director の `agent_drift_warning` 購読による自動 re-brief**~~ | ~~完了 v1.1.18 — Orchestrator が bus の `agent_drift_warning` を購読し `_handle_drift_warning()` で自動 re-brief を注入。`drift_rebrief_enabled` / `drift_rebrief_cooldown` / `drift_rebrief_message` config フィールド。`GET /agents/{id}/drift-rebriefs` REST エンドポイント。32テスト追加 (2307→2339)。27/27デモPASS。~~ |
 | 中 | **`UseCaseInteractor` 層の抽出** — `web/app.py` の FastAPI ハンドラーが `orchestrator.*` メソッドを直接呼ぶ箇所を `SubmitTaskUseCase`, `CancelTaskUseCase` 等の Use Case クラスに置き換え、Web 層とドメイン層の依存方向を逆転させる | Martin "Clean Architecture" §22: Use Case Interactor がアプリケーション固有ビジネスルールを保持し、Web/CLI/TUI のどのインターフェースからも同一ロジックを呼べる。現状は FastAPI ハンドラーにロジックが漏れており、TUI から同機能を使うときに重複する。`ProcessPort` 抽出後に実施するのが自然な順序。 |
 | ~~中~~ | ~~**MIRIX 型エピソード記憶ストア**~~ | ~~完了 v1.0.28 — `EpisodeStore` (JSONL append-only), `GET/POST/DELETE /agents/{id}/memory`, 40 tests (unit 22 + API 18). 18/18 デモ PASS. writer→reviewer pipeline でクロスエージェントメモリ参照実証。~~ |
 | 中 | **スライディングウィンドウ + 重要度スコアによるコンテキスト圧縮** — `ContextMonitor` が 75% 閾値を検出したとき、タスクプロンプトとの TF-IDF 類似度で行の重要度スコアを算出し、スコア下位 40% を削除したうえで圧縮済みコンテキストを注入する（単純な `/summarize` の上位互換） | Liu et al. "Lost in the Middle" TACL 2024 が中央部情報の忘却を実証。JetBrains Research "Cutting Through the Noise" (2025-12) が重要度スコアリングによるコスト削減を実証。現行の `/summarize` はプロンプトとの関連度を考慮せず一律圧縮する。 |
@@ -3277,4 +3277,29 @@ class AgentStatusMachine(RuleBasedStateMachine):
 3. re-brief の内容は `drift_rebrief_message` config フィールド + 元タスクプロンプトの先頭200文字
 4. 連続 re-brief を防ぐため per-agent クールダウン (デフォルト 60 秒) を設ける
 5. re-brief 履歴は in-memory dict で記録し REST で公開する
+
+### Step 2 — 実装サマリー
+
+**実装ファイル**:
+- `src/tmux_orchestrator/config.py` — `OrchestratorConfig` に `drift_rebrief_enabled`, `drift_rebrief_cooldown`, `drift_rebrief_message` を追加。`load_config()` で YAML から読み込む。
+- `src/tmux_orchestrator/orchestrator.py` — `_drift_rebrief_history`, `_drift_rebrief_last_sent` インスタンス変数追加。`_handle_drift_warning()`, `get_agent_drift_rebriefs()`, `all_drift_rebrief_stats()` メソッド追加。`_route_loop` STATUS ハンドラーに `agent_drift_warning` ブランチ追加。
+- `src/tmux_orchestrator/web/routers/agents.py` — `GET /agents/{agent_id}/drift-rebriefs` エンドポイント追加。
+- `tests/test_drift_rebrief.py` — 32テスト (TestHandleDriftWarning 12・TestDriftRebriefQueries 4・TestRouteLoopDriftWarning 3・TestDriftRebriefConfig 6・TestLoadConfigDriftRebrief 4・TestDriftRebriefEndpoint 3)
+- `tests/test_openapi_schema.py` — `_MockOrchestrator` に `get_agent_drift_rebriefs()` / `all_drift_rebrief_stats()` 追加
+- `tests/fixtures/openapi_schema.json` — スナップショット再生成
+
+**テスト数**: 2307 → 2339 (+32テスト)
+
+**バージョン**: 1.1.18
+
+**E2E デモ** (`~/Demonstration/v1.1.18-drift-rebrief/`):
+- agent-implementer (Python 実装タスク) + agent-drifter (Python 実装タスク) の2エージェント並列構成
+- DriftMonitor が両エージェントをポーリング (8秒間隔、threshold=0.5)
+- 両エージェントとも3分以内にタスク完了
+- `GET /agents/{id}/drift-rebriefs` エンドポイント: 200 + 空リスト (ドリフトなし = 正常)
+- `GET /drift` および `GET /agents/{id}/drift` の drift_score フィールド確認済み
+
+**デバッグ**: initial demo.py が `api()` の引数順序を誤って呼び出し (TypeError)。`http_get()` / `http_post()` ヘルパーに置き換えて修正。
+
+**27/27 チェック PASSED**
 
