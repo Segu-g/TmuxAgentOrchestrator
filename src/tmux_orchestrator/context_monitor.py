@@ -466,9 +466,43 @@ class ContextMonitor:
         )
 
         # Inject the compressed text via the __COMPRESS_CONTEXT__ protocol token.
-        # Format: "__COMPRESS_CONTEXT__\n{compressed_text}"
-        # The agent receives this as a notification and can choose to use it.
-        notification = f"__COMPRESS_CONTEXT__\n{result.compressed_text}"
+        #
+        # File-based delivery (preferred — same consume-once pattern as __task_prompt__):
+        #   1. Write compressed text to __compress_context__{agent.id}__.txt in the
+        #      agent's cwd (worktree_path).
+        #   2. Send only the short trigger "__COMPRESS_CONTEXT__" via send_keys.
+        #   3. The UserPromptSubmit hook (user-prompt-submit.py) intercepts the trigger,
+        #      reads the file, deletes it (consume-once), and returns the compressed text
+        #      as additionalContext so Claude receives the context summary.
+        #
+        # Fallback (no worktree): send "__COMPRESS_CONTEXT__\n{text}" inline.  Claude
+        # sees the raw text as a user message — less clean but functional.
+        #
+        # References:
+        # - DESIGN.md §10.38 (v1.1.13 — __COMPRESS_CONTEXT__ UserPromptSubmit hook)
+        # - DESIGN.md §10.38 (v1.1.2 — __TASK__ / __task_prompt__ file pattern)
+        # - ACON arXiv:2510.00615: threshold-based context compression delivery.
+        worktree = agent.worktree_path
+        if worktree is not None:
+            compress_file = worktree / f"__compress_context__{agent.id}__.txt"
+            try:
+                await loop.run_in_executor(
+                    None,
+                    lambda p=compress_file, t=result.compressed_text: p.write_text(
+                        t, encoding="utf-8"
+                    ),
+                )
+                notification = "__COMPRESS_CONTEXT__"
+            except OSError:
+                logger.warning(
+                    "ContextMonitor: could not write compress file for %s — "
+                    "falling back to inline delivery",
+                    agent.id,
+                )
+                notification = f"__COMPRESS_CONTEXT__\n{result.compressed_text}"
+        else:
+            # No worktree: fall back to inline delivery.
+            notification = f"__COMPRESS_CONTEXT__\n{result.compressed_text}"
         await agent.notify_stdin(notification)
 
         await self._publish(

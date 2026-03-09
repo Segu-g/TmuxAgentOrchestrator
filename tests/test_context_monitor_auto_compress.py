@@ -768,3 +768,191 @@ def test_compressor_created_when_auto_compress_enabled() -> None:
     )
     assert isinstance(monitor._compressor, TfIdfContextCompressor)
     assert monitor._compressor._drop_percentile == pytest.approx(0.45)
+
+
+# ---------------------------------------------------------------------------
+# 21–26. File-based __COMPRESS_CONTEXT__ delivery (v1.1.13)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auto_compress_writes_file_when_worktree_present(
+    tmp_path: Any,
+) -> None:
+    """When agent.worktree_path is set, compressed text is written to a file."""
+    import pathlib
+
+    bus = Bus()
+    pane = MagicMock()
+    tmux = _make_tmux(_LONG_PANE_TEXT)
+    agent = _make_agent("worker-1", pane=pane)
+    agent.worktree_path = pathlib.Path(tmp_path)
+
+    monitor = ContextMonitor(
+        bus=bus,
+        tmux=tmux,
+        agents=lambda: [agent],
+        context_window_tokens=100,
+        warn_threshold=0.01,
+        auto_compress=True,
+        poll_interval=99.0,
+    )
+    await monitor._poll_all()
+
+    # File must have been created in the worktree directory.
+    compress_files = list(pathlib.Path(tmp_path).glob("__compress_context__*.txt"))
+    assert len(compress_files) == 1, f"Expected 1 compress file, found: {compress_files}"
+
+
+@pytest.mark.asyncio
+async def test_auto_compress_file_named_with_agent_id(
+    tmp_path: Any,
+) -> None:
+    """Compress file is named __compress_context__<agent_id>__.txt."""
+    import pathlib
+
+    bus = Bus()
+    pane = MagicMock()
+    tmux = _make_tmux(_LONG_PANE_TEXT)
+    agent = _make_agent("my-special-agent", pane=pane)
+    agent.worktree_path = pathlib.Path(tmp_path)
+
+    monitor = ContextMonitor(
+        bus=bus,
+        tmux=tmux,
+        agents=lambda: [agent],
+        context_window_tokens=100,
+        warn_threshold=0.01,
+        auto_compress=True,
+        poll_interval=99.0,
+    )
+    await monitor._poll_all()
+
+    expected = pathlib.Path(tmp_path) / "__compress_context__my-special-agent__.txt"
+    assert expected.exists(), f"Expected file {expected} does not exist"
+
+
+@pytest.mark.asyncio
+async def test_auto_compress_file_contains_compressed_text(
+    tmp_path: Any,
+) -> None:
+    """The compress file contains actual compressed text (non-empty)."""
+    import pathlib
+
+    bus = Bus()
+    pane = MagicMock()
+    tmux = _make_tmux(_LONG_PANE_TEXT)
+    agent = _make_agent("worker-2", pane=pane)
+    agent.worktree_path = pathlib.Path(tmp_path)
+
+    monitor = ContextMonitor(
+        bus=bus,
+        tmux=tmux,
+        agents=lambda: [agent],
+        context_window_tokens=100,
+        warn_threshold=0.01,
+        auto_compress=True,
+        poll_interval=99.0,
+    )
+    await monitor._poll_all()
+
+    compress_file = pathlib.Path(tmp_path) / "__compress_context__worker-2__.txt"
+    assert compress_file.exists()
+    content = compress_file.read_text(encoding="utf-8")
+    assert content.strip(), "Compress file must contain non-empty content"
+
+
+@pytest.mark.asyncio
+async def test_auto_compress_sends_short_trigger_not_inline_text_when_worktree(
+    tmp_path: Any,
+) -> None:
+    """When worktree_path is set, notify_stdin receives only '__COMPRESS_CONTEXT__'."""
+    import pathlib
+
+    bus = Bus()
+    pane = MagicMock()
+    tmux = _make_tmux(_LONG_PANE_TEXT)
+    agent = _make_agent("worker-3", pane=pane)
+    agent.worktree_path = pathlib.Path(tmp_path)
+
+    monitor = ContextMonitor(
+        bus=bus,
+        tmux=tmux,
+        agents=lambda: [agent],
+        context_window_tokens=100,
+        warn_threshold=0.01,
+        auto_compress=True,
+        poll_interval=99.0,
+    )
+    await monitor._poll_all()
+
+    agent.notify_stdin.assert_called_once()
+    call_arg: str = agent.notify_stdin.call_args[0][0]
+    assert call_arg == "__COMPRESS_CONTEXT__", (
+        f"Expected only '__COMPRESS_CONTEXT__' trigger, got: {call_arg[:80]!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_compress_fallback_inline_when_no_worktree() -> None:
+    """When worktree_path is None, falls back to inline __COMPRESS_CONTEXT__\\n{text}."""
+    bus = Bus()
+    pane = MagicMock()
+    tmux = _make_tmux(_LONG_PANE_TEXT)
+    agent = _make_agent("worker-4", pane=pane)
+    agent.worktree_path = None  # no worktree
+
+    monitor = ContextMonitor(
+        bus=bus,
+        tmux=tmux,
+        agents=lambda: [agent],
+        context_window_tokens=100,
+        warn_threshold=0.01,
+        auto_compress=True,
+        poll_interval=99.0,
+    )
+    await monitor._poll_all()
+
+    agent.notify_stdin.assert_called_once()
+    call_arg: str = agent.notify_stdin.call_args[0][0]
+    assert call_arg.startswith("__COMPRESS_CONTEXT__\n"), (
+        f"Expected inline __COMPRESS_CONTEXT__\\n prefix, got: {call_arg[:80]!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_compress_file_delivery_still_publishes_compress_triggered_event(
+    tmp_path: Any,
+) -> None:
+    """File-based delivery still publishes the compress_triggered event."""
+    import pathlib
+
+    bus = Bus()
+    pane = MagicMock()
+    tmux = _make_tmux(_LONG_PANE_TEXT)
+    agent = _make_agent("worker-5", pane=pane)
+    agent.worktree_path = pathlib.Path(tmp_path)
+
+    monitor = ContextMonitor(
+        bus=bus,
+        tmux=tmux,
+        agents=lambda: [agent],
+        context_window_tokens=100,
+        warn_threshold=0.01,
+        auto_compress=True,
+        poll_interval=99.0,
+    )
+
+    q = await bus.subscribe("__test2__", broadcast=True)
+    await monitor._poll_all()
+
+    events: list[Message] = []
+    while not q.empty():
+        msg = await q.get()
+        q.task_done()
+        events.append(msg)
+    await bus.unsubscribe("__test2__")
+
+    compress_events = [e for e in events if e.payload.get("event") == "compress_triggered"]
+    assert len(compress_events) == 1, "compress_triggered event must be published"
+    assert compress_events[0].payload["agent_id"] == "worker-5"

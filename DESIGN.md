@@ -728,6 +728,113 @@ AI エージェントにとって TDD は「ガードレール」として機能
 
 ## 10. 調査記録
 
+### 10.38 v1.1.13 — `__COMPRESS_CONTEXT__` UserPromptSubmit フック + `__COMPRESS_CONTEXT__` ファイル消費パターン
+
+#### Step 0 — 選定理由
+
+**選択: `__COMPRESS_CONTEXT__` フック — エージェント側でのコンテキスト圧縮注入**
+
+**何を選択したか・理由:**
+
+v1.1.12 でサーバー側の自動 TF-IDF 圧縮 (`auto_compress=True`) が完成し、`ContextMonitor` は
+`__COMPRESS_CONTEXT__\n{compressed_text}` をエージェントの pane に送信できるようになった。
+しかし**エージェント側にその通知を受け取るフックが存在しない**。
+
+`user-prompt-submit.py` は `__TASK__` トリガーのみを処理し、`__COMPRESS_CONTEXT__` については
+何も行わない。そのため圧縮済みテキストはエージェントの画面に生テキストとして表示されるだけで、
+`additionalContext` として Claude に届かない。
+
+本イテレーションの実装は:
+1. `user-prompt-submit.py` を拡張して `__COMPRESS_CONTEXT__` トリガーも処理する。
+2. 圧縮テキストをファイルに書き込む (`__compress_context__<agent_id>__.txt`) パターンを採用し、
+   `__task_prompt__` と同じ consume-once 設計を適用する。
+3. `additionalContext` として注入し、Claude がコンテキスト要約を参照できるようにする。
+
+**価値/実装コスト:**
+- **最小スコープ**: `user-prompt-submit.py` に20行の分岐追加 + `context_monitor.py` にファイル書き込み。
+- **v1.1.12 の自然な完成**: 送信側（サーバー）と受信側（エージェント hook）がはじめて揃う。
+- **研究的裏付け**: ACON (arXiv:2510.00615) と Focus Agent (arXiv:2601.07190) が実証した
+  threshold-based 自動圧縮の効果は、圧縮テキストがエージェントに適切に届いて初めて実現する。
+
+**選択しなかった候補と理由:**
+- **`/deliberate` スラッシュコマンド**: `deliberate.md` が既に v1.0.32 で実装済み。
+- **チェックポイント永続化 SQLite**: 大規模スコープ (v1.2.x 向け)。
+- **ProcessPort 抽象インターフェース**: libtmux 全面 DI 化で既存 E2E テストへの影響が広範。
+- **UseCaseInteractor 層の抽出**: FastAPI ハンドラーの全面リファクタリング、不要なリスク。
+- **DriftMonitor セマンティック類似度**: `sentence-transformers` 新依存が必要。
+
+**実装スコープ:**
+1. `context_monitor.py` の `_run_auto_compress()`: 圧縮テキストをファイル
+   (`__compress_context__{agent_id}__.txt`) に書き込んでから `__COMPRESS_CONTEXT__` トリガーを送信。
+2. `user-prompt-submit.py`: `__COMPRESS_CONTEXT__` トリガー検出時にファイルを読み込み・削除し、
+   `additionalContext` として返す。
+3. テスト: UserPromptSubmit フックの新ブランチに対するユニットテスト追加 (目標 +15 テスト)。
+
+#### Step 1 — Research
+
+**Query 1**: "Claude Code UserPromptSubmit hook additionalContext inject compressed context AI agent 2025"
+
+主要知見:
+- **Claude Code hooks 公式ドキュメント** (code.claude.com/docs/en/hooks): `UserPromptSubmit` フックは
+  プロンプト処理前に毎回発火。stdout に JSON を出力して `hookSpecificOutput.additionalContext` を
+  返すとその内容が Claude に追加コンテキストとして届く。プレーンテキスト stdout も context として
+  扱われるが、`additionalContext` フィールドの方がより離散的に注入される (transcript にも表示)。
+- **既知の問題** (anthropics/claude-code issue #14281): `additionalContext` が複数回注入される
+  バグが存在。特定のフック設定と組み合わせた場合に発生。→ consume-once ファイル削除パターンが
+  重複注入を防ぐ効果がある。
+- **非同期圧縮パターン**: フックは高速 (< 1秒) であることが必要で、圧縮処理は別プロセスで実行し
+  フックがファイルを読み込むだけというパターンが推奨されている。
+
+**References**:
+- Claude Code hooks reference: https://code.claude.com/docs/en/hooks
+- Hook additionalContext injected multiple times (bug report): https://github.com/anthropics/claude-code/issues/14281
+- Complete guide to hooks in Claude Code: https://www.eesel.ai/blog/hooks-in-claude-code
+
+**Query 2**: "LLM agent context compression injection hook pattern additionalContext 2025"
+
+主要知見:
+- **ACON** (Kang et al., arXiv:2510.00615, 2025): 閾値ベースのコンテキスト圧縮で peak token を
+  26–54% 削減。履歴と観察の両方を圧縮する統一フレームワーク。threshold 4096 (history) /
+  1024 (observation) が精度とコスト削減のベストバランス。
+- **Focus Agent** (Verma, arXiv:2601.07190, 2026): 自律的コンテキスト圧縮がエージェントの
+  self-directed learning を改善。インタラクション履歴の圧縮で46% パフォーマンス向上。
+- **Context Engineering in LLM-Based Agents** (Tan Ruan, 2025, Medium): コンテキスト圧縮を
+  エージェントに「届ける」メカニズムとして、(1) system prompt 再注入、(2) additionalContext
+  注入、(3) 環境観察としての挿入の3パターンを整理。`additionalContext` が最も汚染リスクが低い。
+- **Google ADK EventsCompactionConfig** (google.github.io/adk-docs): `compaction_interval` と
+  `overlap_size` 設定。圧縮後の要約をユーザープロンプトのコンテキストとして注入するパターン
+  は Google ADK の標準実装。
+
+**References**:
+- ACON arXiv:2510.00615: https://arxiv.org/abs/2510.00615
+- Focus Agent arXiv:2601.07190: https://arxiv.org/html/2601.07190
+- Context Engineering in LLM-Based Agents: https://jtanruan.medium.com/context-engineering-in-llm-based-agents-d670d6b439bc
+- Google ADK context compaction: https://google.github.io/adk-docs/context/compaction/
+
+**Query 3**: "Claude Code hooks UserPromptSubmit trigger token file pattern consume-once 2025"
+
+主要知見:
+- **Consume-once ファイルパターン** (disler/claude-code-hooks-mastery, GitHub): フックがファイルを
+  読み込んで即座に削除するパターンは Claude Code の hooks コミュニティで広く使われている。
+  競合状態を防ぐためにファイル名に agent_id を含めることが推奨される。
+- **UserPromptSubmit の matcher 不在**: `UserPromptSubmit` フックは全プロンプトで発火し、
+  matcher パターンをサポートしない（`PreToolUse` / `PostToolUse` と異なる）。
+  → フック内部でプロンプト文字列を検査してトリガー種別を判別する必要がある。
+- **フックの高速性要件**: Claude Code は hooks に5秒のデフォルトタイムアウトを設定。
+  ファイル読み込みは IO 操作だが通常 < 1ms で完了するため問題なし。
+
+**References**:
+- claude-code-hooks-mastery: https://github.com/disler/claude-code-hooks-mastery
+- DataCamp Claude Code Hooks guide: https://www.datacamp.com/tutorial/claude-code-hooks
+
+**実装知見まとめ:**
+- サーバー側 (`context_monitor.py`): `__COMPRESS_CONTEXT__` トリガーを send_keys する前に
+  圧縮テキストを `__compress_context__{agent_id}__.txt` に書き込む。
+- エージェント側 (`user-prompt-submit.py`): `__COMPRESS_CONTEXT__` をプロンプトとして受け取ったとき、
+  ファイルを読み込み・削除し、`additionalContext` として圧縮要約を Claude に渡す。
+- consume-once パターン (ファイル削除) により重複注入を防止。
+- agent_id ナミング (`__compress_context__{agent_id}__.txt`) により、共有 cwd での競合を回避。
+
 ### 10.37 v1.1.12 — ContextMonitor TF-IDF 自動統合 (Auto-Compress on context_warn)
 
 #### Step 0 — 選定理由
