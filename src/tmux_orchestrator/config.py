@@ -64,20 +64,30 @@ class WebhookConfig:
 
     Fields:
         url:    HTTP(S) endpoint that receives POST requests.
+                Supports ``${ENV_VAR}`` expansion at load time.
         events: List of event names to deliver (e.g. ``["agent_status", "task_complete"]``).
                 Use ``["*"]`` to receive all events.
         secret: Optional HMAC-SHA256 signing secret.  When set, each delivery
                 includes an ``X-Signature-SHA256`` header for verification.
+                Supports ``${ENV_VAR}`` expansion at load time.
+        max_retries: Maximum number of retry attempts after the initial failure.
+                Default 3.  Set to 0 to disable retries (fire-and-forget).
+        retry_backoff_base: Base value (seconds) for exponential backoff calculation.
+                Effective sleep = min(60, retry_backoff_base * 2^attempt) with equal jitter.
+                Default 1.0.
 
     Reference:
         GitHub Webhooks https://docs.github.com/en/webhooks
         Stripe Webhooks https://docs.stripe.com/webhooks
-        DESIGN.md §10.N (v1.0.21)
+        AWS Exponential Backoff and Jitter https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
+        DESIGN.md §10.N (v1.0.21); §10.N (v1.0.22 — retry + env expansion)
     """
 
     url: str
     events: list[str] = field(default_factory=list)
     secret: str | None = None
+    max_retries: int = 3
+    retry_backoff_base: float = 1.0
 
 
 @dataclass
@@ -245,6 +255,8 @@ class OrchestratorConfig:
 
 def load_config(path: str | Path) -> OrchestratorConfig:
     """Load and validate an orchestrator config from a YAML file."""
+    import os  # noqa: PLC0415
+
     data = yaml.safe_load(Path(path).read_text())
 
     agents = [
@@ -271,9 +283,15 @@ def load_config(path: str | Path) -> OrchestratorConfig:
 
     webhooks = [
         WebhookConfig(
-            url=w["url"],
+            # Expand ${ENV_VAR} / $ENV_VAR patterns in url and secret at load time.
+            # os.path.expandvars leaves undefined variables unchanged.
+            # Reference: AWS Builders Library "Timeouts, retries and backoff with jitter";
+            # DESIGN.md §10.N (v1.0.22 — env var expansion in YAML webhook config)
+            url=os.path.expandvars(w["url"]),
             events=w.get("events", []),
-            secret=w.get("secret"),
+            secret=os.path.expandvars(w["secret"]) if w.get("secret") else None,
+            max_retries=int(w.get("max_retries", 3)),
+            retry_backoff_base=float(w.get("retry_backoff_base", 1.0)),
         )
         for w in data.get("webhooks", [])
     ]

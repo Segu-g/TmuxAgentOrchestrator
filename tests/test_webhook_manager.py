@@ -315,7 +315,10 @@ async def test_deliver_http_200_success(manager):
 @pytest.mark.asyncio
 async def test_deliver_http_500_failure(manager):
     """HTTP 500 response → success=False, failure_count incremented."""
-    wh = manager.register(url="https://hook.example.com", events=["task_complete"])
+    # Register with max_retries=0 so the test completes quickly without retries.
+    wh = manager.register(
+        url="https://hook.example.com", events=["task_complete"], max_retries=0
+    )
     mock_resp = _make_mock_response(500)
 
     with patch.object(httpx.AsyncClient, "post", new_callable=AsyncMock, return_value=mock_resp):
@@ -332,7 +335,10 @@ async def test_deliver_http_500_failure(manager):
 @pytest.mark.asyncio
 async def test_deliver_connection_error_recorded(manager):
     """Connection error → success=False, error field set."""
-    wh = manager.register(url="https://hook.example.com", events=["task_complete"])
+    # Register with max_retries=0 so the test completes quickly without retries.
+    wh = manager.register(
+        url="https://hook.example.com", events=["task_complete"], max_retries=0
+    )
 
     with patch.object(
         httpx.AsyncClient,

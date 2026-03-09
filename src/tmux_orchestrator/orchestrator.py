@@ -253,6 +253,8 @@ class Orchestrator:
                 url=wh_cfg.url,
                 events=wh_cfg.events,
                 secret=wh_cfg.secret,
+                max_retries=wh_cfg.max_retries,
+                retry_backoff_base=wh_cfg.retry_backoff_base,
             )
         # Checkpoint store — SQLite-backed fault-tolerant persistence.
         # Saves task queue and workflow state after each mutation so that an
