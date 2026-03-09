@@ -234,10 +234,10 @@ class SubmitTaskUseCase:
             submitted_at=task.submitted_at,
             ttl=task.ttl,
             expires_at=task.expires_at,
-            depends_on=list(task.depends_on),
+            depends_on=list(task.depends_on) if task.depends_on else [],
             reply_to=task.reply_to,
             target_agent=task.target_agent,
-            required_tags=list(task.required_tags),
+            required_tags=list(task.required_tags) if task.required_tags else [],
             target_group=task.target_group,
         )
 
@@ -278,3 +278,68 @@ class CancelTaskUseCase:
             task_id=dto.task_id,
             was_running=dto.task_id in in_progress_ids,
         )
+
+
+# ---------------------------------------------------------------------------
+# GetAgentUseCase
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class GetAgentDTO:
+    """Input DTO for ``GetAgentUseCase``."""
+
+    agent_id: str
+
+
+@dataclass
+class GetAgentResult:
+    """Output DTO for ``GetAgentUseCase``.
+
+    ``found`` is False when the agent does not exist.  ``agent_dict`` is the
+    raw dict snapshot when found (format mirrors ``TaskService.list_agents()``
+    items), or an empty dict when not found.
+    """
+
+    found: bool
+    agent_id: str
+    agent_dict: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return agent_dict for JSON serialisation, or an empty dict."""
+        return dict(self.agent_dict)
+
+
+class GetAgentUseCase:
+    """Retrieve a single agent by ID.
+
+    Encapsulates the lookup logic (search ``list_agents()`` snapshot by ID)
+    so that Web, TUI, and CLI adapters can call it without duplicating the
+    search loop.
+
+    Usage::
+
+        uc = GetAgentUseCase(orchestrator)
+        result = await uc.execute(GetAgentDTO(agent_id="worker-1"))
+        if not result.found:
+            raise HTTPException(404, "Agent not found")
+        return result.to_dict()
+
+    This is a **query** use case — it never mutates state.
+
+    Reference: CQRS pattern; Martin "Clean Architecture" (2017) Ch. 22.
+    """
+
+    def __init__(self, service: TaskService) -> None:
+        self._service = service
+
+    async def execute(self, dto: GetAgentDTO) -> GetAgentResult:
+        """Look up *dto.agent_id* and return a ``GetAgentResult``."""
+        for agent_info in self._service.list_agents():
+            if agent_info.get("id") == dto.agent_id:
+                return GetAgentResult(
+                    found=True,
+                    agent_id=dto.agent_id,
+                    agent_dict=agent_info,
+                )
+        return GetAgentResult(found=False, agent_id=dto.agent_id)

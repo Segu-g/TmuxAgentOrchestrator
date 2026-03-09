@@ -26,6 +26,9 @@ from tmux_orchestrator.application.use_cases import (
     CancelTaskDTO,
     CancelTaskResult,
     CancelTaskUseCase,
+    GetAgentDTO,
+    GetAgentResult,
+    GetAgentUseCase,
     SubmitTaskDTO,
     SubmitTaskResult,
     SubmitTaskUseCase,
@@ -383,3 +386,120 @@ class TestTaskServiceProtocol:
         svc = StubTaskService()
         assert SubmitTaskUseCase(svc)._service is svc
         assert CancelTaskUseCase(svc)._service is svc
+
+
+# ---------------------------------------------------------------------------
+# GetAgentUseCase tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetAgentUseCase:
+    """Tests for GetAgentUseCase — query use case for single-agent retrieval."""
+
+    @pytest.mark.asyncio
+    async def test_execute_returns_get_agent_result(self):
+        svc = StubTaskService()
+        svc.add_agent(_StubAgent(id="worker-1"))
+        uc = GetAgentUseCase(svc)
+        result = await uc.execute(GetAgentDTO(agent_id="worker-1"))
+        assert isinstance(result, GetAgentResult)
+
+    @pytest.mark.asyncio
+    async def test_found_true_when_agent_exists(self):
+        svc = StubTaskService()
+        svc.add_agent(_StubAgent(id="worker-1"))
+        uc = GetAgentUseCase(svc)
+        result = await uc.execute(GetAgentDTO(agent_id="worker-1"))
+        assert result.found is True
+
+    @pytest.mark.asyncio
+    async def test_found_false_when_agent_missing(self):
+        svc = StubTaskService()
+        uc = GetAgentUseCase(svc)
+        result = await uc.execute(GetAgentDTO(agent_id="no-such-agent"))
+        assert result.found is False
+
+    @pytest.mark.asyncio
+    async def test_agent_id_preserved_in_result(self):
+        svc = StubTaskService()
+        svc.add_agent(_StubAgent(id="agent-xyz"))
+        uc = GetAgentUseCase(svc)
+        result = await uc.execute(GetAgentDTO(agent_id="agent-xyz"))
+        assert result.agent_id == "agent-xyz"
+
+    @pytest.mark.asyncio
+    async def test_agent_id_preserved_when_not_found(self):
+        svc = StubTaskService()
+        uc = GetAgentUseCase(svc)
+        result = await uc.execute(GetAgentDTO(agent_id="ghost"))
+        assert result.agent_id == "ghost"
+
+    @pytest.mark.asyncio
+    async def test_agent_dict_contains_id_when_found(self):
+        svc = StubTaskService()
+        svc.add_agent(_StubAgent(id="w1"))
+        uc = GetAgentUseCase(svc)
+        result = await uc.execute(GetAgentDTO(agent_id="w1"))
+        assert result.agent_dict.get("id") == "w1"
+
+    @pytest.mark.asyncio
+    async def test_to_dict_returns_agent_info_when_found(self):
+        svc = StubTaskService()
+        svc.add_agent(_StubAgent(id="w2"))
+        uc = GetAgentUseCase(svc)
+        result = await uc.execute(GetAgentDTO(agent_id="w2"))
+        d = result.to_dict()
+        assert d["id"] == "w2"
+
+    @pytest.mark.asyncio
+    async def test_to_dict_returns_empty_dict_when_not_found(self):
+        svc = StubTaskService()
+        uc = GetAgentUseCase(svc)
+        result = await uc.execute(GetAgentDTO(agent_id="missing"))
+        assert result.to_dict() == {}
+
+    @pytest.mark.asyncio
+    async def test_does_not_mutate_service(self):
+        """GetAgentUseCase is a pure query — no state changes."""
+        svc = StubTaskService()
+        svc.add_agent(_StubAgent(id="a1"))
+        uc = GetAgentUseCase(svc)
+        before = list(svc.list_agents())
+        await uc.execute(GetAgentDTO(agent_id="a1"))
+        after = list(svc.list_agents())
+        assert before == after
+
+    @pytest.mark.asyncio
+    async def test_multiple_agents_correct_one_returned(self):
+        svc = StubTaskService()
+        svc.add_agent(_StubAgent(id="a1"))
+        svc.add_agent(_StubAgent(id="a2"))
+        svc.add_agent(_StubAgent(id="a3"))
+        uc = GetAgentUseCase(svc)
+        result = await uc.execute(GetAgentDTO(agent_id="a2"))
+        assert result.found is True
+        assert result.agent_dict["id"] == "a2"
+
+    @pytest.mark.asyncio
+    async def test_get_agent_use_case_accepts_service(self):
+        svc = StubTaskService()
+        uc = GetAgentUseCase(svc)
+        assert uc._service is svc
+
+    @pytest.mark.asyncio
+    async def test_empty_service_returns_not_found(self):
+        svc = StubTaskService()
+        uc = GetAgentUseCase(svc)
+        result = await uc.execute(GetAgentDTO(agent_id="anything"))
+        assert result.found is False
+        assert result.agent_dict == {}
+
+    @pytest.mark.asyncio
+    async def test_get_agent_result_exported_from_package(self):
+        """GetAgentUseCase and DTOs are importable from application package."""
+        from tmux_orchestrator.application import GetAgentDTO as GDTO
+        from tmux_orchestrator.application import GetAgentResult as GR
+        from tmux_orchestrator.application import GetAgentUseCase as GUC
+        assert GDTO is GetAgentDTO
+        assert GR is GetAgentResult
+        assert GUC is GetAgentUseCase

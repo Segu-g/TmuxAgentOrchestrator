@@ -3792,7 +3792,7 @@
     },
     "/tasks/{task_id}": {
       "delete": {
-        "description": "Cancel *task_id* whether it is queued or currently in-progress.\n\nDesign references:\n- Kubernetes ``kubectl delete pod`` \u2014 REST DELETE on a resource URI\n- POSIX SIGTERM/SIGKILL model; Go context.Context cancellation\n- DESIGN.md \u00a710.22 (v0.27.0)",
+        "description": "Cancel *task_id* whether it is queued or currently in-progress.\n\nDelegates to ``CancelTaskUseCase`` so the handler is a thin HTTP\nadapter (Martin \"Clean Architecture\" Ch. 22).\n\nDesign references:\n- Kubernetes ``kubectl delete pod`` \u2014 REST DELETE on a resource URI\n- POSIX SIGTERM/SIGKILL model; Go context.Context cancellation\n- DESIGN.md \u00a710.22 (v0.27.0)",
         "operationId": "delete_task_tasks__task_id__delete",
         "parameters": [
           {

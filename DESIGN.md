@@ -2781,3 +2781,77 @@ class AgentStatusMachine(RuleBasedStateMachine):
 **25/25 チェック PASSED**
 
 
+---
+
+## §10.46 — v1.1.14: `UseCaseInteractor` 層の抽出 (`application/use_cases.py`)
+
+### Step 0 — 選定理由
+
+**選択: `UseCaseInteractor` 層の抽出**
+
+**候補比較:**
+
+| 候補 | 優先度 | 選択理由 / 見送り理由 |
+|------|--------|----------------------|
+| **`UseCaseInteractor` 層の抽出** | **選択** | 中程度のスコープ・明確な実装パス・Clean Architecture の依存方向修正という高い設計価値。`web/app.py` のルーター分割 (v1.1.6) が完了しているため、次の自然なステップ。`SubmitTaskUseCase` / `CancelTaskUseCase` の2件のみに絞ることで1イテレーション内に収まる。既存テストを壊さずに後方互換性を保てる。 |
+| チェックポイント永続化 SQLite | 見送り | SQLite スキーマ設計・`--resume` フラグ・ワークフロー状態再構築と範囲が広すぎる。1イテレーションに収まらないリスクが高い。 |
+| ProcessPort 抽象インターフェース | 見送り | `ClaudeCodeAgent` 全体の依存方向逆転を伴う大規模リファクタリング。既存 E2E テストへの影響が非常に大きい。 |
+| `/deliberate` スラッシュコマンド | 見送り | 機能価値はあるが、アーキテクチャ品質の改善という長期的価値では `UseCaseInteractor` 抽出に劣る。 |
+| DriftMonitor セマンティック類似度 | 見送り | `sentence-transformers` の重いモデル依存が入る。コストパフォーマンスが低い。 |
+
+**実装スコープ:**
+1. `src/tmux_orchestrator/application/use_cases.py` を新規作成:
+   - `SubmitTaskUseCase` — タスク提出の業務ロジック (idempotency チェック・優先度バリデーション・タスクキュー投入) を Web 層から分離
+   - `CancelTaskUseCase` — タスクキャンセル/削除の業務ロジック
+   - `GetAgentUseCase` — 単一エージェント取得 (read-only、ほぼ delegation)
+2. `web/routers/tasks.py` のハンドラーが Use Case を呼び出すよう書き換え (後方互換性を保つ)
+3. `web/routers/agents.py` の関連ハンドラーも同様に Use Case 経由に変更
+4. 新規ユニットテスト: `tests/test_use_cases.py` (Use Case を Web 層・インフラ層なしでテスト)
+5. 既存テスト全件グリーン維持
+
+**何を選ばなかったか:**
+- 全ハンドラーの完全 Use Case 化は行わない (スコープを `submit_task`・`cancel_task` の2件に限定)
+- TUI 側の同等移行は行わない (次イテレーション候補)
+
+### Step 1 — Research
+
+**Query 1**: "Clean Architecture Use Case Interactor pattern FastAPI 2025 application layer"
+
+主要知見:
+- **ivan-borovets/fastapi-clean-example** (GitHub 2025): CQRS パターン採用。Interactor は `execute()` メソッドを持ち、リポジトリをコンストラクタ DI で受け取る。FastAPI の `HTTPException` などフレームワーク固有例外を Use Case 内に混入させてはならない。
+- **Layered Architecture & DI** (DEV Community): Controllers は「可能な限り薄く」し、入力バリデーションとルーティングのみを担当。業務ロジックは Service/Use Case 層へ委譲する。
+- **breadcrumbs collector** "Clean Architecture in Python" (2021): Use Case (Interactor) は「個々のビジネスシナリオの名前をそのまま持つクラス」。Interactor のみを単体テストすれば Web/DB 層なしで業務ロジックを検証できる。
+
+**References**:
+- ivan-borovets/fastapi-clean-example: https://github.com/ivan-borovets/fastapi-clean-example
+- Layered Architecture & DI: https://dev.to/markoulis/layered-architecture-dependency-injection-a-recipe-for-clean-and-testable-fastapi-code-3ioo
+- breadcrumbs collector: https://breadcrumbscollector.tech/the-clean-architecture-in-python-how-to-write-testable-and-flexible-code/
+
+**Query 2**: "Use Case Interactor Clean Architecture Python best practices dependency injection 2025"
+
+主要知見:
+- **py-clean-arch** (GitHub): Use Case は `execute(input_dto)` → `output_dto` の純粋な変換。外部依存は Protocol インターフェースで注入する。コマンドパターン採用で「エンキュー・ロールバック・依存分離」を同時実現。
+- **python-clean-architecture** toolkit: `@use_case` デコレーターで Use Case を登録し、DI コンテナから取得するパターン。`python-inject` / `injector` ライブラリが自動アセンブル。
+- **LinkedIn article**: 「Use Case はビジネスロジックの核心であり、Web/DB/外部 API の存在を知らない」というルールが Clean Architecture の Dependency Rule の具体化。
+
+**References**:
+- py-clean-arch: https://github.com/cdddg/py-clean-arch
+- python-clean-architecture: https://github.com/pcah/python-clean-architecture
+
+**Query 3**: "Martin Clean Architecture interactor layer web framework isolation testability 2024"
+
+主要知見:
+- **Uncle Bob Clean Architecture Blog** (Robert C. Martin 2012, 2024 引用): Jacobson の3分類 (Entities / Interactors / Boundaries) を適用すると、Web フレームワークはアーキテクチャの「付録 (appendix)」として端に配置される。Interactor は Gateway インターフェースのみを知り、実装の詳細は外側の層に封じ込める。
+- **fullstackmark.com "Better Software Design"**: 「Business rules can be tested without UI, Database, Web Server, or any other external element」が Clean Architecture の核心メリット。
+- **Medium "In 2024, Clean Architecture in C# ASP.NET"**: 2024 年においても原則に変化なし。Separation of Concerns・Testability・Maintainability の3軸が主目的。
+
+**References**:
+- Clean Architecture Blog: https://blog.cleancoder.com/uncle-bob/2012/08/13/the-clean-architecture.html
+- Better Software Design: https://fullstackmark.com/post/11/better-software-design-with-clean-architecture
+
+**実装への示唆**:
+1. `SubmitTaskUseCase.execute(dto)` は `orchestrator.submit_task()` を Protocol 経由で呼び出す (直接参照しない)
+2. Use Case 内で `HTTPException` を raise しない — 代わりに `ValueError` / ドメイン例外を raise し、FastAPI ハンドラーで変換する
+3. テストは `MockOrchestratorPort` を注入して Web/非同期コンテキストなしで `execute()` を直接呼び出す
+
+

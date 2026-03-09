@@ -340,25 +340,24 @@ def build_tasks_router(
     async def delete_task(task_id: str) -> dict:
         """Cancel *task_id* whether it is queued or currently in-progress.
 
+        Delegates to ``CancelTaskUseCase`` so the handler is a thin HTTP
+        adapter (Martin "Clean Architecture" Ch. 22).
+
         Design references:
         - Kubernetes ``kubectl delete pod`` — REST DELETE on a resource URI
         - POSIX SIGTERM/SIGKILL model; Go context.Context cancellation
         - DESIGN.md §10.22 (v0.27.0)
         """
-        in_progress_ids = set()
-        for agent in orchestrator.list_agents():
-            agent_obj = orchestrator.get_agent(agent["id"])
-            if agent_obj is not None and agent_obj._current_task is not None:
-                in_progress_ids.add(agent_obj._current_task.id)
+        from tmux_orchestrator.application.use_cases import CancelTaskDTO, CancelTaskUseCase  # noqa: PLC0415
 
-        cancelled = await orchestrator.cancel_task(task_id)
-        if not cancelled:
+        use_case = CancelTaskUseCase(orchestrator)
+        result = await use_case.execute(CancelTaskDTO(task_id=task_id))
+        if not result.cancelled:
             raise HTTPException(
                 status_code=404,
                 detail=f"Task {task_id!r} not found (already completed, unknown, or dead-lettered)",
             )
-        was_running = task_id in in_progress_ids
-        return {"cancelled": True, "task_id": task_id, "was_running": was_running}
+        return result.to_dict()
 
     @router.post(
         "/tasks/{task_id}/cancel",
@@ -408,41 +407,28 @@ def build_tasks_router(
 
 
 async def _do_submit_task(orchestrator: Any, body: TaskSubmit) -> dict:
-    """Shared implementation for rate-limited and non-rate-limited submit_task variants."""
+    """Shared implementation for rate-limited and non-rate-limited submit_task variants.
+
+    Delegates to ``SubmitTaskUseCase`` so that the HTTP handler remains a thin
+    adapter with no business logic (Martin "Clean Architecture" Ch. 22).
+    """
+    from tmux_orchestrator.application.use_cases import SubmitTaskDTO, SubmitTaskUseCase  # noqa: PLC0415
     from tmux_orchestrator.security import sanitize_prompt  # noqa: PLC0415
 
-    task = await orchestrator.submit_task(
-        sanitize_prompt(body.prompt),
+    dto = SubmitTaskDTO(
+        prompt=sanitize_prompt(body.prompt),
         priority=body.priority,
-        metadata=body.metadata,
-        depends_on=body.depends_on or None,
+        metadata=body.metadata or {},
+        depends_on=list(body.depends_on) if body.depends_on else [],
+        idempotency_key=None,
         reply_to=body.reply_to,
         target_agent=body.target_agent,
-        required_tags=body.required_tags or None,
+        required_tags=list(body.required_tags) if body.required_tags else [],
         target_group=body.target_group,
         max_retries=body.max_retries,
         inherit_priority=body.inherit_priority,
         ttl=body.ttl,
     )
-    result: dict = {
-        "task_id": task.id,
-        "prompt": task.prompt,
-        "priority": task.priority,
-        "max_retries": task.max_retries,
-        "retry_count": task.retry_count,
-        "inherit_priority": task.inherit_priority,
-        "submitted_at": task.submitted_at,
-        "ttl": task.ttl,
-        "expires_at": task.expires_at,
-    }
-    if task.depends_on:
-        result["depends_on"] = task.depends_on
-    if task.reply_to is not None:
-        result["reply_to"] = task.reply_to
-    if task.target_agent is not None:
-        result["target_agent"] = task.target_agent
-    if task.required_tags:
-        result["required_tags"] = task.required_tags
-    if task.target_group is not None:
-        result["target_group"] = task.target_group
-    return result
+    use_case = SubmitTaskUseCase(orchestrator)
+    result_dto = await use_case.execute(dto)
+    return result_dto.to_dict()
