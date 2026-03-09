@@ -1,15 +1,18 @@
 """Tests for DriftMonitor — agent behavioral drift detection.
 
-Feature: エージェントドリフト検出 (DESIGN.md §10.20, v1.0.9)
+Feature: エージェントドリフト検出 (DESIGN.md §10.20, v1.0.9 / §10.49 v1.1.17)
 
 Implements a subset of the Agent Stability Index (ASI) from:
   Rath, "Agent Drift: Quantifying Behavioral Degradation in Multi-Agent LLM Systems
   Over Extended Interactions", arXiv:2601.04170, January 2026.
 
+v1.1.17: role_score now uses TF-IDF cosine similarity (pure stdlib, zero new deps)
+instead of keyword-overlap heuristic.  See DESIGN.md §10.49.
+
 Tested behaviours:
 1. DriftMonitor publishes agent_drift_warning when role_score drops below threshold.
 2. DriftMonitor does NOT re-publish if agent was already warned this window.
-3. role_score is computed from keyword overlap between system_prompt and pane output.
+3. role_score is computed via TF-IDF cosine similarity between system_prompt and pane output.
 4. idle_score drops when no pane output change is detected for > idle_threshold seconds.
 5. length_score detects sharp variance in output line counts.
 6. composite drift_score = weighted average of role_score, idle_score, length_score.
@@ -22,17 +25,25 @@ Tested behaviours:
 13. Agents with no pane are skipped in poll cycle.
 14. agent_drift_warning payload contains agent_id, drift_score, role_score, idle_score, length_score.
 15. New agents discovered after start() are picked up automatically.
-16. Drift warning includes system_prompt keywords that are absent from pane output.
+16. Drift warning fires when pane output is semantically unrelated to system_prompt.
 17. REST GET /agents/{id}/drift returns 200 with correct fields (integration test).
 18. REST GET /agents/{id}/drift returns 404 for unknown agent.
 19. REST GET /drift returns list of all drift stats.
 20. Config fields drift_monitor_poll and drift_threshold load from YAML.
+21. TF-IDF role_score: identical documents → score close to 1.0.
+22. TF-IDF role_score: completely disjoint vocabularies → score = 0.0.
+23. TF-IDF role_score: partial overlap → 0.0 < score < 1.0.
+24. _tfidf_cosine_similarity handles empty doc_a gracefully.
+25. _tfidf_cosine_similarity handles empty doc_b gracefully.
+26. _tokenize_role filters tokens shorter than _MIN_KEYWORD_LEN.
+27. _tokenize_role lowercases tokens.
 
 Design references:
 - Rath arXiv:2601.04170 "Agent Drift" (2026) — ASI 12 dimensions, threshold τ=0.75
+- ACL 2025 BlackboxNLP "Emergent Convergence in Multi-Agent LLM Annotation"
 - "Behavioral Monitoring & Anomaly Detection for Agents" tekysinfo.com (2025)
 - Monitoring LLM-based Multi-Agent Systems arXiv:2510.19420 (2025)
-- DESIGN.md §10.20 (v1.0.9)
+- DESIGN.md §10.20 (v1.0.9), §10.49 (v1.1.17)
 """
 from __future__ import annotations
 
@@ -54,6 +65,8 @@ from tmux_orchestrator.drift_monitor import (
     _compute_idle_score,
     _compute_length_score,
     _composite_score,
+    _tfidf_cosine_similarity,
+    _tokenize_role,
 )
 
 
@@ -106,10 +119,13 @@ async def _collect_events(bus: Bus, count: int, timeout: float = 1.0) -> list[Me
 
 
 class TestRoleScore:
-    def test_full_overlap_returns_one(self):
-        # All system_prompt keywords present in output → score = 1.0
+    def test_high_overlap_returns_high_score(self):
+        # All system_prompt keywords present in output → TF-IDF cosine is positive.
+        # Note: TF-IDF cosine between documents of different length is not 1.0 —
+        # extra tokens in the output reduce the IDF weight of shared terms.
+        # We require a meaningful positive score (> 0.3) rather than exact 1.0.
         score = _compute_role_score("implement a sorting algorithm", "Here I implement a sorting algorithm step by step")
-        assert score == pytest.approx(1.0)
+        assert score > 0.3
 
     def test_zero_overlap_returns_zero(self):
         # None of the keywords present → score = 0.0
@@ -117,8 +133,8 @@ class TestRoleScore:
         assert score == pytest.approx(0.0)
 
     def test_partial_overlap(self):
-        # 2/4 keywords present → score ≈ 0.5
-        score = _compute_role_score("implement sorting algorithm python", "I will implement the task")
+        # Partial token overlap → 0.0 < score < 1.0
+        score = _compute_role_score("implement sorting algorithm python", "I will implement the task today")
         assert 0.0 < score < 1.0
 
     def test_empty_system_prompt_returns_one(self):
@@ -132,8 +148,9 @@ class TestRoleScore:
         assert score == pytest.approx(0.0)
 
     def test_case_insensitive(self):
+        # Both documents have exactly "python" and "sorting" — cosine should be high
         score = _compute_role_score("Python Sorting", "python sorting is cool")
-        assert score == pytest.approx(1.0)
+        assert score > 0.7
 
     def test_short_stop_words_excluded(self):
         # Words shorter than 4 chars should not count as keywords
@@ -141,6 +158,20 @@ class TestRoleScore:
         score = _compute_role_score("do a ok so", "completely unrelated text here")
         # All words are short stop words — should behave as empty prompt
         assert score == pytest.approx(1.0)
+
+    def test_identical_documents_high_similarity(self):
+        # Same text as prompt and output → cosine should be exactly 1.0
+        text = "implement sorting algorithm refactor testing"
+        score = _compute_role_score(text, text)
+        assert score == pytest.approx(1.0)
+
+    def test_unrelated_output_low_similarity(self):
+        # Semantically unrelated output → low cosine similarity
+        score = _compute_role_score(
+            "implement sorting algorithm refactor python code",
+            "pizza recipe: mix flour eggs butter salt sugar vanilla cream",
+        )
+        assert score < 0.3
 
 
 class TestIdleScore:
@@ -207,6 +238,102 @@ class TestCompositeScore:
         # Weights: role=0.50, idle=0.30, length=0.20
         expected = 0.50 * 1.0 + 0.30 * 0.0 + 0.20 * 1.0
         assert _composite_score(1.0, 0.0, 1.0) == pytest.approx(expected)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests — TF-IDF helper functions (v1.1.17)
+# ---------------------------------------------------------------------------
+
+
+class TestTfIdfCosine:
+    """Tests for the pure-stdlib TF-IDF cosine similarity helper."""
+
+    def test_identical_docs_score_one(self):
+        # Two identical token lists → cosine = 1.0
+        tokens = ["implement", "sorting", "algorithm", "python"]
+        assert _tfidf_cosine_similarity(tokens, tokens) == pytest.approx(1.0)
+
+    def test_disjoint_docs_score_zero(self):
+        # No shared terms → cosine = 0.0
+        assert _tfidf_cosine_similarity(
+            ["implement", "sorting", "algorithm"],
+            ["pizza", "recipe", "flour", "sugar"],
+        ) == pytest.approx(0.0)
+
+    def test_partial_overlap_between_zero_and_one(self):
+        score = _tfidf_cosine_similarity(
+            ["implement", "sorting", "algorithm", "python"],
+            ["implement", "testing", "framework", "python"],
+        )
+        assert 0.0 < score < 1.0
+
+    def test_empty_doc_a_returns_zero(self):
+        assert _tfidf_cosine_similarity([], ["implement", "sorting"]) == pytest.approx(0.0)
+
+    def test_empty_doc_b_returns_zero(self):
+        assert _tfidf_cosine_similarity(["implement", "sorting"], []) == pytest.approx(0.0)
+
+    def test_both_empty_returns_zero(self):
+        assert _tfidf_cosine_similarity([], []) == pytest.approx(0.0)
+
+    def test_single_shared_term(self):
+        # One shared token → positive cosine
+        score = _tfidf_cosine_similarity(["python"], ["python"])
+        assert score == pytest.approx(1.0)
+
+    def test_score_in_range(self):
+        # Result always in [0.0, 1.0]
+        score = _tfidf_cosine_similarity(
+            ["code", "review", "implement", "refactor"],
+            ["review", "testing", "deploy", "monitor"],
+        )
+        assert 0.0 <= score <= 1.0
+
+    def test_shared_terms_increase_score_vs_disjoint(self):
+        # Partially overlapping docs score higher than fully disjoint docs
+        score_overlap = _tfidf_cosine_similarity(
+            ["code", "review", "python"],
+            ["code", "testing", "java"],
+        )
+        score_disjoint = _tfidf_cosine_similarity(
+            ["code", "review", "python"],
+            ["pizza", "recipe", "flour"],
+        )
+        assert score_overlap > score_disjoint
+
+
+class TestTokenizeRole:
+    """Tests for _tokenize_role — stop-word filtering."""
+
+    def test_filters_short_tokens(self):
+        # Tokens shorter than _MIN_KEYWORD_LEN (4) are removed
+        result = _tokenize_role("do a ok so")
+        assert result == []
+
+    def test_lowercases_tokens(self):
+        result = _tokenize_role("Python Sorting Algorithm")
+        assert result == ["python", "sorting", "algorithm"]
+
+    def test_keeps_tokens_at_min_length(self):
+        # _MIN_KEYWORD_LEN = 4; "code" (4 chars) should be kept
+        result = _tokenize_role("code test")
+        assert "code" in result
+        assert "test" in result
+
+    def test_alphanumeric_only(self):
+        # Punctuation is stripped
+        result = _tokenize_role("implement-sorting: algorithm!")
+        assert "implement" in result
+        assert "sorting" in result
+        assert "algorithm" in result
+
+    def test_empty_string(self):
+        assert _tokenize_role("") == []
+
+    def test_numbers_kept_if_long_enough(self):
+        result = _tokenize_role("version 2025 test")
+        assert "2025" in result
+        assert "test" in result
 
 
 # ---------------------------------------------------------------------------

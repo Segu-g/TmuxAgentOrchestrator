@@ -3099,3 +3099,79 @@ class AgentStatusMachine(RuleBasedStateMachine):
 **デバッグ**: (1) pair ワークフローの scratchpad_prefix は UUID ベース (`pair_<uuid[:8]>`) であり、固定キーではない。POST レスポンスの `scratchpad_prefix` フィールドから動的に取得する必要があった。(2) タスク ID も `task_ids.navigator`/`task_ids.driver` フィールドとして POST レスポンスに含まれており、履歴ポーリングより確実。
 
 **35/35 チェック PASSED**
+
+
+## §10.49 — v1.1.17: DriftMonitor TF-IDF コサイン類似度による role_score 強化
+
+### Step 0 — 選択
+
+**選択: DriftMonitor TF-IDF コサイン類似度 (v1.1.17)**
+
+§11「アーキテクチャ・品質」の**中**優先度候補。
+
+#### 選択理由
+
+1. **真に未実装の最高優先度候補**: §11 に残る未実装項目を精査した結果、高優先度の全項目（チェックポイント永続化・ProcessPort・OpenTelemetry・UseCaseInteractor・Hypothesis ステートフルテスト）はすべて完了済み。中優先度の未実装候補は DriftMonitor セマンティック類似度・P2P TLA+ 形式仕様化の2件のみとなった。
+
+2. **既存インフラを最大活用**: `application/context_compression.py` に TF-IDF + コサイン類似度の純 Python 実装が既に存在する（外部依存ゼロ）。同実装を `drift_monitor.py` に転用することで `sentence-transformers` の新規依存を回避しながら§11 の要件（「embedding コサイン類似度による role_score 改善」）を達成できる。
+
+3. **既知バグの修正**: 現行の `_compute_role_score` はキーワード出現カウントに基づき、`role_score = 1.0` に張り付く傾向が報告されている（§11 の根拠欄）。TF-IDF コサイン類似度は「単語形式は合っているが内容が異なる」ドリフトを検出できる。
+
+4. **デモ設計が明確**: 2エージェント構成（implementer + reviewer）で、reviewer が実装と無関係な作業をすると `role_score` が下落し `agent_drift_warning` が発火することを実証できる。
+
+#### 選択しなかった候補と理由
+
+- **P2P 許可テーブルの TLA+ 形式仕様化**: TLA+ ツールチェーン（TLC model checker）のインストールと TLA+ 言語習得が前提となる。ユーザー向け機能ではなく仕様検証であり、ROI が低い。
+- **チェックポイント永続化 SQLite の `--resume` 拡張**: `checkpoint_store.py` と `--resume` フラグは実装済み。追加スコープがあるとすれば Orchestrator 再起動後のワークフロー状態復元だが、単独イテレーションには大きすぎる。
+- **DriftMonitor `sentence-transformers`**: 22MB モデルダウンロードが必要。純 Python TF-IDF で同等の改善が可能なため採用しない。
+
+### Step 1 — Research
+
+**Query 1**: "TF-IDF cosine similarity agent role drift detection LLM 2025"
+
+主要知見:
+- **LLMelite.com "Model Drift Management: LLM Strategies for Drift Detection & Control" (2025-12)**: コサイン類似度を使ったドリフト検出が標準手法として定着。エージェントの出力ベクトルを周期的に比較し、類似度低下でアラート発火。
+- **ACL 2025 BlackboxNLP "Emergent Convergence in Multi-Agent LLM Annotation"**: TF-IDF ベクトルの連続ラウンド間コサイン類似度で、マルチエージェント LLM 注釈システムの発話収束・乖離を定量化する手法を実証。
+
+**References**:
+- LLMelite Model Drift Management: https://llmelite.com/2025/12/25/model-drift-management-llm-strategies-for-drift-detection-control/
+- ACL 2025 BlackboxNLP: https://aclanthology.org/2025.blackboxnlp-1.12.pdf
+
+**Query 2**: "agent stability index role adherence scoring multi-agent system arXiv 2025"
+
+主要知見:
+- **arXiv:2602.16666 "Towards a Science of AI Agent Reliability" (2025)**: reliability の定義に「role adherence = 事前定義された制約へのコンプライアンスを測定する policy adherence score」を含む。エージェントが operational boundary を尊重しているかを追跡するスコアリングが提案された。
+- **arXiv:2511.14136 "Beyond Accuracy: A Multi-Dimensional Framework for Evaluating Enterprise Agentic AI Systems"**: 5次元 CLEAR フレームワーク（cost / latency / efficiency / assurance / reliability）で policy adherence score (PAS) を提案。セキュリティ評価を含む enterprise エージェント評価の標準指標として位置付ける。
+
+**References**:
+- arXiv:2602.16666: https://arxiv.org/abs/2602.16666
+- arXiv:2511.14136: https://arxiv.org/abs/2511.14136
+
+**Query 3**: "TF-IDF text similarity pure Python implementation no dependencies 2025"
+
+主要知見:
+- **mbrenndoerfer.com "TF-IDF and Bag of Words: Complete Guide" (2025-08)**: 外部依存ゼロの純 Python TF-IDF + コサイン類似度実装が可能。IDF = log(N/df_t) + 1、コサイン = dot(a,b) / (|a||b|) の stdlib math のみで実装できる。
+- **Medium "TF-IDF from Scratch in Python"**: `collections.Counter` で TF 計算 → IDF 辞書構築 → コサイン類似度計算のパターン。`application/context_compression.py` に同様の実装が既に存在するため転用可能。
+
+**References**:
+- mbrenndoerfer.com TF-IDF guide: https://mbrenndoerfer.com/writing/tf-idf-bag-of-words-text-representation-information-retrieval
+- Medium TF-IDF from Scratch: https://medium.com/bitgrit-data-science-publication/tf-idf-from-scratch-in-python-ea587d003e9e
+
+**Query 4**: "LLM agent role drift semantic similarity system prompt output divergence detection 2025 2026"
+
+主要知見:
+- **arXiv:2601.04170 "Agent Drift: Quantifying Behavioral Degradation in Multi-Agent LLM Systems" (Rath et al., 2026-01)**: Agent Stability Index (ASI) の role_adherence 次元は「agent_id とタスクタイプの相互情報量」で測定。ASI < 0.85 で役割逸脱の兆候が 73 インタラクション中央値で出現。コサイン類似度ベースのセマンティクス計測が根本アプローチ。セマンティック・ドリフトは 600 インタラクションで約 50% のマルチエージェントワークフローに発生。
+- **arXiv:2510.07777 "Drift No More? Context Equilibria in Multi-Turn LLM Interactions"**: 文脈蓄積によるドリフトを「コンテキスト均衡」モデルで説明。system_prompt と出力の意味的距離の増大がドリフトの直接指標とされる。
+
+**References**:
+- arXiv:2601.04170 (Rath et al. 2026): https://arxiv.org/abs/2601.04170
+- arXiv:2510.07777: https://arxiv.org/abs/2510.07777
+
+**実装への示唆**:
+1. 現行の `_compute_role_score` (keyword overlap) を TF-IDF コサイン類似度に置き換える
+2. `application/context_compression.py` の純 Python TF-IDF 実装 (外部依存ゼロ) を参考に実装
+3. `system_prompt` と `pane_output` を 2 文書として TF-IDF ベクトル化 → コサイン類似度を role_score として返す
+4. IDF 計算にはグローバルコーパスが不要 — この2文書コーパス内での逆文書頻度を使用
+5. `drift_monitor.py` の `_MIN_KEYWORD_LEN` 下限 (3文字) を継承して短い単語をフィルタリング
+6. 後方互換性: `system_prompt` が空の場合は従来の keyword fallback を維持
+7. デモ: implementer + drift_agent の2エージェント構成。drift_agent が無関係な作業をするとき `role_score` が下落し `agent_drift_warning` が発火することを実証。

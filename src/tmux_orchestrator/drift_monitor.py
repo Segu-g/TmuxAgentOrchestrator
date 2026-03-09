@@ -11,10 +11,16 @@ implements a lightweight, dependency-free subset of the Agent Stability Index
 Three sub-scores are computed on each poll cycle:
 
 1. **Role score** (weight 0.50)
-   Measures keyword overlap between the agent's ``system_prompt`` and the
-   current pane output.  When an agent stops using the vocabulary of its
-   designated role, this score falls.  Corresponds to the ASI "Role Adherence"
-   dimension (Inter-Agent Coordination category, ASI 0.25 weight).
+   Measures the TF-IDF cosine similarity between the agent's ``system_prompt``
+   and the current pane output.  When an agent's output diverges semantically
+   from its designated role vocabulary, this score falls.  Corresponds to the
+   ASI "Role Adherence" dimension (Inter-Agent Coordination category, ASI 0.25
+   weight).
+
+   Implementation uses pure-stdlib TF-IDF (same approach as
+   ``application/context_compression.py``; no external dependencies).  The
+   prior keyword-overlap heuristic was prone to false-positive 1.0 scores when
+   role keywords happened to appear incidentally in unrelated output.
 
 2. **Idle score** (weight 0.30)
    Measures how long the agent's pane output has been unchanged.  A pane that
@@ -34,10 +40,12 @@ The warning is published at most once per warning window; the flag resets
 automatically when the score recovers above the threshold.
 
 Design references:
-- Rath arXiv:2601.04170 "Agent Drift" (2026) — ASI framework
+- Rath arXiv:2601.04170 "Agent Drift" (2026) — ASI framework, role_adherence dimension
+- ACL 2025 BlackboxNLP "Emergent Convergence in Multi-Agent LLM Annotation"
+  — TF-IDF cosine similarity for output convergence/drift quantification
 - "Behavioral Monitoring & Anomaly Detection for Agents" tekysinfo.com (2025)
 - Monitoring LLM-based Multi-Agent Systems arXiv:2510.19420 (2025)
-- DESIGN.md §10.20 (v1.0.9)
+- DESIGN.md §10.20 (v1.0.9), §10.49 (v1.1.17 — TF-IDF role_score)
 """
 from __future__ import annotations
 
@@ -46,6 +54,7 @@ import logging
 import math
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -76,8 +85,11 @@ _DEFAULT_IDLE_THRESHOLD: float = 300.0  # 5 minutes
 # Rolling window size for length_score variance.
 _LENGTH_HISTORY_WINDOW: int = 10
 
-# Minimum keyword length to include in role_score (filters stop words).
+# Minimum token length for role_score TF-IDF computation (filters stop words).
 _MIN_KEYWORD_LEN: int = 4
+
+# Regex for tokenisation — keeps alphanumeric sequences, lowercased.
+_TOKEN_RE = re.compile(r"[a-zA-Z0-9]+")
 
 # Sub-score weights — must sum to 1.0.
 _ROLE_WEIGHT: float = 0.50
@@ -90,36 +102,113 @@ _LENGTH_WEIGHT: float = 0.20
 # ---------------------------------------------------------------------------
 
 
+def _tokenize_role(text: str) -> list[str]:
+    """Tokenise *text* for role-score computation.
+
+    Lowercases, extracts alphanumeric tokens, and filters out tokens shorter
+    than ``_MIN_KEYWORD_LEN`` (stop-word proxy).
+
+    Parameters
+    ----------
+    text:
+        Raw text to tokenise.
+
+    Returns
+    -------
+    list[str]:
+        Filtered list of lowercase tokens.
+    """
+    tokens = _TOKEN_RE.findall(text.lower())
+    return [t for t in tokens if len(t) >= _MIN_KEYWORD_LEN]
+
+
+def _tfidf_cosine_similarity(doc_a: list[str], doc_b: list[str]) -> float:
+    """Compute TF-IDF cosine similarity between two tokenised documents.
+
+    Uses a 2-document corpus (doc_a + doc_b) so that terms shared by both
+    documents receive a lower IDF weight, while terms unique to one document
+    receive a higher weight.  This is the same pure-stdlib approach used in
+    ``application/context_compression.py``.
+
+    Parameters
+    ----------
+    doc_a, doc_b:
+        Pre-tokenised documents (lists of lowercase tokens).
+
+    Returns
+    -------
+    float:
+        Cosine similarity in [0.0, 1.0].  Returns 0.0 when either document
+        has no tokens after filtering.
+    """
+    if not doc_a or not doc_b:
+        return 0.0
+
+    documents = [doc_a, doc_b]
+    n_docs = 2
+
+    # Build document-frequency table
+    df: dict[str, int] = Counter()
+    for doc in documents:
+        for term in set(doc):
+            df[term] += 1
+
+    def _build_vec(doc: list[str]) -> dict[str, float]:
+        tf = Counter(doc)
+        n_tokens = max(len(doc), 1)
+        vec: dict[str, float] = {}
+        for term in set(doc):
+            tf_score = tf[term] / n_tokens
+            # Smoothed IDF (same formula as context_compression.py)
+            idf_score = math.log((1 + n_docs) / (1 + df[term])) + 1.0
+            vec[term] = tf_score * idf_score
+        return vec
+
+    vec_a = _build_vec(doc_a)
+    vec_b = _build_vec(doc_b)
+
+    dot = sum(vec_a.get(term, 0.0) * val for term, val in vec_b.items())
+    norm_a = math.sqrt(sum(v * v for v in vec_a.values()))
+    norm_b = math.sqrt(sum(v * v for v in vec_b.values()))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return min(1.0, dot / (norm_a * norm_b))
+
+
 def _compute_role_score(system_prompt: str, pane_output: str) -> float:
-    """Compute keyword overlap between *system_prompt* and *pane_output*.
+    """Compute TF-IDF cosine similarity between *system_prompt* and *pane_output*.
 
     Returns 1.0 when there is no role constraint (empty prompt) or when all
-    keywords are present.  Returns 0.0 when none of the keywords appear in the
-    output.
+    meaningful tokens are stop words.  Returns 0.0 when the role is specified
+    but the pane is empty.  Otherwise returns the TF-IDF cosine similarity
+    of the two documents, in [0.0, 1.0].
+
+    The TF-IDF approach detects "form is correct but content differs" drift
+    that the prior keyword-overlap heuristic could miss (e.g. when role
+    keywords appear incidentally in output that is semantically unrelated).
 
     Parameters
     ----------
     system_prompt:
-        The agent's assigned role description.  Short stop words (< 4 chars)
-        are ignored.
+        The agent's assigned role description.
     pane_output:
         The current captured pane text to evaluate.
     """
     if not system_prompt.strip():
         return 1.0  # No role → no drift possible
 
-    # Tokenise and filter stop words
-    tokens = re.findall(r"[a-zA-Z]+", system_prompt.lower())
-    keywords = [t for t in tokens if len(t) >= _MIN_KEYWORD_LEN]
-    if not keywords:
+    prompt_tokens = _tokenize_role(system_prompt)
+    if not prompt_tokens:
         return 1.0  # All words were stop words → no constraint
 
     if not pane_output.strip():
         return 0.0  # Role specified but pane is empty
 
-    output_lower = pane_output.lower()
-    present = sum(1 for kw in keywords if kw in output_lower)
-    return present / len(keywords)
+    output_tokens = _tokenize_role(pane_output)
+    if not output_tokens:
+        return 0.0  # Role specified; output has only stop words
+
+    return _tfidf_cosine_similarity(prompt_tokens, output_tokens)
 
 
 def _compute_idle_score(last_change_time: float, idle_threshold: float) -> float:
