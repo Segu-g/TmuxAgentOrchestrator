@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from tmux_orchestrator.application.context_compression import TfIdfContextCompressor
 from tmux_orchestrator.bus import Message, MessageType
 
 if TYPE_CHECKING:
@@ -102,6 +103,11 @@ class AgentContextStats:
     notes_updates: int = 0
     context_warnings: int = 0
     summarize_triggers: int = 0
+    # TF-IDF auto-compress tracking (v1.1.12).
+    # Whether auto-compression has been injected for the current threshold crossing.
+    compress_injected: bool = False
+    # Total number of times auto-compression was triggered.
+    compress_triggers: int = 0
     # Monotonic timestamp of last poll.
     last_polled: float = field(default_factory=time.monotonic)
 
@@ -136,6 +142,17 @@ class ContextMonitor:
         threshold is exceeded.  The injection is done at most once per
         threshold crossing (reset after the monitor detects a NOTES.md
         update).
+    auto_compress:
+        When ``True``, automatically run TF-IDF extractive compression on the
+        agent's pane output at threshold and inject the compressed context via
+        ``notify_stdin``.  This is injected at most once per threshold crossing
+        (the ``compress_injected`` flag resets when the context drops below the
+        threshold again).  Can be combined with ``auto_summarize`` — both will
+        run independently.
+    compress_drop_percentile:
+        Fraction of low-relevance lines to discard during auto-compression.
+        Default 0.40 — removes the bottom 40 % of lines by TF-IDF relevance.
+        Reference: ACON arXiv:2510.00615 (Kang et al. 2025).
     poll_interval:
         Seconds between polling cycles.
     """
@@ -149,6 +166,8 @@ class ContextMonitor:
         context_window_tokens: int = _DEFAULT_CONTEXT_WINDOW_TOKENS,
         warn_threshold: float = _DEFAULT_WARN_THRESHOLD,
         auto_summarize: bool = False,
+        auto_compress: bool = False,
+        compress_drop_percentile: float = 0.40,
         poll_interval: float = _DEFAULT_POLL,
     ) -> None:
         self._bus = bus
@@ -157,7 +176,15 @@ class ContextMonitor:
         self._context_window_tokens = context_window_tokens
         self._warn_threshold = warn_threshold
         self._auto_summarize = auto_summarize
+        self._auto_compress = auto_compress
+        self._compress_drop_percentile = compress_drop_percentile
         self._poll_interval = poll_interval
+        # Pre-create the TF-IDF compressor (stateless, reusable).
+        self._compressor: TfIdfContextCompressor | None = (
+            TfIdfContextCompressor(drop_percentile=compress_drop_percentile)
+            if auto_compress
+            else None
+        )
         # Per-agent stats, keyed by agent_id
         self._stats: dict[str, AgentContextStats] = {}
         self._task: asyncio.Task | None = None
@@ -199,6 +226,7 @@ class ContextMonitor:
             "notes_updates": s.notes_updates,
             "context_warnings": s.context_warnings,
             "summarize_triggers": s.summarize_triggers,
+            "compress_triggers": s.compress_triggers,
             "last_polled": s.last_polled,
         }
 
@@ -266,7 +294,7 @@ class ContextMonitor:
     async def _check_context_threshold(
         self, agent: "Agent", s: AgentContextStats
     ) -> None:
-        """Publish context_warning and optionally inject /summarize."""
+        """Publish context_warning and optionally inject /summarize and/or TF-IDF compression."""
         if s.context_pct < self._warn_threshold:
             # Threshold not exceeded — reset flags for next crossing
             if s.warned:
@@ -276,6 +304,7 @@ class ContextMonitor:
                 )
             s.warned = False
             s.summarize_injected = False
+            s.compress_injected = False
             return
 
         if not s.warned:
@@ -308,6 +337,14 @@ class ContextMonitor:
                 estimated_tokens=s.estimated_tokens,
                 context_pct=round(s.context_pct * 100, 1),
             )
+
+        if (
+            self._auto_compress
+            and self._compressor is not None
+            and not s.compress_injected
+            and agent.pane is not None
+        ):
+            await self._run_auto_compress(agent, s)
 
     async def _check_notes_updated(
         self,
@@ -358,6 +395,93 @@ class ContextMonitor:
             notes_path=str(notes_path),
             notes_mtime=mtime,
             preview=preview,
+        )
+
+    # ------------------------------------------------------------------
+    # Auto-compress (TF-IDF extractive compression)
+    # ------------------------------------------------------------------
+
+    async def _run_auto_compress(
+        self, agent: "Agent", s: AgentContextStats
+    ) -> None:
+        """Run TF-IDF compression on the agent's pane and inject the result.
+
+        The compressed text is sent to the agent via ``notify_stdin`` using the
+        ``__COMPRESS_CONTEXT__`` protocol token.  The agent plugin's
+        UserPromptSubmit hook (or a future dedicated hook) can intercept this
+        token and inject the compressed text as additional context.
+
+        Injection is skipped if the compressor is unavailable or pane capture
+        fails.  The ``compress_injected`` flag prevents re-compression within
+        the same threshold crossing — it is reset when the context drops below
+        ``warn_threshold``.
+
+        References
+        ----------
+        - ACON arXiv:2510.00615 (Kang et al. 2025): threshold-based auto-compress.
+        - Focus Agent arXiv:2601.07190 (Verma 2026): intra-trajectory compression.
+        """
+        assert self._compressor is not None  # checked by caller
+
+        # Capture current pane text (already done in _poll_agent, but we need
+        # it here for the compressor; do a fresh capture for accuracy).
+        loop = asyncio.get_running_loop()
+        try:
+            pane_text: str = await loop.run_in_executor(
+                None, self._tmux.capture_pane, agent.pane
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "ContextMonitor: auto-compress pane capture failed for %s", agent.id
+            )
+            return
+
+        if not pane_text.strip():
+            return
+
+        # Run TF-IDF compression (CPU-bound but typically < 10ms for typical pane sizes).
+        try:
+            result = await loop.run_in_executor(
+                None, self._compressor.compress, pane_text, ""
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "ContextMonitor: TF-IDF compression failed for agent %s", agent.id
+            )
+            return
+
+        # Mark injected *before* await to prevent concurrent duplicate injections.
+        s.compress_injected = True
+        s.compress_triggers += 1
+
+        ratio = self._compressor.compression_ratio(result)
+        logger.info(
+            "ContextMonitor: auto-compressing agent %s pane: %d → %d lines "
+            "(%.0f%% char reduction, drop_percentile=%.2f)",
+            agent.id,
+            result.original_lines,
+            result.kept_lines,
+            ratio * 100,
+            self._compress_drop_percentile,
+        )
+
+        # Inject the compressed text via the __COMPRESS_CONTEXT__ protocol token.
+        # Format: "__COMPRESS_CONTEXT__\n{compressed_text}"
+        # The agent receives this as a notification and can choose to use it.
+        notification = f"__COMPRESS_CONTEXT__\n{result.compressed_text}"
+        await agent.notify_stdin(notification)
+
+        await self._publish(
+            "compress_triggered",
+            agent_id=agent.id,
+            estimated_tokens=s.estimated_tokens,
+            context_pct=round(s.context_pct * 100, 1),
+            original_lines=result.original_lines,
+            kept_lines=result.kept_lines,
+            original_chars=result.original_chars,
+            compressed_chars=result.compressed_chars,
+            compression_ratio=round(ratio, 3),
+            drop_percentile=self._compress_drop_percentile,
         )
 
     # ------------------------------------------------------------------

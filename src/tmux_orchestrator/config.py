@@ -118,12 +118,20 @@ class OrchestratorConfig:
     # context_window_tokens: total context window size (default 200 000 for Claude Sonnet/Opus).
     # context_warn_threshold: fraction (0-1) at which context_warning is published (default 0.75).
     # context_auto_summarize: when True, /summarize is injected into agent pane at threshold.
+    # context_auto_compress: when True, TF-IDF compression is run automatically at threshold and
+    #   the compressed context is injected into the agent pane as a __COMPRESS_CONTEXT__ notification.
+    #   This is the upper-level alternative to context_auto_summarize (extractive vs generative).
+    # context_compress_drop_percentile: fraction of low-relevance lines to drop (default 0.40 = 40%).
     # context_monitor_poll: poll interval in seconds (default 5.0).
     # Reference: Liu et al. "Lost in the Middle" TACL 2024 https://arxiv.org/abs/2307.03172
+    # Reference: ACON arXiv:2510.00615 (Kang et al. 2025) — threshold-based context compression
+    # Reference: Focus Agent arXiv:2601.07190 (Verma 2026) — autonomous context compression
     # Reference: Anthropic context windows docs https://platform.claude.com/docs/en/build-with-claude/context-windows
     context_window_tokens: int = 200_000
     context_warn_threshold: float = 0.75
     context_auto_summarize: bool = False
+    context_auto_compress: bool = False
+    context_compress_drop_percentile: float = 0.40
     context_monitor_poll: float = 5.0
     # --- Drift monitoring ---
     # drift_threshold: composite drift score below which agent_drift_warning fires (default 0.6).
@@ -365,6 +373,8 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         context_window_tokens=data.get("context_window_tokens", 200_000),
         context_warn_threshold=data.get("context_warn_threshold", 0.75),
         context_auto_summarize=data.get("context_auto_summarize", False),
+        context_auto_compress=data.get("context_auto_compress", False),
+        context_compress_drop_percentile=data.get("context_compress_drop_percentile", 0.40),
         context_monitor_poll=data.get("context_monitor_poll", 5.0),
         drift_threshold=data.get("drift_threshold", 0.6),
         drift_idle_threshold=data.get("drift_idle_threshold", 300.0),

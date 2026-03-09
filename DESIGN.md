@@ -728,6 +728,76 @@ AI エージェントにとって TDD は「ガードレール」として機能
 
 ## 10. 調査記録
 
+### 10.37 v1.1.12 — ContextMonitor TF-IDF 自動統合 (Auto-Compress on context_warn)
+
+#### Step 0 — 選定理由
+
+**選択: ContextMonitor TF-IDF 自動統合**
+
+§11「層4：コンテキスト伝達（改善）」の自然な延長。v1.1.11 で `TfIdfContextCompressor` と `POST /agents/{id}/compress-context` エンドポイントを実装したが、圧縮のトリガーは手動 (`/compress-context` スラッシュコマンド) のみだった。本イテレーションでは `ContextMonitor` の `context_warning` イベント発火時に TF-IDF 圧縮を自動実行し、圧縮済みコンテキストをエージェントのプロンプトとして注入する。
+
+**選択理由:**
+
+1. **v1.1.11 の直接延長**: `TfIdfContextCompressor` は完全実装済み。`ContextMonitor._check_context_threshold()` に数十行追加するだけで自動化が完了する。新規依存なし。
+2. **研究的裏付けが強い**: ACON (arXiv:2510.00615, 2025) はしきい値ベースの自動圧縮ポリシーで peak token を 26–54% 削減。Focus Agent (arXiv:2601.07190, 2026) は自律的なコンテキスト圧縮でエージェント自律性を高める。Google ADK の `EventsCompactionConfig` も同じ思想。
+3. **価値/実装コストのバランスが最良**: `auto_summarize` フラグと同様の設計で `auto_compress` フラグを追加。既存のパターンを踏襲するため設計リスクが低い。
+4. **高優先度候補はすべて実装済みまたは大規模すぎる**: チェックポイント永続化 (SQLite) は1イテレーションに収まらない。ProcessPort は libtmux 全面リファクタリングで影響範囲が大きい。コンテキスト自動圧縮は中優先度の中で最も即効性がある。
+
+**選択しなかった候補と理由:**
+
+- **チェックポイント永続化 SQLite**: スキーマ設計・マイグレーション管理・`--resume` フラグ実装で規模が大きい (v1.2.x 向け)。
+- **ProcessPort 抽象インターフェース**: libtmux 全面 DI 化で既存 E2E テストへの影響が広範。
+- **UseCaseInteractor 層の抽出**: FastAPI ハンドラーの全面リファクタリングで不要なリスクを生む。
+- **DriftMonitor セマンティック類似度**: `sentence-transformers` の新依存 (22MB モデル) が必要でデプロイコストが高い。
+- **`/deliberate` スラッシュコマンド**: 2エージェント討論を起動するが、コアインフラの改善より優先度が低い。
+
+**実装スコープ:**
+
+1. `OrchestratorConfig` に `context_auto_compress: bool = False` と `context_compress_drop_percentile: float = 0.40` を追加。
+2. `ContextMonitor.__init__()` に `auto_compress: bool = False`, `compress_drop_percentile: float = 0.40` パラメーターを追加。
+3. `ContextMonitor._check_context_threshold()`: しきい値超過時に `auto_compress=True` であれば TF-IDF 圧縮を実行し、エージェントの pane に `__compress_context__\n{compressed_text}` を注入する。
+4. `AgentContextStats` に `compress_triggers: int = 0`, `compress_injected: bool = False` を追加。
+5. `ContextMonitor.get_stats()` に `compress_triggers` フィールドを追加。
+6. `GET /agents/{id}/stats` レスポンスに `compress_triggers` を反映。
+7. 新規テスト: `tests/test_context_monitor_auto_compress.py` — auto_compress 統合の単体テスト15本以上。
+8. デモ: 2エージェント (writer + reviewer) パイプライン。writer が長い出力を生成して context_warning をトリガーし、auto-compress が自動実行される様子を検証。
+
+#### Step 1 — Research (Web 調査結果)
+
+**Query 1**: "automatic context compression LLM agents event-driven TF-IDF context window management 2025"
+
+主要知見:
+- **Google ADK `EventsCompactionConfig`**: `compaction_interval` (圧縮実行間隔) と `recent_events_overlap_size` (最近のイベントの保護範囲) をパラメーター化した閾値ベース圧縮。`LlmEventSummarizer` がフック点。— ADK は「コンパクション設定が存在する場合のみ圧縮を実行する」opt-in 設計。
+- **context-engineering-toolkit (GitHub jstilb)**: TF-IDF センテンススコアリング + token-aware truncation を組み合わせたコンテキスト最適化ライブラリ。圧縮 API はスコアしきい値をパラメーターとして受け取る。
+- **JetBrains Research "Cutting Through the Noise" (NeurIPS DL4Code 2025)**: 低関連度観察値の単純なマスキング (削除) が ~50% コスト削減を達成し、LLM 要約方式と同等以上の精度を維持。TF-IDF ベースの extractive アプローチが正当化される。
+
+**References:**
+- Google ADK Context Compaction: https://google.github.io/adk-docs/context/compaction/
+- JetBrains Research "Cutting Through the Noise": https://blog.jetbrains.com/research/2025/12/efficient-context-management/
+- context-engineering-toolkit: https://github.com/jstilb/context-engineering-toolkit
+
+**Query 2**: "context_warning event automatic compression agent orchestrator threshold triggered 2025 Python asyncio"
+
+主要知見:
+- **Strands Agents SDK ProactiveCompressionConfig** (GitHub strands-agents/sdk-python #555): `compression_threshold` (デフォルト 0.70) + `enable_proactive_compression` bool + `compression_cooldown_messages` で再圧縮ループを防ぐ。ContextWindowOverflowException を待たずに事前圧縮するアプローチ。
+- **LangChain Deep Agents context management**: コンテキストサイズが閾値を超えた時点で tool result をファイルシステムにオフロードし、要約を実行。3段階のカスケード (オフロード → 要約 → エラー) を採用。
+- **再圧縮ループ防止**: `compress_injected` フラグ (本実装) が `compression_cooldown` と同等の役割を果たす。NOTES.md 更新を検出した後にフラグをリセットすることで次の閾値越えで再圧縮が走る設計は先行研究と整合。
+
+**References:**
+- Strands Agents Proactive Compression: https://github.com/strands-agents/sdk-python/issues/555
+- LangChain Context Management for Deep Agents: https://blog.langchain.com/context-management-for-deepagents/
+
+**Query 3**: "Active Context Compression autonomous memory management LLM agents arxiv 2601.07190 2025"
+
+主要知見:
+- **Focus Agent (arXiv:2601.07190, Verma 2026)**: エージェントが `start_focus` / `complete_focus` ツールを自律的に呼び出してコンテキストを圧縮する。外部タイマーや heuristic ではなく「エージェント自身の判断」で圧縮タイミングを決定。積極的な圧縮で 22.7% のトークン削減を達成。
+- **ACON (arXiv:2510.00615, Kang et al. 2025)**: history 長が事前設定しきい値を超えた時点で圧縮ガイドラインを適用。失敗軌跡から圧縮ガイドラインを自動更新する gradient-free フレームワーク。peak tokens を 26–54% 削減しタスク成功率を維持。
+- **設計上の示唆**: 本実装の auto-compress は ACON の「しきい値ベース自動実行」と Focus の「エージェント学習ループ」の中間的な位置づけ。固定 TF-IDF drop_percentile で extractive 圧縮を実行し、結果をエージェントに注入する。将来は圧縮効果フィードバックで drop_percentile を動的に調整できる (ACON の進化的拡張)。
+
+**References:**
+- Focus Agent: https://arxiv.org/abs/2601.07190
+- ACON: https://arxiv.org/abs/2510.00615
+
 ### 10.36 v1.1.11 — スライディングウィンドウ + 重要度スコアによるコンテキスト圧縮
 
 #### 選定理由

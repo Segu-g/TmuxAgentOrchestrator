@@ -206,6 +206,8 @@ class Orchestrator:
                 context_window_tokens=config.context_window_tokens,
                 warn_threshold=config.context_warn_threshold,
                 auto_summarize=config.context_auto_summarize,
+                auto_compress=config.context_auto_compress,
+                compress_drop_percentile=config.context_compress_drop_percentile,
                 poll_interval=config.context_monitor_poll,
             )
         )
