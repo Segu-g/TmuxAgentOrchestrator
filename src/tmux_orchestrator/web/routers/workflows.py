@@ -21,6 +21,7 @@ from tmux_orchestrator.web.schemas import (
     FulldevWorkflowSubmit,
     PairWorkflowSubmit,
     RedBlueWorkflowSubmit,
+    SpecFirstWorkflowSubmit,
     SocraticWorkflowSubmit,
     TddWorkflowSubmit,
     WorkflowSubmit,
@@ -2996,5 +2997,192 @@ def build_workflows_router(
                 detail=f"Workflow {workflow_id!r} not found",
             )
         return result
-    
+
+    @router.post(
+        "/workflows/spec-first",
+        summary="Submit a 2-agent Spec-First (spec-writer → implementer) workflow",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_spec_first_workflow(body: SpecFirstWorkflowSubmit) -> dict:
+        """Submit a 2-agent Spec-First Workflow DAG.
+
+        Pipeline (strictly sequential):
+
+          1. **spec-writer**: reads the requirements, produces a formal ``SPEC.md``
+             with preconditions, postconditions, invariants, type signatures, and
+             acceptance criteria. Stores the spec in the shared scratchpad.
+          2. **implementer**: reads ``SPEC.md`` from the scratchpad, implements the
+             feature satisfying every acceptance criterion, writes tests, and runs
+             them.  Stores an implementation summary in the scratchpad.
+
+        Returns:
+        - ``workflow_id``: workflow run UUID for status polling
+        - ``name``: human-readable name (``spec-first/<topic>``)
+        - ``task_ids``: dict with keys ``spec_writer``, ``implementer``
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+
+        Design references:
+        - Vasilopoulos arXiv:2602.20478 "Codified Context" (2026): formal spec docs.
+        - Hou et al. "Trustworthy AI Requires Formal Methods" (2025).
+        - SYSMOBENCH arXiv:2509.23130 (2025): LLM TLA+ spec generation.
+        - DESIGN.md §10.44 (v1.1.8)
+        """
+
+        wm = orchestrator.get_workflow_manager()
+        topic_slug = body.topic[:40].strip().replace("\n", " ")
+        wf_name = f"spec-first/{topic_slug}"
+
+        pre_run_id = str(uuid.uuid4())
+        scratchpad_prefix = f"specfirst_{pre_run_id[:8]}"
+
+        # Shared bash snippets for reading context and API key
+        _ctx_snippet = (
+            "WEB_BASE_URL=$(python3 -c \""
+            "import json; d=json.load(open('__orchestrator_context__.json')); "
+            "print(d['web_base_url'])\")\n"
+            "   API_KEY=$(cat __orchestrator_api_key__ 2>/dev/null || "
+            "echo \"$TMUX_ORCHESTRATOR_API_KEY\")"
+        )
+
+        def _scratchpad_key(suffix: str) -> str:
+            return f"{scratchpad_prefix}_{suffix}"
+
+        def _write_snippet(key: str, var: str = "CONTENT") -> str:
+            return (
+                f"   curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     -H 'Content-Type: application/json' \\\n"
+                f"     -d '{{\"value\": \"'${var}'\"}}'  "
+            )
+
+        def _read_snippet(key: str, varname: str) -> str:
+            return (
+                f"   {varname}=$(curl -s -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"value\"])')\n"
+            )
+
+        spec_key = _scratchpad_key("spec")
+        impl_key = _scratchpad_key("impl")
+
+        # --- Spec-writer prompt ---
+        spec_writer_prompt = (
+            f"You are the SPEC-WRITER agent in a Spec-First development workflow.\n"
+            f"\n"
+            f"**Topic:** {body.topic}\n"
+            f"\n"
+            f"**Requirements:**\n"
+            f"{body.requirements}\n"
+            f"\n"
+            f"Your task is to write a formal specification document (SPEC.md) that "
+            f"the implementer will use to build the feature.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Write `SPEC.md` in your working directory with these sections:\n"
+            f"   ```markdown\n"
+            f"   # Specification: {body.topic}\n"
+            f"   ## Context\n"
+            f"   ## Scope\n"
+            f"   - IN SCOPE: ...\n"
+            f"   - OUT OF SCOPE: ...\n"
+            f"   ## Type Signatures\n"
+            f"   ## Preconditions\n"
+            f"   - PRE-1: ...\n"
+            f"   ## Postconditions\n"
+            f"   - POST-1: ...\n"
+            f"   ## Invariants\n"
+            f"   - INV-1: ...\n"
+            f"   ## Functional Requirements\n"
+            f"   ## Acceptance Criteria\n"
+            f"   - AC-1: Given ... when ... then ...\n"
+            f"   ## Edge Cases\n"
+            f"   - EDGE-1: ...\n"
+            f"   ## Glossary\n"
+            f"   ```\n"
+            f"2. Store SPEC.md in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            f"   CONTENT=$(cat SPEC.md)\n"
+            + _write_snippet(spec_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Be precise and unambiguous — the implementer must be able to build from "
+            f"your spec alone without consulting you. Max 600 words."
+        )
+
+        # --- Implementer prompt ---
+        implementer_prompt = (
+            f"You are the IMPLEMENTER agent in a Spec-First development workflow.\n"
+            f"\n"
+            f"**Topic:** {body.topic}\n"
+            f"\n"
+            f"Your task is to implement the feature strictly following the spec-writer's "
+            f"SPEC.md. Write code that satisfies every acceptance criterion.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read the spec-writer's SPEC.md from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(spec_key, "SPEC")
+            + f"   echo \"$SPEC\" > SPEC.md\n"
+            f"   cat SPEC.md\n"
+            f"   ```\n"
+            f"2. Implement the feature exactly as specified in SPEC.md:\n"
+            f"   - Write the implementation file(s) in your working directory.\n"
+            f"   - Write tests in `test_*.py` covering every acceptance criterion.\n"
+            f"3. Run the tests:\n"
+            f"   ```bash\n"
+            f"   python -m pytest test_*.py -v 2>&1 | tee test_output.txt || true\n"
+            f"   ```\n"
+            f"4. Write `impl_summary.md` with:\n"
+            f"   ```markdown\n"
+            f"   # Implementation Summary: {body.topic}\n"
+            f"   ## Files Created\n"
+            f"   ## Acceptance Criteria Status\n"
+            f"   - AC-1: PASS/FAIL\n"
+            f"   ## Test Results\n"
+            f"   ## Notes\n"
+            f"   ```\n"
+            f"5. Store the summary in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   CONTENT=$(cat impl_summary.md)\n"
+            + _write_snippet(impl_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Follow the spec faithfully. Do not add features not listed in SPEC.md. "
+            f"If a requirement is ambiguous, implement the simplest interpretation and "
+            f"document it in Notes."
+        )
+
+        # Submit tasks in pipeline order
+        spec_writer_task = await orchestrator.submit_task(
+            spec_writer_prompt,
+            required_tags=body.spec_tags or None,
+            depends_on=[],
+        )
+
+        implementer_task = await orchestrator.submit_task(
+            implementer_prompt,
+            required_tags=body.impl_tags or None,
+            depends_on=[spec_writer_task.id],
+            reply_to=body.reply_to,
+        )
+
+        task_ids_map = {
+            "spec_writer": spec_writer_task.id,
+            "implementer": implementer_task.id,
+        }
+
+        all_task_ids = list(task_ids_map.values())
+        run = wm.submit(name=wf_name, task_ids=all_task_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids_map,
+            "scratchpad_prefix": scratchpad_prefix,
+        }
+
     return router

@@ -738,6 +738,64 @@ class SocraticWorkflowSubmit(BaseModel):
         return v
 
 
+class SpecFirstWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/spec-first — Spec-First development workflow.
+
+    Submits a 2-agent sequential Spec-First Workflow DAG where a spec-writer
+    produces a formal specification (SPEC.md) that an implementer then follows
+    to write code and tests:
+
+      - **spec-writer**: reads the requirements, produces a formal SPEC.md with
+        preconditions, postconditions, invariants, type signatures, and acceptance
+        criteria.  Stores the spec in the shared scratchpad.
+      - **implementer**: reads SPEC.md from the scratchpad, implements the feature
+        satisfying every acceptance criterion, writes tests, and runs them.
+
+    Scratchpad keys (Blackboard pattern):
+
+    - ``{scratchpad_prefix}_spec``  : spec-writer's SPEC.md content
+    - ``{scratchpad_prefix}_impl``  : implementer's completion summary
+
+    Artifacts produced by agents:
+
+    - ``SPEC.md``          — formal specification (in spec-writer worktree)
+    - ``<impl>.py``        — implementation (in implementer worktree)
+    - ``test_<impl>.py``   — tests (in implementer worktree)
+
+    Design references:
+
+    - Vasilopoulos arXiv:2602.20478 "Codified Context" (2026): Formal specification
+      documents help agents maintain consistency across sessions.
+    - Hou et al. "Position: Trustworthy AI Agents Require Formal Methods" (2025):
+      TLA+/Hoare assertions integrated into LLM agent pipelines.
+    - SYSMOBENCH arXiv:2509.23130 (2025): LLM formal specification generation
+      evaluated on 200 system models.
+    - DESIGN.md §10.44 (v1.1.8)
+    """
+
+    topic: str
+    requirements: str
+    # Optional per-role required_tags for agent capability routing
+    spec_tags: list[str] = []
+    impl_tags: list[str] = []
+    # When set, the implementer's RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    @field_validator("topic")
+    @classmethod
+    def topic_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("topic must not be empty")
+        return v
+
+    @field_validator("requirements")
+    @classmethod
+    def requirements_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("requirements must not be empty")
+        return v
+
+
 class PairWorkflowSubmit(BaseModel):
     """Request body for POST /workflows/pair — PairCoder (Navigator + Driver) workflow.
 
