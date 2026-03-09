@@ -349,10 +349,19 @@ async def test_all_stats_returns_all_agents() -> None:
 
 
 def _make_mock_orch_with_stats(agent_id: str, stats: dict | None) -> MagicMock:
+    from unittest.mock import MagicMock as _MM
+    from tmux_orchestrator.agents.base import AgentStatus
+
     orch = MagicMock()
     orch.list_agents.return_value = []
     orch.list_tasks.return_value = []
-    orch.get_agent.return_value = None
+    # Return a minimal mock agent for the known agent_id; None for unknown IDs.
+    _mock_agent = _MM()
+    _mock_agent.status = AgentStatus.IDLE
+    _mock_agent.worktree_path = None
+    def _get_agent(aid: str):
+        return _mock_agent if aid == agent_id else None
+    orch.get_agent = MagicMock(side_effect=_get_agent)
     orch.get_director.return_value = None
     orch.flush_director_pending.return_value = []
     orch.list_dlq.return_value = []

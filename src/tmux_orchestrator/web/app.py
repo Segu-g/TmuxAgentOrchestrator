@@ -1540,17 +1540,44 @@ def create_app(
         - ``context_warnings``: number of context_warning events emitted.
         - ``summarize_triggers``: number of /summarize auto-injections.
         - ``last_polled``: monotonic timestamp of the last poll cycle.
+        - ``worktree_path``: filesystem path to the agent's worktree (str | null).
+        - ``status``: current agent status (IDLE/BUSY/STOPPED/ERROR/DRAINING).
+        - ``task_count``: number of completed tasks (success + error).
+        - ``error_count``: number of tasks that completed with an error.
 
-        Returns 404 if the agent is unknown or not yet tracked by the monitor.
+        Returns 404 if the agent is not registered.
 
         Design reference: Liu et al. "Lost in the Middle" TACL 2024
         (https://arxiv.org/abs/2307.03172) — context saturation degrades recall;
         monitoring context size enables proactive compression. DESIGN.md §11 (v0.21.0).
+        Design reference (enrichment): Zalando RESTful API Guidelines §compatibility —
+        adding optional fields is a backward-compatible change. DESIGN.md §10 (v1.0.20).
         """
+        agent = orchestrator.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
+
+        # Build enrichment fields from registry/history regardless of context monitor.
+        history = orchestrator.get_agent_history(agent_id, limit=200) or []
+        task_count = len(history)
+        error_count = sum(1 for r in history if r.get("status") == "error")
+
+        enrichment: dict = {
+            "worktree_path": (
+                str(agent.worktree_path) if agent.worktree_path is not None else None
+            ),
+            "status": agent.status.value,
+            "task_count": task_count,
+            "error_count": error_count,
+        }
+
         stats = orchestrator.get_agent_context_stats(agent_id)
         if stats is None:
-            raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} context stats not yet available")
-        return stats
+            # Agent registered but context monitor has not polled yet;
+            # return skeleton with enrichment fields.
+            return {"agent_id": agent_id, **enrichment}
+
+        return {**stats, **enrichment}
 
     @app.get(
         "/context-stats",

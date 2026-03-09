@@ -158,6 +158,9 @@ class AgentRegistry:
                     if a.id in self._breakers
                     else None
                 ),
+                "worktree_path": (
+                    str(a.worktree_path) if a.worktree_path is not None else None
+                ),
             }
             for a in self._agents.values()
         ]
