@@ -686,6 +686,7 @@ AI エージェントにとって TDD は「ガードレール」として機能
 | ~~中~~ | ~~**コンテキスト4戦略ガイドを CLAUDE.md と `.claude/prompts/` に体系化**~~ | ~~完了 v1.1.19 — CLAUDE.md「Context Engineering Cheatsheet」セクション追加 + `.claude/prompts/context-strategies.md` ロール別マトリクス追加。~~ |
 | ~~低~~ | ~~**LLM-as-Judge による並列エージェント出力の自動スコアリング (BestOfN + EDDOps)**~~ | ~~完了 v1.1.0 — `POST /workflows/competition` として実装。N 個の solver エージェントが並列で同一問題を解き、judge エージェントがスコアを比較して勝者を宣言する (N+1)-agent DAG。53 tests PASSED。~~ |
 | 低 | **ワークフローテンプレートライブラリ (`examples/workflows/`)** — TDD / PairCoder / CleanArch / DDD / SpecFirst / Debate / ADR の各ワークフローを `POST /workflows` で直接投入できる自己完結 YAML として `examples/workflows/` に収録する。各 YAML はエージェント数・ロール・`system_prompt_file` 参照・`context_files`・`required_tags` を含む。`examples/debate_config.yaml`（異種エージェント討論グループ設定）を含む | CrewAI の YAML-driven workflow approach (2025) が「ドキュメントとしての設定ファイル」を普及させた。各ワークフローエンドポイント実装後に対応 YAML を追加していく継続的タスク。A-HMAD Springer 2025 + ChatEval ICLR 2024: 異種構成エージェントと役割固定化が討論品質を決定する最重要因子。 |
+| ~~新規~~ | ~~**`POST /workflows/mob-review`** — N 並列専門レビュアー + シンセサイザー DAG~~ | ~~完了 v1.1.20 — `MobReviewWorkflowSubmit`、4観点 (security/performance/maintainability/testing) 並列 + synthesizer。ChatEval (ICLR 2024) の独自ペルソナ知見を適用。41 tests PASSED。29/30 デモ PASS。~~ |
 | 低 | **`DECISION.md` 標準フォーマットとスクラッチパッド書き込み規約** — `debate` / `adr` / `delphi` / `redblue` / `socratic` の各ワークフローが出力を書き込む共通フォーマット (title / status / context / options_considered / decision / rationale / dissenting_opinions / consequences / references) を定義し、`GET /scratchpad/DECISION` で取得できるようにする | SocraSynth arXiv:2402.06634: 討論から「構造化された結論」を抽出する段階が必須。RT-AID ScienceDirect 2025: 各ラウンドの中間出力が最終合意文書の品質を高める。既存の `GET/PUT /scratchpad/{key}` (v0.16.0) + `context_files` (v0.11.0) を組み合わせて実現可能。各ワークフロー完成後に規約を策定する。 |
 | 低 | **構造化デバッグ: トレースリプレイ CLI (`tmux-orchestrator replay`)** — `ResultStore` の JSONL + bus イベントログを組み合わせて過去の実行シーケンスを再現し、どのステップで失敗したかを特定できる CLI コマンドを追加する | LangGraph + LangSmith の replay 機能は業界標準デバッグ手法として認識 (LangChain docs 2025)。Galileo AI "Why Multi-Agent LLM Systems Fail" (2025): 「非決定的挙動のリプレイ不可」を主要問題として挙げる。チェックポイント永続化実装後の自然な拡張。 |
 
@@ -3500,4 +3501,33 @@ v1.1.18 までに §11 の主要フィーチャーはほぼ実装済みとなっ
 4. 最終レポートは structured format（REVIEW_SUMMARY, CRITICAL_FINDINGS, RECOMMENDATIONS セクション）で出力
 
 ### Step 2 — 実装サマリー
+
+**実装ファイル**:
+- `src/tmux_orchestrator/web/schemas.py` — `MobReviewWorkflowSubmit` Pydantic v2 モデル
+  (2–8 aspects、language、reviewer_tags、synthesizer_tags、reply_to、デフォルト4次元)
+- `src/tmux_orchestrator/web/routers/workflows.py` — `POST /workflows/mob-review` エンドポイント
+  (N 並列レビュアータスク + 1 シンセサイザータスク、観点別ガイダンス付き)
+- `.claude/prompts/roles/mob-reviewer.md` — 役割テンプレート（独立性原則・重大度評価・出力フォーマット・アンチパターン）
+- `examples/workflows/mob-review.yaml` — 自己完結 YAML テンプレート
+- `tests/test_workflow_mob_review.py` — 41 テスト（スキーマ検証・HTTP 認証・レスポンス構造・依存関係ワイヤリング・プロンプトコンテンツ・ワークフロー状態）
+- `tests/fixtures/openapi_schema.json` — OpenAPI コントラクトスナップショット更新
+- `pyproject.toml` — version 1.1.19 → 1.1.20
+
+**テスト数**: 2369 → 2410 (+41 テスト)
+
+**バージョン**: 1.1.20
+
+**E2E デモ** (`~/Demonstration/v1.1.20-mob-review/`):
+- 5 実エージェント (`reviewer-security`, `reviewer-performance`, `reviewer-maintainability`,
+  `reviewer-testing`, `synthesizer`) が独立ワークツリーで並列動作
+- レビュー対象コード: SQL injection・ハードコード認証情報・O(n²) アルゴリズム・型ヒント欠如・テスト欠如 を含む `find_duplicates()` 関数
+- 4 レビュアーが並列完了 (~55秒)、シンセサイザーが統合 MOB_REVIEW.md を生成 (~63秒)
+- 合計 2分以内に完了
+- **29/30 チェック PASSED**
+
+**デバッグ**: `required_tags` なしの場合、タスクが任意のアイドルエージェントにディスパッチされる。
+`reviewer_security` タスクが `reviewer-maintainability` エージェントにディスパッチされ、スクラッチパッド書き込みに失敗した (1 FAIL)。
+修正候補: `required_tags` による専門家エージェントへの明示的ルーティング（次イテレーション候補）。
+
+**29/30 チェック PASSED**
 
