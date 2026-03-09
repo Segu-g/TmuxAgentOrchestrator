@@ -644,7 +644,7 @@ AI エージェントにとって TDD は「ガードレール」として機能
 | **高** | **`ProcessPort` 抽象インターフェース抽出** — `ClaudeCodeAgent` の libtmux 直接依存を排除（v0.46.0 予定） | 層5 |
 | **高** | **OpenTelemetry GenAI Semantic Conventions** — `gen_ai.*` 属性 + OTLP エクスポーター（v0.47.0 予定） | 層5 |
 | ~~**高**~~ | ~~**エージェントドリフト検出 (Agent Stability Index)**~~ | ~~完了 v1.0.9 — `DriftMonitor` (role/idle/length 3サブスコア)、`agent_drift_warning` イベント、`GET /drift`・`GET /agents/{id}/drift` エンドポイント。34テスト。17/17デモPASS。~~ |
-| 中 | **`UseCaseInteractor` 層の抽出** — FastAPI ハンドラーから業務ロジックを分離 | 層5 |
+| ~~中~~ | ~~**`UseCaseInteractor` 層の抽出** — FastAPI ハンドラーから業務ロジックを分離~~ | ~~完了 v1.1.14 (SubmitTaskUseCase / CancelTaskUseCase) + v1.1.15 (ListAgentsUseCase / GetAgentUseCase wiring)~~ |
 | 中 | **エージェント状態機械の Hypothesis ステートフルテスト** — `AgentStatus` 遷移シーケンスの自動生成テスト | 層5 |
 | 低 | **構造化デバッグ: トレースリプレイ CLI** — `ResultStore` JSONL から過去実行を再現 | 層5 |
 
@@ -2949,4 +2949,30 @@ class AgentStatusMachine(RuleBasedStateMachine):
 1. `ListAgentsUseCase.execute(dto)` は `service.list_agents()` を呼び出し、`ListAgentsResult(items=list_of_dicts)` を返す。
 2. `GET /agents` ハンドラーを `ListAgentsUseCase` に委譲するだけで HTTP/ビジネスロジック分離が実現する。
 3. `GET /agents/{agent_id}` は `GetAgentUseCase` に委譲し、`not found` の場合にのみ HTTPException を raise する。
+
+### Step 2 — 実装サマリー
+
+**実装ファイル**:
+- `src/tmux_orchestrator/application/use_cases.py`: `ListAgentsDTO` / `ListAgentsResult` / `ListAgentsUseCase` を追加 (+65行)
+- `src/tmux_orchestrator/application/__init__.py`: 新 UseCase を export に追加
+- `src/tmux_orchestrator/web/routers/agents.py`:
+  - `GET /agents` → `ListAgentsUseCase` 委譲 (was `orchestrator.list_agents()` 直接呼び出し)
+  - `GET /agents/{agent_id}` → `GetAgentUseCase` 委譲 (was `orchestrator.get_agent_dict()` 直接呼び出し)
+- `tests/test_use_cases.py`: `TestListAgentsUseCase` 12テスト追加
+- `tests/test_use_case_router_integration.py`: 17テスト追加
+  - `TestListAgentsRouterIntegration` (5): HTTP test client でエンドポイント検証
+  - `TestGetAgentRouterIntegration` (6): 200/404 パス検証
+  - `TestListAgentsUseCaseStandalone` (5): UseCase 単体テスト
+- `pyproject.toml`: version = "1.1.15"
+
+**テスト数**: 2170 → 2199 (+29テスト)
+
+**E2E デモ** (`~/Demonstration/v1.1.15-list-agents-use-case/`):
+- agent-writer (28s): `string_utils.py` 実装 → scratchpad `v1115_code` に保存
+- agent-reviewer (113s): scratchpad からコード取得 → Markdown レビュー作成 → `v1115_review` に保存
+- `GET /agents` → ListAgentsUseCase 経由で 2 エージェントを返すことを確認
+- `GET /agents/agent-writer` → GetAgentUseCase 経由で 200 + agent dict を返すことを確認
+- `GET /agents/no-such-agent` → 404 + detail に agent_id 含むことを確認
+
+**33/33 チェック PASSED**
 
