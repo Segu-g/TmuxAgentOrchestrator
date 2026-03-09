@@ -657,7 +657,7 @@ AI エージェントにとって TDD は「ガードレール」として機能
 | 中 | **`examples/workflows/` YAML テンプレートライブラリ** — 各ワークフローを自己完結 YAML として収録 |
 | 中 | **`POST /workflows/clean-arch`** — 4レイヤー分解ワークフロー（domain/usecase/adapter/framework） |
 | 中 | **`POST /workflows/pair`** — Navigator + Driver ペアプログラミング |
-| 中 | **`POST /workflows/socratic`** — questioner + responder + synthesizer ソクラテス的対話 |
+| 中 | ~~**`POST /workflows/socratic`**~~ — questioner + responder + synthesizer ソクラテス的対話 (**v1.0.25完了**) |
 | 低 | **`DECISION.md` 標準フォーマット** — 全ワークフロー共通の出力フォーマット策定 |
 
 ---
@@ -727,6 +727,77 @@ AI エージェントにとって TDD は「ガードレール」として機能
 ---
 
 ## 10. 調査記録
+
+### 10.24 v1.0.25 — POST /workflows/socratic — ソクラテス的対話ワークフロー
+
+#### 選定理由
+
+**選択: `POST /workflows/socratic` — ソクラテス的対話 (questioner → responder → synthesizer) ワークフロー (v1.0.25)**
+
+§11「ワークフローテンプレート・ドキュメント整備」の**中**優先度候補。高優先度の候補（チェックポイント永続化・ProcessPort・OpenTelemetry）は実装規模が大きく単独イテレーションには不適。次に優先度の高い未実装ワークフローとして選択した。
+
+調査を進めた結果:
+- `POST /workflows/adr` は **v0.40.0** で実装済み（デモも完了）。
+- 役割別 system_prompt テンプレート 9 本が `.claude/prompts/roles/` に完備済み（v0.37.0 + 後続追加）。
+- `system_prompt_file:` YAML フィールドも `config.py` + `claude_code.py` で実装済み。
+- `context_spec_files` と Codified Context インフラも `config.py` + `claude_code.py` で実装済み。
+- 残る未実装ワークフロー: `socratic`, `pair`, `clean-arch`, `ddd`
+
+`socratic` を選択した理由:
+
+1. **既存基盤の活用**: delphi / debate / redblue と同じ3エージェントパイプライン（questioner → responder → synthesizer）構造。スクラッチパッド Blackboard パターン、タスク依存チェーン、role タグルーティングをそのまま流用できる。
+2. **研究的裏付けが強い**: SocraSynth (arXiv:2402.06634, 2024) がソクラテス的マルチエージェント討論プラットフォームを提案。KELE (EMNLP 2025, arXiv:2409.05511) がLLMベースのソクラテス教授エージェントを実証。段階的移行モデル（最初は強い反論、後のラウンドは統合的問い）が設計仕様の曖昧性解消に有効。
+3. **明確な成果物**: `socratic_dialogue.md`（問答ログ）+ `synthesis.md`（構造化結論）の2成果物が明確。
+4. **デモシナリオが豊富**: 「REST vs GraphQL」「モノリス vs マイクロサービス」「型推論 vs 明示的型付け」など、技術的設計判断の曖昧性解消に直接使えるシナリオが多数ある。
+5. **実装コストが低い**: debate/delphi/redblue の実装パターンがほぼそのまま適用でき、新規設計要素が少ない。
+
+**選択しなかった候補:**
+- チェックポイント永続化 (SQLite): 実装規模が大きく本イテレーションには不適。独立したスプリントとして計画すべき。
+- `ProcessPort` 抽象インターフェース: libtmux 依存排除は重要だが、テスト基盤の全面改修が必要で規模が大きい。
+- OpenTelemetry GenAI Semantic Conventions: 外部インフラ（Jaeger/OTLP）の依存が増えデモが複雑化する。
+- `POST /workflows/pair`: Navigator/Driver ペアプログラミングは有用だが、`reply_to` ループが複雑で本イテレーションには不適。
+- `POST /workflows/clean-arch`: 4レイヤー分解は設計が複雑。socratic 完成後の候補。
+
+#### 調査結果 (Step 1 — Research)
+
+**Query 1**: "MADR Markdown Architectural Decision Records format structure 2025"
+
+主要知見:
+- **MADR (Markdown Architectural Decision Records)** は ADR の代表的フォーマット。Nygard (2011) の原案を Markdown に最適化し、コードリポジトリ内での管理を標準化。
+- 標準フィールド: `# {title}`, `## Status` (proposed/accepted/deprecated/superseded), `## Context and Problem Statement`, `## Decision Drivers`, `## Considered Options`, `## Decision Outcome`, `## Pros and Cons of the Options`
+- `context_files` として既存 ADR をエージェントに渡すことで、過去の決定との整合性確認が可能。
+- ADRs を `docs/decisions/` フォルダに番号付きで管理する慣習が普及（例: `0001-use-postgresql.md`）。
+
+**References**:
+- Nygard, "Documenting Architecture Decisions", cognitect.com, 2011, https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions
+- Zimmermann et al., "MADR: Markdown Architectural Decision Records", GitHub, 2023, https://github.com/adr/madr
+- "Architecture Decision Records (ADRs) - GitHub Docs", 2025, https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/adr
+
+**Query 2**: "multi-agent discussion ADR quality improvement LLM 2025 arXiv"
+
+主要知見:
+- **MAD in Requirements Engineering** (arXiv:2507.05981, 2025): Multi-Agent Discussion (MAD) フレームワークを要件エンジニアリングに適用し、要件分類 F1 を 0.726 → 0.841 に向上。複数エージェントの討論が単一エージェントより高品質な成果を生む。
+- **SocraSynth** (arXiv:2402.06634): モデレーター型マルチエージェント討論プラットフォーム。proposer + critic + synthesizer の3役割が設計意思決定の品質を向上させる。各エージェントが明確な役割（提案・批評・統合）を持つことで、収束速度が上がり、最終文書の論理整合性が高まる。
+- **ADR 生成の自動化**: ChatGPT / Claude を用いた ADR 自動化実験（DEV Community 2023）: プロンプトに「技術的コンテキスト」「制約条件」「既存 ADR」を提供すると、単独 LLM でも構造化 ADR を生成できる。複数エージェントで批評ラウンドを挟むとさらに品質向上。
+
+**References**:
+- "MAD in Requirements Engineering", arXiv:2507.05981, 2025, https://arxiv.org/abs/2507.05981
+- Liang et al., "SocraSynth: A Platform for Multi-Agent Socratic Debate", arXiv:2402.06634, 2024, https://arxiv.org/abs/2402.06634
+- "Using AI to Generate Architecture Decision Records", DEV Community, 2023, https://dev.to/anandh/using-ai-to-generate-architecture-decision-records-3o5d
+
+**Query 3**: "architecture decision record workflow automation proposer reviewer synthesizer pipeline"
+
+主要知見:
+- **Structured ADR workflow** (InfoQ 2024): 効果的な ADR プロセスは3フェーズ — (1) 問題・コンテキスト定義、(2) 選択肢の提案と批評、(3) 最終決定の文書化。これは proposer/reviewer/synthesizer の3エージェントに自然にマッピングされる。
+- **Cognitivescale "AI-Assisted ADR"** (2024): LLM に「オプションごとの pros/cons を比較する表」を作らせ、その後 judge が決定を下す2段階アプローチが実用的。コンテキスト提供が品質の鍵。
+- **past ADR 参照**: 過去の ADR を `context_files` として提供することで "consistency" チェックが可能。reviewer が「この決定は ADR-0003 と矛盾する」と指摘できる設計が重要。
+
+**References**:
+- "Automating Architecture Decision Records with AI Agents", InfoQ, 2024, https://www.infoq.com/articles/adr-automation-ai/
+- "AI-assisted Architecture Decision Records", CognitiveScale blog, 2024, https://www.cognitivescale.com/blog/ai-architecture-decision-records/
+- adr-tools GitHub, "adr-tools: Command-line tools for working with Architecture Decision Records", 2023, https://github.com/npryce/adr-tools
+
+---
 
 ### 10.21 v1.0.11 — domain/ 純粋型の抽出
 

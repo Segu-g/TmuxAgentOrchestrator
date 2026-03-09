@@ -699,6 +699,56 @@ class RedBlueWorkflowSubmit(BaseModel):
         return v
 
 
+class SocraticWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/socratic — Socratic dialogue workflow.
+
+    Submits a 3-agent Socratic dialogue DAG that probes assumptions, refines
+    definitions, and extracts a structured conclusion via the shared scratchpad
+    (Blackboard pattern):
+
+      - ``{scratchpad_prefix}_dialogue``:  questioner/responder exchange log
+      - ``{scratchpad_prefix}_synthesis``: synthesizer's structured conclusion
+
+    Pipeline (strictly sequential):
+
+      1. **questioner**: applies the Maieutic method — challenges assumptions,
+         demands precise definitions, and probes the logical basis of the
+         topic.  Starts with adversarial questions and shifts toward integrative
+         ones.  Stores the full Q&A log in the scratchpad.
+      2. **responder**: reads the questioner's output and elaborates, defends,
+         or revises the position in response to each question.  Appends
+         answers to the dialogue log.
+      3. **synthesizer**: reads the complete dialogue and produces a structured
+         ``synthesis.md`` with main arguments, agreed points, unresolved
+         questions, and recommendations.
+
+    Design references:
+    - Liang et al. "SocraSynth" arXiv:2402.06634 (2024): staged
+      questioner → responder → synthesizer with sycophancy suppression.
+    - "KELE: Knowledge-Enhanced LLM for Socratic Teaching" arXiv:2409.05511
+      EMNLP 2025: two-phase questioning (adversarial → constructive).
+    - "CONSENSAGENT" ACL 2025: dynamic prompt refinement reduces sycophancy.
+    - DESIGN.md §10.24 (v1.0.25)
+    """
+
+    topic: str
+    # Optional per-role required_tags for agent capability routing
+    questioner_tags: list[str] = []
+    responder_tags: list[str] = []
+    synthesizer_tags: list[str] = []
+    # When set, the synthesizer RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    from pydantic import field_validator
+
+    @field_validator("topic")
+    @classmethod
+    def topic_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("topic must not be empty")
+        return v
+
+
 class FulldevWorkflowSubmit(BaseModel):
     """Request body for POST /workflows/fulldev — Full Software Development Lifecycle.
 
@@ -3214,6 +3264,216 @@ def create_app(
             "blue_team": blue_task.id,
             "red_team": red_task.id,
             "arbiter": arbiter_task.id,
+        }
+
+        all_task_ids = list(task_ids_map.values())
+        run = wm.submit(name=wf_name, task_ids=all_task_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids_map,
+            "scratchpad_prefix": scratchpad_prefix,
+        }
+
+    @app.post(
+        "/workflows/socratic",
+        summary="Submit a Socratic dialogue (questioner/responder/synthesizer) workflow",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_socratic_workflow(body: SocraticWorkflowSubmit) -> dict:
+        """Submit a 3-agent Socratic dialogue Workflow DAG.
+
+        Pipeline (strictly sequential):
+
+          1. **questioner**: applies Maieutic method — probes assumptions,
+             demands definitions, challenges logical basis.  Phase 1 uses
+             adversarial questions; Phase 2 shifts to integrative questions.
+             Stores Q&A log in ``{scratchpad_prefix}_dialogue``.
+          2. **responder**: reads questioner output and refines, defends, or
+             revises the position.  Appends answers to the dialogue log.
+          3. **synthesizer**: reads the complete dialogue and extracts a
+             structured ``synthesis.md`` with main arguments, agreed points,
+             unresolved questions, and recommendations.  Stores result in
+             ``{scratchpad_prefix}_synthesis``.
+
+        Returns:
+        - ``workflow_id``: workflow run UUID for status polling
+        - ``name``: human-readable name (``socratic/<topic>``)
+        - ``task_ids``: dict with keys ``questioner``, ``responder``,
+          ``synthesizer``
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+
+        Design references:
+        - Liang et al. "SocraSynth" arXiv:2402.06634 (2024): staged
+          questioner → responder → synthesizer with sycophancy suppression.
+        - "KELE" arXiv:2409.05511 EMNLP 2025: two-phase questioning.
+        - "CONSENSAGENT" ACL 2025: dynamic prompt refinement reduces sycophancy.
+        - DESIGN.md §10.24 (v1.0.25)
+        """
+        import uuid as _uuid  # noqa: PLC0415
+
+        wm = orchestrator.get_workflow_manager()
+        wf_name = f"socratic/{body.topic}"
+
+        pre_run_id = str(_uuid.uuid4())
+        scratchpad_prefix = f"socratic_{pre_run_id[:8]}"
+
+        # Shared bash snippets for reading context and API key
+        _ctx_snippet = (
+            "WEB_BASE_URL=$(python3 -c \""
+            "import json; d=json.load(open('__orchestrator_context__.json')); "
+            "print(d['web_base_url'])\")\n"
+            "   API_KEY=$(cat __orchestrator_api_key__ 2>/dev/null || "
+            "echo \"$TMUX_ORCHESTRATOR_API_KEY\")"
+        )
+
+        def _scratchpad_key(suffix: str) -> str:
+            return f"{scratchpad_prefix}_{suffix}"
+
+        def _write_snippet(key: str, var: str = "CONTENT") -> str:
+            return (
+                f"   curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     -H 'Content-Type: application/json' \\\n"
+                f"     -d '{{\"value\": \"'${var}'\"}}'  "
+            )
+
+        def _read_snippet(key: str, varname: str) -> str:
+            return (
+                f"   {varname}=$(curl -s -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"value\"])')\n"
+            )
+
+        dialogue_key = _scratchpad_key("dialogue")
+        synthesis_key = _scratchpad_key("synthesis")
+
+        # --- Questioner prompt ---
+        questioner_prompt = (
+            f"You are the QUESTIONER agent in a Socratic dialogue workflow.\n"
+            f"\n"
+            f"**Dialogue topic:** {body.topic}\n"
+            f"\n"
+            f"Your role is to probe this topic using the Maieutic (midwifery) method.\n"
+            f"Do NOT take a position yourself — your job is to draw out and sharpen the\n"
+            f"thinking of the responder through precise, incisive questions.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Write 4–6 Socratic questions targeting the topic above.\n"
+            f"   **Phase 1 questions (questions 1–3)** — adversarial / challenging:\n"
+            f"   - 'What exactly do you mean by X?'\n"
+            f"   - 'What is your evidence for that assumption?'\n"
+            f"   - 'Give a concrete counter-example where that fails.'\n"
+            f"   **Phase 2 questions (questions 4–6)** — integrative / constructive:\n"
+            f"   - 'Under what conditions would that be correct?'\n"
+            f"   - 'What would you need to be true for this to work?'\n"
+            f"   - 'Where do you see the strongest case for the alternative?'\n"
+            f"2. Write your questions to `questioner_output.md` in your working directory.\n"
+            f"3. Store the Q&A log (your questions only for now) in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            f"   CONTENT=$(cat questioner_output.md)\n"
+            + _write_snippet(dialogue_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Be sharp and neutral. Do not answer your own questions. Max 300 words."
+        )
+
+        # --- Responder prompt ---
+        responder_prompt = (
+            f"You are the RESPONDER agent in a Socratic dialogue workflow.\n"
+            f"\n"
+            f"**Dialogue topic:** {body.topic}\n"
+            f"\n"
+            f"Your role is to answer the Socratic questions posed by the questioner,\n"
+            f"refining and defending the best position on this topic.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read the questioner's questions from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(dialogue_key, "QUESTIONS")
+            + f"   echo \"Questions: $QUESTIONS\"\n"
+            f"   ```\n"
+            f"2. Write a `responder_output.md` that:\n"
+            f"   - Addresses each question in turn (quote each question before answering).\n"
+            f"   - Provides concrete, specific answers with evidence or examples.\n"
+            f"   - Refines or revises the position where the questioning reveals a weakness.\n"
+            f"   - Acknowledges genuine uncertainty rather than bluffing.\n"
+            f"3. Append your answers to the dialogue log in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   FULL_DIALOGUE=\"$QUESTIONS\n\n--- RESPONDER ANSWERS ---\n$(cat responder_output.md)\"\n"
+            f"   CONTENT=$FULL_DIALOGUE\n"
+            + _write_snippet(dialogue_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Be honest and precise. Acknowledge where the questioning reveals genuine weaknesses."
+            f" Max 400 words."
+        )
+
+        # --- Synthesizer prompt ---
+        synthesizer_prompt = (
+            f"You are the SYNTHESIZER agent in a Socratic dialogue workflow.\n"
+            f"\n"
+            f"**Dialogue topic:** {body.topic}\n"
+            f"\n"
+            f"Your task is to read the complete Socratic dialogue and extract a structured\n"
+            f"conclusion that will be useful to the design team.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read the full dialogue from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(dialogue_key, "DIALOGUE")
+            + f"   echo \"Dialogue: $DIALOGUE\"\n"
+            f"   ```\n"
+            f"2. Write `synthesis.md` in your working directory with these sections:\n"
+            f"   ```markdown\n"
+            f"   # Socratic Synthesis: {body.topic}\n"
+            f"   ## Main Arguments Surfaced\n"
+            f"   ## Points of Agreement\n"
+            f"   ## Unresolved Questions\n"
+            f"   ## Recommendations\n"
+            f"   ## Key Assumptions and Preconditions\n"
+            f"   ```\n"
+            f"3. Store the synthesis in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   CONTENT=$(cat synthesis.md)\n"
+            + _write_snippet(synthesis_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Be precise and actionable. The synthesis should help the reader make a\n"
+            f"well-informed decision about the topic. Max 400 words."
+        )
+
+        # Submit tasks in pipeline order
+        questioner_task = await orchestrator.submit_task(
+            questioner_prompt,
+            required_tags=body.questioner_tags or None,
+            depends_on=[],
+        )
+
+        responder_task = await orchestrator.submit_task(
+            responder_prompt,
+            required_tags=body.responder_tags or None,
+            depends_on=[questioner_task.id],
+        )
+
+        synthesizer_task = await orchestrator.submit_task(
+            synthesizer_prompt,
+            required_tags=body.synthesizer_tags or None,
+            depends_on=[responder_task.id],
+            reply_to=body.reply_to,
+        )
+
+        task_ids_map = {
+            "questioner": questioner_task.id,
+            "responder": responder_task.id,
+            "synthesizer": synthesizer_task.id,
         }
 
         all_task_ids = list(task_ids_map.values())

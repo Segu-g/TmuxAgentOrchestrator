@@ -209,15 +209,20 @@ def test_atomic_write_produces_valid_json(tmp_path: Path) -> None:
 
 
 def test_concurrent_calls_do_not_corrupt_file(tmp_path: Path) -> None:
-    """Multiple concurrent pre_trust_worktree calls must not corrupt the file."""
+    """Multiple concurrent pre_trust_worktree calls must not corrupt the file.
+
+    With the flock-based serialisation, ALL 10 entries must be present after
+    all threads finish — no entries should be lost to a write race.
+    """
     claude_json = tmp_path / ".claude.json"
+    lock_file = tmp_path / ".claude.json.lock"
     errors: list[Exception] = []
 
     def trust_one(idx: int) -> None:
         worktree = tmp_path / f"wt-{idx}"
         worktree.mkdir(exist_ok=True)
         try:
-            pre_trust_worktree(worktree, claude_json_path=claude_json)
+            pre_trust_worktree(worktree, claude_json_path=claude_json, lock_path=lock_file)
         except Exception as exc:
             errors.append(exc)
 
@@ -232,6 +237,7 @@ def test_concurrent_calls_do_not_corrupt_file(tmp_path: Path) -> None:
     data = _load(claude_json)
     assert isinstance(data, dict)
     assert "projects" in data
-    # At least some entries must be present (all 10 ideally, but races may
-    # reduce this; at minimum the file must be parseable)
-    assert len(data["projects"]) >= 1
+    # All 10 entries must be present — flock prevents write-race data loss
+    assert len(data["projects"]) == 10, (
+        f"Expected 10 entries but got {len(data['projects'])}: {list(data['projects'].keys())}"
+    )
