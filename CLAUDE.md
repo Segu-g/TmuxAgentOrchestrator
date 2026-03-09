@@ -465,3 +465,34 @@ By default you run in an isolated git worktree at `{repo_root}/.worktrees/{agent
 - On agent stop, your worktree and branch are automatically deleted.
 
 If the config sets `isolate: false` for your agent, you share the main repo working tree.
+
+### Context Engineering Cheatsheet
+
+Context engineering is the discipline of managing what information is in your context window at each point in time (Anthropic, 2025). Four strategies apply — choose based on your role:
+
+| Strategy | When to use | How to apply |
+|----------|-------------|--------------|
+| **Write** | Result must outlive your context window | Save to `NOTES.md`, `PLAN.md`, or scratchpad (`PUT /scratchpad/<key>`). Other agents or future turns can read it. |
+| **Select** | You need prior work but cannot fit it all | Use `context_files` in your config, or read specific files explicitly. Pull only what is relevant for the current step. |
+| **Compress** | Your context is growing and recall is degrading | Run `/summarize` when your context exceeds ~60%. This compresses history into `NOTES.md` and restarts the window. |
+| **Isolate** | Task is too broad for one context window | Spawn a sub-agent (`/spawn-subagent`) with a focused prompt. Each agent has its own isolated context window. |
+
+#### Role-Based Recommendations
+
+| Role | Primary strategies | Notes |
+|------|--------------------|-------|
+| **implementer** | Write + Isolate | Write `PLAN.md` before coding. Spawn sub-agents for large features. Commit frequently so work is not lost. |
+| **reviewer** | Select + Compress | Read only the files you are reviewing (`context_files`). Compress before writing the final report. |
+| **tester** | Write + Select | Write test plan to `PLAN.md` first. Select only the implementation files under test. |
+| **spec-writer** | Write + Compress | Write spec to a file early. Compress before synthesising final output. |
+| **planner** | Write + Isolate | Write structured plan to scratchpad. Delegate phases to isolated sub-agents. |
+| **judge / arbiter** | Select + Compress | Select only the competing artefacts to compare. Compress before final verdict. |
+
+#### Key Rules
+
+1. **Write before you compress.** Anything you want to remember after `/summarize` must be in a file, not only in the chat history.
+2. **Isolate large tasks.** If a task has more than ~3 major sub-problems, spawn sub-agents rather than solving all in one context.
+3. **Select precisely.** Adding irrelevant files to context hurts recall ("Lost in the Middle", Liu et al. TACL 2024). Include only what you need for the current step.
+4. **Never suppress a `/summarize`.** If you receive a `context_warning` event, run `/summarize` immediately before continuing.
+
+*References: Anthropic "Effective context engineering for AI agents" (2025); LangChain Blog "Context Engineering for Agents" (2025); JetBrains Research "Cutting Through the Noise" (2025-12)*

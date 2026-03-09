@@ -630,9 +630,9 @@ AI エージェントにとって TDD は「ガードレール」として機能
 
 | 優先度 | 課題 | 層 |
 |--------|------|----|
-| 中 | **コンテキスト4戦略ガイド** — 書き込み・選択・圧縮・分離の4戦略チートシートを CLAUDE.md に追記 | 層4 |
-| 中 | **MIRIX 型エピソード記憶ストア** — タスク完了ごとに `{task_id, summary, outcome, lessons}` を JSONL に記録し、次タスク開始時に直近N件を system prompt に付加 | 層4 |
-| 中 | **スライディングウィンドウ + 重要度スコアによるコンテキスト圧縮** — TF-IDF 類似度でスコア下位 40% を削除する `/summarize` の上位互換 | 層4 |
+| ~~中~~ | ~~**コンテキスト4戦略ガイド** — 書き込み・選択・圧縮・分離の4戦略チートシートを CLAUDE.md に追記~~ | ~~完了 v1.1.19~~ |
+| ~~中~~ | ~~**MIRIX 型エピソード記憶ストア**~~ | ~~完了 v1.0.28~~ |
+| ~~中~~ | ~~**スライディングウィンドウ + 重要度スコアによるコンテキスト圧縮** — TF-IDF 類似度でスコア下位 40% を削除する `/summarize` の上位互換~~ | ~~完了 v1.1.12 (`context_auto_compress` + `TfIdfContextCompressor`)~~ |
 
 ---
 
@@ -669,7 +669,7 @@ AI エージェントにとって TDD は「ガードレール」として機能
 | ~~高~~ | ~~**`POST /workflows/tdd`**~~ | ~~完了 v0.36.0~~ |
 | ~~高~~ | ~~**`POST /workflows/debate`**~~ | ~~完了 v0.37.0 — advocate/critic/judge 3役割, 1–3ラウンド, judge→DECISION.md. ALL 27 CHECKS PASSED. デモ: SQLite vs PostgreSQL, Advocate(PG)勝利.~~ |
 | **高** | **スラッシュコマンド群をエージェントワークツリーで使用可能にする** — エージェント起動時に TmuxAgentOrchestrator の `.claude/commands/*.md` をワークツリーの `.claude/commands/` へ自動コピーする。これにより `/send-message`, `/check-inbox`, `/read-message`, `/spawn-subagent`, `/list-agents`, `/progress`, `/summarize`, `/delegate` 等の全スラッシュコマンドをエージェントが利用できるようになる。既存の `_copy_context_files()` 機構を拡張して実装する | v1.0.5 デモで agent-impl が `/send-message` を使おうとして "Unknown skill: send-message" エラー。エージェントがタスクプロンプトに書かれたコマンドを実行できない → タスク設計の自由度が下がる。`context_files` (v0.11.0) の自動コピー機構が既に存在し、`.claude/commands/` への拡張は少ない変更で実現できる。 |
-| 高 | **役割別 system_prompt テンプレートライブラリ + `system_prompt_file:` YAML フィールド** — `.claude/prompts/roles/` に tester / implementer / reviewer / spec-writer / judge / advocate / critic の7種類のプロンプトファイルを提供し、`AgentConfig.system_prompt_file:` フィールドで参照できるようにする。各ファイルに「役割・禁止事項・完了条件・/plan /tdd の使い方・迎合抑制指示」を標準化して記述する | Vellum "Best practices for building multi-agent systems" (2025): 役割特化プロンプトとステート分離が精度向上に最も効果的。ChatEval ICLR 2024 (arXiv:2308.07201): 役割の多様性が討論品質を決定する最重要因子。同一ロール複数エージェントは性能低下を招く。CONSENSAGENT ACL 2025: 迎合抑制プロンプトが正答率・効率の両方を改善。v0.37.0 で advocate/critic/judge の 3 テンプレート (`.claude/prompts/roles/`) を追加。残りは tester / implementer / reviewer / spec-writer。 |
+| ~~高~~ | ~~**役割別 system_prompt テンプレートライブラリ + `system_prompt_file:` YAML フィールド**~~ | ~~完了 v1.0.27 + v1.1.19確認 — `.claude/prompts/roles/` に advocate/critic/judge/tester/implementer/reviewer/spec-writer/architect/planner の9テンプレート完備。`AgentConfig.system_prompt_file:` フィールドが `config.py` + `factory.py` に実装済み。`tests/test_system_prompt_file.py` が存在。~~ |
 | ~~**高**~~ | ~~**`POST /workflows/adr` — Architecture Decision Record (ADR) 自動生成ワークフロー**~~ | ~~完了 v0.40.0 — proposer→reviewer→synthesizer 3エージェントパイプライン、MADR 4.0.0 フォーマット DECISION.md 生成。ALL 27 CHECKS PASSED。`test_workflow_adr.py` 25テスト。~~ |
 | ~~**高**~~ | ~~**Codified Context インフラ**~~ | ~~完了 — `context_spec_files: list[str]` glob パターン、`_copy_context_spec_files()` 実装済み (`agents/claude_code.py`)。`tests/test_context_spec_files.py` 存在。~~ |
 | 高 | **チェックポイント永続化による中断再開** — `ResultStore` (v0.24.0 JSONL) を拡張し、タスク進行状態・ワークフロー状態スナップショットを SQLite に保存。`tmux-orchestrator web --resume` フラグでプロセス再起動後に最後のチェックポイントから継続できるようにする | LangGraph は checkpointer + PostgresSaver で fault-tolerant persistence を提供 (LangChain docs 2025)。現状はプロセス再起動でキュー・ワークフロー状態が消滅する。ResultStore (v0.24.0) が JSONL 追記基盤として既に存在しており、SQLite 拡張は自然な次ステップ。 |
@@ -680,10 +680,10 @@ AI エージェントにとって TDD は「ガードレール」として機能
 | 中 | **`POST /workflows/delphi` — 複数ラウンド合意形成ワークフロー** — 3–5 名の専門家エージェント（セキュリティ / パフォーマンス / 保守性 / UX / コスト 各ペルソナ）が匿名で意見を提出し、モデレーターエージェントが集計して次ラウンドにフィードバックする Delphi サイクルを最大 3 ラウンド実行する DAG を追加。各ラウンドの出力を `delphi_round_{n}.md` に保存し、最終合意を `consensus.md` に書き出す | RT-AID "Real-Time AI Delphi" ScienceDirect 2025 (arXiv:2502.21092) が LLM によるデルファイ法の自動化を提案。Du et al. ICML 2024: 「エージェントが全員誤りでも討論で正解に収束するケースが多数存在する」→ 複数ラウンドの価値を実証。 |
 | 中 | **`POST /workflows/redblue` — Red Team / Blue Team 対抗評価ワークフロー** — `blue-team`（実装・設計案を作成）・`red-team`（攻撃者視点で脆弱性・欠陥を列挙）・`arbiter`（リスク評価レポートを生成）の3エージェント構成。セキュリティレビュー・ビジネスケース検証・アーキテクチャ変更の影響分析に利用できる汎用的な対抗評価テンプレートを提供する | Adversarial Multi-Agent Evaluation arXiv:2410.04663: 反復討論型評価がバイアス削減と判断精度向上に有効。Red-Teaming LLM MAS ACL 2025 (arXiv:2502.14847): エージェント間通信への攻撃評価手法を提案。`debate` ワークフローの特殊化として実装できる。 |
 | 中 | **`POST /workflows/socratic` — ソクラテス的対話ワークフロー** — `questioner`（前提・定義・論拠を問うマイウティカ法）・`responder`（回答を精緻化）・`synthesizer`（対話ログから構造化結論を抽出）の3エージェント構成。設計仕様の曖昧性解消・要件の深掘り・技術負債の根本原因分析に適する。最初のラウンドは強い反論、後のラウンドは統合的問いに変化させる段階的移行モデルを採用する | SocraSynth arXiv:2402.06634: モデレーター型ソクラテス的マルチエージェント討論プラットフォーム。KELE EMNLP 2025 (arXiv:2409.05511): LLM ベースのソクラテス教授エージェント実証。`debate` / `adr` ワークフローと共通基盤で実装できる。 |
-| 中 | **`/deliberate <question>` スラッシュコマンド** — 単一の親エージェントが `/deliberate "REST vs GraphQL"` と入力すると、2 つのサブエージェント（advocate / critic）を自動スポーンし、2 ラウンドの討論後に `DELIBERATION.md` に結論を書き出して親に `deliberation_complete` STATUS を送信するコマンドを `.claude/commands/deliberate.md` として提供する | DEBATE ACL 2024 (arXiv:2405.09935): Devil's Advocate が単一 LLM 判断のバイアスを解消。CONSENSAGENT ACL 2025: 迎合抑制プロンプトで効率的な合意形成を実証。既存の `/spawn-subagent` + `reply_to` + Workflow DAG の組み合わせで実現可能。`debate` ワークフロー完成後に実装するのが自然。 |
-| 中 | **`POST /workflows/ddd` — DDD Bounded Context 分解ワークフロー** — Director が機能要求をドメインイベント・集約・コマンドに分解した EventStorming マップを PLAN.md に書き出し、境界コンテキストごとに専用ワーカー（ubiquitous language 定義を `context_files` として受け取る）に実装を委任するテンプレートを追加する | Russ Miles "Domain-Driven Agent Design" (Engineering Agents 2025): DDD の Bounded Context がマルチエージェントの責務分割境界に直接対応する。Bakthavachalu (2025): 大手投資銀行の3 Bounded Context 実装事例（Risk / Regulatory / Validation）。`clean-arch` ワークフローの代替として提供。 |
+| ~~中~~ | ~~**`/deliberate <question>` スラッシュコマンド**~~ | ~~完了 v1.0.32 — `agent_plugin/commands/deliberate.md` 実装済み。2エージェント討論（advocate/critic）、`DELIBERATION.md` 生成。~~ |
+| ~~中~~ | ~~**`POST /workflows/ddd` — DDD Bounded Context 分解ワークフロー**~~ | ~~完了 v1.0.32以降 — `web/routers/workflows.py` の `submit_ddd_workflow()` 実装済み。`DDDWorkflowSubmit` スキーマ。~~ |
 | ~~中~~ | ~~**形式仕様エージェントステップ + `/spec` スラッシュコマンド + `POST /workflows/spec-first`**~~ | ~~完了 v1.1.8 — `/spec` スラッシュコマンド (`agent_plugin/commands/spec.md`) + `POST /workflows/spec-first` (spec-writer→implementer 2エージェントパイプライン)。`SpecFirstWorkflowSubmit` スキーマ。57テスト新規追加。2007テスト全通過。~~ |
-| 中 | **コンテキスト4戦略ガイドを CLAUDE.md と `.claude/prompts/` に体系化** — 「書き込み (NOTES.md/PLAN.md)・選択 (context_files)・圧縮 (/summarize)・分離 (worktree + 別コンテキスト)」の4戦略を役割ごとに組み合わせたベストプラクティスチートシートを提供し、CLAUDE.md の "Running as an Orchestrated Agent" セクションに追記する | Algomatic Tech Blog "AIエージェントを支える技術: コンテキストエンジニアリングの現在地" (2025-10): 書き込み・選択・圧縮・分離の4戦略フレームワーク。Anthropic "Effective Context Engineering for AI Agents" (2025-09-29): 「コンテキストエンジニアリングとはプロンプト設計を超えた、推論時の情報エコシステム全体の管理」。実装コストが低くユーザー価値が高い。 |
+| ~~中~~ | ~~**コンテキスト4戦略ガイドを CLAUDE.md と `.claude/prompts/` に体系化**~~ | ~~完了 v1.1.19 — CLAUDE.md「Context Engineering Cheatsheet」セクション追加 + `.claude/prompts/context-strategies.md` ロール別マトリクス追加。~~ |
 | ~~低~~ | ~~**LLM-as-Judge による並列エージェント出力の自動スコアリング (BestOfN + EDDOps)**~~ | ~~完了 v1.1.0 — `POST /workflows/competition` として実装。N 個の solver エージェントが並列で同一問題を解き、judge エージェントがスコアを比較して勝者を宣言する (N+1)-agent DAG。53 tests PASSED。~~ |
 | 低 | **ワークフローテンプレートライブラリ (`examples/workflows/`)** — TDD / PairCoder / CleanArch / DDD / SpecFirst / Debate / ADR の各ワークフローを `POST /workflows` で直接投入できる自己完結 YAML として `examples/workflows/` に収録する。各 YAML はエージェント数・ロール・`system_prompt_file` 参照・`context_files`・`required_tags` を含む。`examples/debate_config.yaml`（異種エージェント討論グループ設定）を含む | CrewAI の YAML-driven workflow approach (2025) が「ドキュメントとしての設定ファイル」を普及させた。各ワークフローエンドポイント実装後に対応 YAML を追加していく継続的タスク。A-HMAD Springer 2025 + ChatEval ICLR 2024: 異種構成エージェントと役割固定化が討論品質を決定する最重要因子。 |
 | 低 | **`DECISION.md` 標準フォーマットとスクラッチパッド書き込み規約** — `debate` / `adr` / `delphi` / `redblue` / `socratic` の各ワークフローが出力を書き込む共通フォーマット (title / status / context / options_considered / decision / rationale / dissenting_opinions / consequences / references) を定義し、`GET /scratchpad/DECISION` で取得できるようにする | SocraSynth arXiv:2402.06634: 討論から「構造化された結論」を抽出する段階が必須。RT-AID ScienceDirect 2025: 各ラウンドの中間出力が最終合意文書の品質を高める。既存の `GET/PUT /scratchpad/{key}` (v0.16.0) + `context_files` (v0.11.0) を組み合わせて実現可能。各ワークフロー完成後に規約を策定する。 |
@@ -3302,4 +3302,74 @@ class AgentStatusMachine(RuleBasedStateMachine):
 **デバッグ**: initial demo.py が `api()` の引数順序を誤って呼び出し (TypeError)。`http_get()` / `http_post()` ヘルパーに置き換えて修正。
 
 **27/27 チェック PASSED**
+
+---
+
+## §10.51 — v1.1.19: コンテキスト4戦略ガイド + `system_prompt_file` §11 正確化
+
+### Step 0 — 選択理由
+
+**選択: コンテキスト4戦略ガイド + §11 完了ステータス正確化**
+
+v1.1.18 までに §11 の主要フィーチャーはほぼ実装済みとなった。残存する真の未実装候補を精査した結果：
+
+1. **`system_prompt_file` YAML フィールド + 役割テンプレートライブラリ（§11 高優先度）**: 調査の結果、`config.py` + `factory.py` に実装済み（v1.0.27）、役割テンプレート 9 本が `.claude/prompts/roles/` に存在、`tests/test_system_prompt_file.py` が存在することを確認。§11 の strikethrough が漏れていた。選択しない理由：既に完了済みのため実装作業は不要。
+2. **`/deliberate` スラッシュコマンド（§11 中）**: `agent_plugin/commands/deliberate.md` が存在、v1.0.32 で完了済み。選択しない理由：既に完了済み。
+3. **`POST /workflows/ddd`（§11 中）**: `web/routers/workflows.py` に実装済み。選択しない理由：既に完了済み。
+4. **コンテキスト4戦略ガイド（§11 中）**: CLAUDE.md に「Running as an Orchestrated Agent」セクションが存在するが、書き込み・選択・圧縮・分離の4戦略チートシートは未追記。実装コストが低く（CLAUDE.md 追記のみ）、エージェントへの即時価値が高い。**選択**。
+5. **スライディングウィンドウ + 重要度スコアコンテキスト圧縮（§11 中）**: 調査の結果、`context_auto_compress: bool` + `TfIdfContextCompressor` が v1.1.12 以前に実装済みであることを確認。選択しない理由：既に完了済み。
+
+**v1.1.19 の作業内容**:
+- §11 テーブルの完了済み項目に strikethrough を追加（`system_prompt_file`、`/deliberate`、`ddd`、スライディングウィンドウ圧縮）
+- CLAUDE.md に「Context Engineering 4戦略チートシート」セクションを追記
+- `.claude/prompts/context-strategies.md` にロール別推奨戦略マトリクスを追加
+- デモ: 2エージェント（implementer + reviewer）が `system_prompt_file:` でロールを参照し、コンテキスト戦略を活用して協調するパイプライン
+
+### Step 1 — Research
+
+**Query 1**: "context engineering AI agents write select compress isolate strategies 2025"
+
+主要知見:
+- **LangChain Blog "Context Engineering for Agents" (2025)**: コンテキストエンジニアリングの4戦略（Write / Select / Compress / Isolate）を体系化。各戦略の代表的実装例を整理。Write = スクラッチパッドへの書き出し、Select = RAG・セマンティック検索、Compress = 要約・コンパクション、Isolate = サブエージェントへの分散。
+- **mem0.ai "Context Engineering for AI Agents Guide" (2025)**: コンテキスト管理の実践ガイド。4戦略の組み合わせが単独戦略を大幅に上回るパフォーマンスを発揮することを事例で示す。
+
+**References**:
+- LangChain Blog: https://blog.langchain.com/context-engineering-for-agents/
+- mem0.ai Guide: https://mem0.ai/blog/context-engineering-ai-agents-guide
+
+**Query 2**: "LLM agent context window management best practices role-based 2025"
+
+主要知見:
+- **JetBrains Research Blog "Cutting Through the Noise" (2025-12)**: LLM エージェントのコンテキスト管理における observation masking と LLM summarization を比較。役割別エージェントへのコンテキスト分離が最も効果的であることを実証。「コンテキストウィンドウはクリーンな作業机のようなもの — タスクに無関係なものは乗せない」。
+- **Anthropic Engineering "Effective harnesses for long-running agents" (2025)**: ロールベースのサブエージェント分割で、各エージェントのコンテキストが狭いサブタスクに集中できるため、単一エージェント比で大幅な性能向上を実現。
+
+**References**:
+- JetBrains Research Blog: https://blog.jetbrains.com/research/2025/12/efficient-context-management/
+- Anthropic Engineering: https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents
+
+**Query 3**: "Anthropic context engineering effective AI agents 2025 write select compress isolate"
+
+主要知見:
+- **Anthropic Engineering "Effective context engineering for AI agents" (2025-09-29)**: 「コンテキストエンジニアリングとはプロンプト設計を超えた、推論時の情報エコシステム全体の管理である」と定義。4戦略の組み合わせにより単一エージェントでは不可能な長期タスクが実現できることを実証。Write + Select + Compress + Isolate の組み合わせが最大効果。
+
+**Reference**:
+- Anthropic Engineering: https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents
+
+**Query 4**: "multi-agent system_prompt role template best practices sycophancy prevention 2025"
+
+主要知見:
+- **TreasureData "Best Practices for Agent System Prompts" (2025)**: 役割定義・ツール使用ガイダンス・チェックポイントの3要素を含む構造化テンプレートが推奨される。「役割が曖昧なエージェントは最も予測不可能な挙動をする」。
+- **CONSENSAGENT ACL Findings 2025**: マルチエージェント討論における迎合（sycophancy）を動的プロンプト精緻化で抑制。役割テンプレートへの迎合抑制指示追記が正答率・効率の両方を改善。迎合の主因は「他エージェントの意見への無批判な同意」であり、テンプレートで「独立判断を維持せよ」と明示することが防止策として有効。
+
+**References**:
+- TreasureData Agent System Prompts: https://docs.treasuredata.com/products/customer-data-platform/ai-agent-foundry/ai-agent/system-prompt-best-practices
+- CONSENSAGENT ACL 2025: https://aclanthology.org/2025.findings-acl.1141.pdf
+
+**実装への示唆**:
+1. CLAUDE.md の「Running as an Orchestrated Agent」セクションに「Context Engineering 4戦略」を追記
+2. 各戦略をロールと対応付けたマトリクス（implementer → Write + Isolate、reviewer → Select + Compress）
+3. `.claude/prompts/context-strategies.md` に詳細な使い分けガイドを配置
+4. 実装は純粋ドキュメント追加のみ（コード変更なし）
+
+### Step 2 — 実装サマリー
 
