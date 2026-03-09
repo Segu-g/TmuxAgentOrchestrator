@@ -17,10 +17,13 @@ References:
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 import threading
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class WorktreeManager:
@@ -192,6 +195,44 @@ class WorktreeManager:
         """Return the current worktree path for *agent_id*, or ``None`` if not set up."""
         with self._lock:
             return self._owned.get(agent_id)
+
+    def prune_stale(self) -> None:
+        """Remove stale git worktree administrative files.
+
+        Runs ``git worktree prune --expire now`` in the repository root to
+        clean up metadata for worktrees whose directories no longer exist on
+        disk (e.g. after an unclean shutdown / demo crash).
+
+        This is called automatically by ``Orchestrator.start()`` before any
+        agents are spawned, ensuring that stale entries from a previous run
+        cannot cause ``git worktree add`` to fail with a name collision.
+
+        Never raises — errors from the git subprocess are silently ignored so
+        that a missing or misconfigured git installation does not prevent the
+        orchestrator from starting.
+
+        References:
+        - git-scm.com/docs/git-worktree — ``git worktree prune --expire now``
+        - anthropics/claude-code#26725 — stale worktrees never cleaned up
+        - DESIGN.md §10.40 (v1.1.4)
+        """
+        result = subprocess.run(
+            ["git", "worktree", "prune", "--expire", "now"],
+            cwd=self._repo_root,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(errors="replace")
+            logger.debug(
+                "worktree prune returned non-zero exit code %d (stderr: %s); "
+                "continuing startup — stale cleanup is best-effort",
+                result.returncode,
+                (stderr or "").strip(),
+            )
+        else:
+            logger.debug("worktree prune completed successfully")
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -406,6 +406,12 @@ class Orchestrator:
         if resume and self._checkpoint_store is not None:
             await self._resume_from_checkpoint()
 
+        # Prune stale worktree metadata before spawning agents so that a prior
+        # unclean shutdown cannot cause `git worktree add` to fail with a
+        # name-collision error.  Reference: DESIGN.md §10.40 (v1.1.4).
+        if self._worktree_manager is not None:
+            self._worktree_manager.prune_stale()
+
         if self._defer_agent_start:
             # Web mode: dispatch loop starts FIRST so it is ready when agents
             # become IDLE asynchronously.  Agent processes start later (via the
@@ -581,6 +587,14 @@ class Orchestrator:
 
     def list_agents(self) -> list[dict]:
         return self.registry.list_all(self.bus.get_drop_counts())
+
+    def get_agent_dict(self, agent_id: str) -> "dict | None":
+        """Return a JSON-serialisable dict for a single agent by ID, or ``None``.
+
+        Uses the same dict shape as :meth:`list_agents` for consistency.
+        """
+        agents = self.registry.list_all(self.bus.get_drop_counts())
+        return next((a for a in agents if a["id"] == agent_id), None)
 
     def get_director(self) -> "Agent | None":
         """Return the director agent, or None if no director is registered."""

@@ -1613,6 +1613,32 @@ def create_app(
         agents = orchestrator.list_agents()
         return _build_agent_tree(agents)
 
+    @app.get(
+        "/agents/{agent_id}",
+        summary="Get a single agent by ID",
+        dependencies=[Depends(auth)],
+    )
+    async def get_agent(agent_id: str) -> dict:
+        """Return the status dict for a single agent identified by *agent_id*.
+
+        Returns the same field set as ``GET /agents`` but for one agent only.
+        Raises 404 when *agent_id* is not registered.
+
+        Design note: ``GET /collections/{id}`` is the canonical REST pattern for
+        single-resource retrieval (Microsoft Azure API Design Best Practices;
+        REST API Design – Vinay Sahni 2013).  Reusing the same dict shape as
+        ``list_agents()`` keeps clients consistent.
+
+        Reference: DESIGN.md §10.40 (v1.1.4).
+        """
+        agent_dict = orchestrator.get_agent_dict(agent_id)
+        if agent_dict is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Agent {agent_id!r} not found",
+            )
+        return agent_dict
+
     @app.delete("/agents/{agent_id}", summary="Stop an agent", dependencies=[Depends(auth)])
     async def stop_agent(agent_id: str) -> AgentKillResponse:
         agent = orchestrator.get_agent(agent_id)

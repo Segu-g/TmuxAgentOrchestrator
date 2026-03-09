@@ -1763,6 +1763,46 @@
           }
         },
         "summary": "Stop an agent"
+      },
+      "get": {
+        "description": "Return the status dict for a single agent identified by *agent_id*.\n\nReturns the same field set as ``GET /agents`` but for one agent only.\nRaises 404 when *agent_id* is not registered.\n\nDesign note: ``GET /collections/{id}`` is the canonical REST pattern for\nsingle-resource retrieval (Microsoft Azure API Design Best Practices;\nREST API Design \u2013 Vinay Sahni 2013).  Reusing the same dict shape as\n``list_agents()`` keeps clients consistent.\n\nReference: DESIGN.md \u00a710.40 (v1.1.4).",
+        "operationId": "get_agent_agents__agent_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Agent Agents  Agent Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get a single agent by ID"
       }
     },
     "/agents/{agent_id}/change-strategy": {
