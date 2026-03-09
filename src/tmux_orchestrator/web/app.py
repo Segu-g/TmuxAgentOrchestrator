@@ -851,6 +851,61 @@ class FulldevWorkflowSubmit(BaseModel):
         return v
 
 
+class CleanArchWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/clean-arch — 4-layer Clean Architecture pipeline.
+
+    Submits a 4-agent sequential pipeline DAG based on Robert C. Martin's Clean
+    Architecture (2017) concentric-ring model:
+
+      1. ``domain-designer``: defines domain Entities, Value Objects, Aggregates,
+         and Domain Events without any framework dependency; stores result in
+         ``{scratchpad_prefix}_domain``.
+      2. ``usecase-designer``: reads domain layer; defines Use Cases (Interactors),
+         Input/Output DTOs, and Port interfaces; stores in ``{scratchpad_prefix}_usecases``.
+      3. ``adapter-designer``: reads domain + use-cases; defines concrete Interface
+         Adapters (Repository impls, Presenters, Controllers); stores in
+         ``{scratchpad_prefix}_adapters``.
+      4. ``framework-designer``: reads all previous layers; writes final
+         ``ARCHITECTURE.md`` synthesising the full design plus executable Python
+         skeleton showing framework wiring; stores in ``{scratchpad_prefix}_arch``.
+
+    All handoffs use the shared scratchpad (Blackboard pattern). Each task
+    ``depends_on`` the previous task, forming a linear pipeline.
+
+    Scratchpad keys use underscores (not slashes) as namespace separator.
+
+    Design references:
+    - Robert C. Martin, "Clean Architecture" (2017): Domain → Use Cases →
+      Interface Adapters → Frameworks & Drivers concentric-ring model.
+    - AgentMesh arXiv:2507.19902 (2025): Planner→Coder→Debugger→Reviewer 4-role
+      artifact-centric pipeline for software development automation.
+    - Muthu (2025-11) "The Architecture is the Prompt": hexagonal architecture
+      boundaries map directly to AI agent context constraints.
+    - Marta Fernández García "Applying Hexagonal Architecture in AI Agent
+      Development" (Medium, 2025).
+    - DESIGN.md §10.30 (v1.0.30)
+    """
+
+    feature: str
+    language: str = "python"
+    # Optional per-role required_tags for agent capability routing
+    domain_designer_tags: list[str] = []
+    usecase_designer_tags: list[str] = []
+    adapter_designer_tags: list[str] = []
+    framework_designer_tags: list[str] = []
+    # When set, the framework-designer RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    from pydantic import field_validator
+
+    @field_validator("feature")
+    @classmethod
+    def feature_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("feature must not be empty")
+        return v
+
+
 # ---------------------------------------------------------------------------
 # Module-level auth state
 # ---------------------------------------------------------------------------
@@ -4046,6 +4101,315 @@ def create_app(
             "test_writer": tw_task.id,
             "implementer": impl_task.id,
             "reviewer": rev_task.id,
+        }
+
+        all_task_ids = list(task_ids_map.values())
+        run = wm.submit(name=wf_name, task_ids=all_task_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids_map,
+            "scratchpad_prefix": scratchpad_prefix,
+        }
+
+    @app.post(
+        "/workflows/clean-arch",
+        summary="Submit a 4-agent Clean Architecture pipeline workflow",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_clean_arch_workflow(body: CleanArchWorkflowSubmit) -> dict:
+        """Submit a 4-agent Clean Architecture Workflow DAG.
+
+        Pipeline (each step depends_on the previous):
+
+        1. **domain-designer**: defines domain Entities, Value Objects, Aggregates,
+           and Domain Events without any framework dependency; writes ``DOMAIN.md``
+           and stores it in the shared scratchpad.
+        2. **usecase-designer**: reads the domain layer; defines Use Cases
+           (Application Interactors), Input/Output DTOs, and Port interfaces (abstract
+           boundaries); writes ``USECASES.md`` and stores it.
+        3. **adapter-designer**: reads domain + use-cases; defines concrete Interface
+           Adapters (Repository implementations, Presenters, Controllers); writes
+           ``ADAPTERS.md`` and stores it.
+        4. **framework-designer**: reads all previous layers; synthesises the complete
+           architecture into ``ARCHITECTURE.md`` plus writes executable Python skeleton
+           files demonstrating framework wiring (FastAPI/SQLite/CLI); stores the result.
+
+        All artifacts are passed via the shared scratchpad (Blackboard pattern).
+        Scratchpad keys use underscores (not slashes) as namespace separator.
+
+        Returns:
+        - ``workflow_id``: workflow run UUID for status polling
+        - ``name``: human-readable name (``clean-arch/<feature>``)
+        - ``task_ids``: dict with keys ``domain_designer``, ``usecase_designer``,
+          ``adapter_designer``, ``framework_designer`` mapping to global task IDs
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+          (e.g. ``cleanarch_{run_id[:8]}``)
+
+        Design references:
+        - Robert C. Martin, "Clean Architecture" (2017): Domain → Use Cases →
+          Interface Adapters → Frameworks & Drivers.
+        - AgentMesh arXiv:2507.19902 (2025): 4-role artifact-centric pipeline.
+        - Muthu (2025-11) "The Architecture is the Prompt".
+        - DESIGN.md §10.30 (v1.0.30)
+        """
+        import uuid as _uuid  # noqa: PLC0415
+
+        lang = body.language
+        wm = orchestrator.get_workflow_manager()
+        wf_name = f"clean-arch/{body.feature}"
+
+        pre_run_id = str(_uuid.uuid4())
+        scratchpad_prefix = f"cleanarch_{pre_run_id[:8]}"
+
+        # Scratchpad keys (underscores only — no slashes)
+        domain_key = f"{scratchpad_prefix}_domain"
+        usecases_key = f"{scratchpad_prefix}_usecases"
+        adapters_key = f"{scratchpad_prefix}_adapters"
+        arch_key = f"{scratchpad_prefix}_arch"
+
+        # Shared bash snippet for reading context + API key
+        _ctx_snippet = (
+            "WEB_BASE_URL=$(python3 -c \""
+            "import json; d=json.load(open('__orchestrator_context__.json')); "
+            "print(d['web_base_url'])\")\n"
+            "   API_KEY=$(cat __orchestrator_api_key__ 2>/dev/null || "
+            "echo \"$TMUX_ORCHESTRATOR_API_KEY\")"
+        )
+
+        def _write_snippet(key: str, var: str = "CONTENT") -> str:
+            return (
+                f"   curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     -H 'Content-Type: application/json' \\\n"
+                f"     -d '{{\"value\": \"'${var}'\"}}'  "
+            )
+
+        def _read_snippet(key: str, varname: str) -> str:
+            return (
+                f"   {varname}=$(curl -s -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"value\"])')\n"
+            )
+
+        # ---------------------------------------------------------------
+        # 1. DOMAIN-DESIGNER prompt
+        # ---------------------------------------------------------------
+        domain_designer_prompt = (
+            f"You are the DOMAIN-DESIGNER agent in a Clean Architecture workflow.\n"
+            f"\n"
+            f"**Feature to design:** {body.feature}\n"
+            f"**Language:** {lang}\n"
+            f"\n"
+            f"Your role is to define the innermost layer of Clean Architecture:\n"
+            f"the **Domain layer** (Entities, Value Objects, Aggregates, Domain Events).\n"
+            f"This layer must have ZERO framework or infrastructure dependencies.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Write `DOMAIN.md` in your working directory with this structure:\n"
+            f"   ```markdown\n"
+            f"   # Domain Layer: {body.feature}\n"
+            f"   ## Entities\n"
+            f"   (Core business objects with identity — list each with fields and invariants)\n"
+            f"   ## Value Objects\n"
+            f"   (Immutable descriptors without identity)\n"
+            f"   ## Aggregates\n"
+            f"   (Consistency boundaries — specify aggregate root)\n"
+            f"   ## Domain Events\n"
+            f"   (State changes that domain experts care about)\n"
+            f"   ## Domain Rules / Invariants\n"
+            f"   (Business rules that must always hold)\n"
+            f"   ## Ubiquitous Language\n"
+            f"   (Key terms with precise definitions)\n"
+            f"   ```\n"
+            f"2. Write stub {lang} classes for each Entity and Value Object in\n"
+            f"   `domain.py` (pure {lang} — no external imports except stdlib).\n"
+            f"3. Store DOMAIN.md in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            f"   CONTENT=$(cat DOMAIN.md)\n"
+            + _write_snippet(domain_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Focus ONLY on the domain model. Do NOT define use cases, repositories,\n"
+            f"or any infrastructure. Keep it under 400 words."
+        )
+
+        # ---------------------------------------------------------------
+        # 2. USECASE-DESIGNER prompt
+        # ---------------------------------------------------------------
+        usecase_designer_prompt = (
+            f"You are the USECASE-DESIGNER agent in a Clean Architecture workflow.\n"
+            f"\n"
+            f"**Feature:** {body.feature}\n"
+            f"**Language:** {lang}\n"
+            f"\n"
+            f"Your role is to define the **Application / Use-Case layer** of Clean\n"
+            f"Architecture: Use Cases (Interactors), Input/Output DTOs, and Port\n"
+            f"interfaces (abstract boundaries the domain defines for infrastructure).\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read the Domain layer from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(domain_key, "DOMAIN")
+            + f"   echo \"Domain loaded: $(echo $DOMAIN | wc -c) chars\"\n"
+            f"   ```\n"
+            f"2. Write `USECASES.md` with this structure:\n"
+            f"   ```markdown\n"
+            f"   # Use-Case Layer: {body.feature}\n"
+            f"   ## Use Cases (Interactors)\n"
+            f"   (List each use case: name, input DTO fields, output DTO fields,\n"
+            f"    steps, domain rules invoked)\n"
+            f"   ## Port Interfaces\n"
+            f"   (Abstract interfaces the use cases need — e.g. IRepository, INotifier)\n"
+            f"   ## Input / Output DTOs\n"
+            f"   (Plain data structures crossing the use-case boundary)\n"
+            f"   ```\n"
+            f"3. Write stub {lang} abstract classes / protocols for each Port in\n"
+            f"   `ports.py` (stdlib `abc.ABC` only, no framework imports).\n"
+            f"4. Store USECASES.md in the scratchpad:\n"
+            f"   ```bash\n"
+            f"   CONTENT=$(cat USECASES.md)\n"
+            + _write_snippet(usecases_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Derive use cases strictly from the Domain layer above.\n"
+            f"Do NOT define adapters or framework wiring. Max 400 words."
+        )
+
+        # ---------------------------------------------------------------
+        # 3. ADAPTER-DESIGNER prompt
+        # ---------------------------------------------------------------
+        adapter_designer_prompt = (
+            f"You are the ADAPTER-DESIGNER agent in a Clean Architecture workflow.\n"
+            f"\n"
+            f"**Feature:** {body.feature}\n"
+            f"**Language:** {lang}\n"
+            f"\n"
+            f"Your role is to define the **Interface Adapters layer** of Clean\n"
+            f"Architecture: concrete implementations of Port interfaces (Repositories,\n"
+            f"Presenters, Controllers / Request Handlers).\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read the Domain and Use-Case layers from the scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(domain_key, "DOMAIN")
+            + _read_snippet(usecases_key, "USECASES")
+            + f"   echo \"Domain + Use-Cases loaded\"\n"
+            f"   ```\n"
+            f"2. Write `ADAPTERS.md` with this structure:\n"
+            f"   ```markdown\n"
+            f"   # Interface Adapters Layer: {body.feature}\n"
+            f"   ## Repository Adapters\n"
+            f"   (Concrete implementations of IRepository ports — e.g. SQLite, in-memory)\n"
+            f"   ## Presenter Adapters\n"
+            f"   (Transforms use-case output DTOs to view models / JSON responses)\n"
+            f"   ## Controller / Request Handler Adapters\n"
+            f"   (Translates HTTP/CLI input to use-case input DTOs)\n"
+            f"   ## Adapter Dependency Map\n"
+            f"   (Which adapter implements which port)\n"
+            f"   ```\n"
+            f"3. Write stub {lang} classes for each adapter in `adapters.py`.\n"
+            f"   - Repositories may import sqlite3 or similar stdlib only.\n"
+            f"   - Implement the Port abstract interfaces from ports.py.\n"
+            f"4. Store ADAPTERS.md in the scratchpad:\n"
+            f"   ```bash\n"
+            f"   CONTENT=$(cat ADAPTERS.md)\n"
+            + _write_snippet(adapters_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Adapters implement Ports — they must NOT import domain entities directly\n"
+            f"except through the Port interfaces. Max 400 words."
+        )
+
+        # ---------------------------------------------------------------
+        # 4. FRAMEWORK-DESIGNER prompt
+        # ---------------------------------------------------------------
+        framework_designer_prompt = (
+            f"You are the FRAMEWORK-DESIGNER agent in a Clean Architecture workflow.\n"
+            f"\n"
+            f"**Feature:** {body.feature}\n"
+            f"**Language:** {lang}\n"
+            f"\n"
+            f"Your role is to synthesise ALL previous layers and define the outermost\n"
+            f"**Frameworks & Drivers layer** of Clean Architecture: the wiring that\n"
+            f"connects adapters to use cases via dependency injection.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read all previous layers from the scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(domain_key, "DOMAIN")
+            + _read_snippet(usecases_key, "USECASES")
+            + _read_snippet(adapters_key, "ADAPTERS")
+            + f"   echo \"All layers loaded\"\n"
+            f"   ```\n"
+            f"2. Write `ARCHITECTURE.md` synthesising the complete design:\n"
+            f"   ```markdown\n"
+            f"   # Clean Architecture: {body.feature}\n"
+            f"   ## Layer Overview\n"
+            f"   (Concentric rings: Domain → Use Cases → Interface Adapters → Frameworks)\n"
+            f"   ## Dependency Rule\n"
+            f"   (Verify: each layer only imports inward)\n"
+            f"   ## Framework Wiring\n"
+            f"   (How FastAPI / SQLite / CLI entry points connect to adapters and use cases)\n"
+            f"   ## Module Structure\n"
+            f"   (directory tree with file → layer mapping)\n"
+            f"   ## Dependency Injection Strategy\n"
+            f"   (How adapters are injected into interactors at startup)\n"
+            f"   ## Key Design Decisions\n"
+            f"   ```\n"
+            f"3. Write `main.py` as the composition root that wires everything together:\n"
+            f"   - Instantiates repository adapters\n"
+            f"   - Injects them into use-case interactors\n"
+            f"   - Exposes a simple CLI or HTTP entry point\n"
+            f"   Keep it under 60 lines.\n"
+            f"4. Store ARCHITECTURE.md in the scratchpad:\n"
+            f"   ```bash\n"
+            f"   CONTENT=$(cat ARCHITECTURE.md)\n"
+            + _write_snippet(arch_key)
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"The composition root (main.py) is the ONLY place where all layers touch.\n"
+            f"Verify the Dependency Rule: inner layers must NOT import outer layers."
+        )
+
+        # ---------------------------------------------------------------
+        # Submit the 4-step DAG (linear pipeline)
+        # ---------------------------------------------------------------
+        domain_task = await orchestrator.submit_task(
+            domain_designer_prompt,
+            required_tags=body.domain_designer_tags or None,
+        )
+        usecase_task = await orchestrator.submit_task(
+            usecase_designer_prompt,
+            required_tags=body.usecase_designer_tags or None,
+            depends_on=[domain_task.id],
+        )
+        adapter_task = await orchestrator.submit_task(
+            adapter_designer_prompt,
+            required_tags=body.adapter_designer_tags or None,
+            depends_on=[usecase_task.id],
+        )
+        framework_task = await orchestrator.submit_task(
+            framework_designer_prompt,
+            required_tags=body.framework_designer_tags or None,
+            depends_on=[adapter_task.id],
+            reply_to=body.reply_to,
+        )
+
+        task_ids_map = {
+            "domain_designer": domain_task.id,
+            "usecase_designer": usecase_task.id,
+            "adapter_designer": adapter_task.id,
+            "framework_designer": framework_task.id,
         }
 
         all_task_ids = list(task_ids_map.values())

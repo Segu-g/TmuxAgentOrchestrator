@@ -966,7 +966,7 @@ wheels = [
 
 [[package]]
 name = "tmux-orchestrator"
-version = "1.0.28"
+version = "1.0.30"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },

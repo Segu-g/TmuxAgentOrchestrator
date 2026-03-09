@@ -210,6 +210,68 @@
         "title": "ChangeStrategyRequest",
         "type": "object"
       },
+      "CleanArchWorkflowSubmit": {
+        "description": "Request body for POST /workflows/clean-arch \u2014 4-layer Clean Architecture pipeline.\n\nSubmits a 4-agent sequential pipeline DAG based on Robert C. Martin's Clean\nArchitecture (2017) concentric-ring model:\n\n  1. ``domain-designer``: defines domain Entities, Value Objects, Aggregates,\n     and Domain Events without any framework dependency; stores result in\n     ``{scratchpad_prefix}_domain``.\n  2. ``usecase-designer``: reads domain layer; defines Use Cases (Interactors),\n     Input/Output DTOs, and Port interfaces; stores in ``{scratchpad_prefix}_usecases``.\n  3. ``adapter-designer``: reads domain + use-cases; defines concrete Interface\n     Adapters (Repository impls, Presenters, Controllers); stores in\n     ``{scratchpad_prefix}_adapters``.\n  4. ``framework-designer``: reads all previous layers; writes final\n     ``ARCHITECTURE.md`` synthesising the full design plus executable Python\n     skeleton showing framework wiring; stores in ``{scratchpad_prefix}_arch``.\n\nAll handoffs use the shared scratchpad (Blackboard pattern). Each task\n``depends_on`` the previous task, forming a linear pipeline.\n\nScratchpad keys use underscores (not slashes) as namespace separator.\n\nDesign references:\n- Robert C. Martin, \"Clean Architecture\" (2017): Domain \u2192 Use Cases \u2192\n  Interface Adapters \u2192 Frameworks & Drivers concentric-ring model.\n- AgentMesh arXiv:2507.19902 (2025): Planner\u2192Coder\u2192Debugger\u2192Reviewer 4-role\n  artifact-centric pipeline for software development automation.\n- Muthu (2025-11) \"The Architecture is the Prompt\": hexagonal architecture\n  boundaries map directly to AI agent context constraints.\n- Marta Fern\u00e1ndez Garc\u00eda \"Applying Hexagonal Architecture in AI Agent\n  Development\" (Medium, 2025).\n- DESIGN.md \u00a710.30 (v1.0.30)",
+        "properties": {
+          "adapter_designer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Adapter Designer Tags",
+            "type": "array"
+          },
+          "domain_designer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Domain Designer Tags",
+            "type": "array"
+          },
+          "feature": {
+            "title": "Feature",
+            "type": "string"
+          },
+          "framework_designer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Framework Designer Tags",
+            "type": "array"
+          },
+          "language": {
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "usecase_designer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Usecase Designer Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "feature"
+        ],
+        "title": "CleanArchWorkflowSubmit",
+        "type": "object"
+      },
       "DebateWorkflowSubmit": {
         "description": "Request body for POST /workflows/debate \u2014 3-role multi-round debate workflow.\n\nSubmits an Advocate/Critic/Judge Workflow DAG with structured argumentation:\n\nFor each round 1..max_rounds:\n  - ``advocate_r{n}``: builds or refines the affirmative argument\n  - ``critic_r{n}``: challenges the argument (Devil's Advocate)\nFinal:\n  - ``judge``: synthesizes all rounds and writes ``DECISION.md`` to scratchpad\n\nArtifacts are passed via the shared scratchpad (Blackboard pattern):\n  ``{scratchpad_prefix}_r{n}_advocate`` \u2014 advocate's argument for round n\n  ``{scratchpad_prefix}_r{n}_critic``   \u2014 critic's rebuttal for round n\n  ``{scratchpad_prefix}_decision``      \u2014 judge's final decision\n\nDesign references:\n- Du et al. \"Improving Factuality and Reasoning in Language Models through\n  Multiagent Debate\" ICML 2024 (arXiv:2305.14325): multi-agent debate\n  significantly improves factuality and reasoning.\n- DEBATE: Devil's Advocate-Based Assessment ACL 2024 (arXiv:2405.09935):\n  Commander + Scorer + Critic structure; terminates when critic outputs\n  \"NO ISSUE\" or max iterations reached.\n- ChatEval ICLR 2024 (arXiv:2308.07201): role diversity (different\n  role_descriptions) is the most critical factor in debate quality.\n- DESIGN.md \u00a710.32 (v0.37.0)",
         "properties": {
@@ -3766,6 +3828,47 @@
           }
         },
         "summary": "Submit a Proposer/Reviewer/Synthesizer ADR generation workflow"
+      }
+    },
+    "/workflows/clean-arch": {
+      "post": {
+        "description": "Submit a 4-agent Clean Architecture Workflow DAG.\n\nPipeline (each step depends_on the previous):\n\n1. **domain-designer**: defines domain Entities, Value Objects, Aggregates,\n   and Domain Events without any framework dependency; writes ``DOMAIN.md``\n   and stores it in the shared scratchpad.\n2. **usecase-designer**: reads the domain layer; defines Use Cases\n   (Application Interactors), Input/Output DTOs, and Port interfaces (abstract\n   boundaries); writes ``USECASES.md`` and stores it.\n3. **adapter-designer**: reads domain + use-cases; defines concrete Interface\n   Adapters (Repository implementations, Presenters, Controllers); writes\n   ``ADAPTERS.md`` and stores it.\n4. **framework-designer**: reads all previous layers; synthesises the complete\n   architecture into ``ARCHITECTURE.md`` plus writes executable Python skeleton\n   files demonstrating framework wiring (FastAPI/SQLite/CLI); stores the result.\n\nAll artifacts are passed via the shared scratchpad (Blackboard pattern).\nScratchpad keys use underscores (not slashes) as namespace separator.\n\nReturns:\n- ``workflow_id``: workflow run UUID for status polling\n- ``name``: human-readable name (``clean-arch/<feature>``)\n- ``task_ids``: dict with keys ``domain_designer``, ``usecase_designer``,\n  ``adapter_designer``, ``framework_designer`` mapping to global task IDs\n- ``scratchpad_prefix``: scratchpad namespace for this run\n  (e.g. ``cleanarch_{run_id[:8]}``)\n\nDesign references:\n- Robert C. Martin, \"Clean Architecture\" (2017): Domain \u2192 Use Cases \u2192\n  Interface Adapters \u2192 Frameworks & Drivers.\n- AgentMesh arXiv:2507.19902 (2025): 4-role artifact-centric pipeline.\n- Muthu (2025-11) \"The Architecture is the Prompt\".\n- DESIGN.md \u00a710.30 (v1.0.30)",
+        "operationId": "submit_clean_arch_workflow_workflows_clean_arch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CleanArchWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Clean Arch Workflow Workflows Clean Arch Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a 4-agent Clean Architecture pipeline workflow"
       }
     },
     "/workflows/debate": {
