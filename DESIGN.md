@@ -3373,3 +3373,24 @@ v1.1.18 までに §11 の主要フィーチャーはほぼ実装済みとなっ
 
 ### Step 2 — 実装サマリー
 
+**実装ファイル**:
+- `CLAUDE.md` — 「Context Engineering Cheatsheet」セクション追加（4戦略テーブル・ロール別推奨マトリクス・Key Rules・参考文献）
+- `.claude/prompts/context-strategies.md` — 詳細戦略ガイド（4戦略×when/how/anti-patterns、ロール別マトリクス、組み合わせ例）
+- `tests/test_context_strategies.py` — 30テスト（TestContextStrategiesFile 19・TestClaudeMdCheatsheet 11）
+- `DESIGN.md §11` — 実装済み未ストライクスルー項目の修正（system_prompt_file・/deliberate・ddd・sliding-window圧縮・MIRIX・4戦略ガイド）
+- `pyproject.toml` — version 1.1.18 → 1.1.19
+
+**テスト数**: 2339 → 2369 (+30テスト)
+
+**バージョン**: 1.1.19
+
+**E2E デモ** (`~/Demonstration/v1.1.19-context-strategies/`):
+- agent-implementer (`system_prompt_file: implementer.md`) + agent-reviewer (`system_prompt_file: reviewer.md`) の2エージェントパイプライン
+- implementer が fizzbuzz.py を作成しスクラッチパッドに結果を書き込む（Write 戦略実証）
+- reviewer がスクラッチパッドを読み込みレビューを実施（Select 戦略実証）
+- 両エージェントが2分以内にタスク完了
+- 29/29 チェック PASSED
+
+**デバッグ**: `GET /scratchpad/` の戻り値が `{"key": "value", ...}` 形式（"keys" フィールドなし）。isinstance(sl_data, dict) ブランチを追加して修正。初回 27/29→再実行 29/29。
+
+**29/29 チェック PASSED**
