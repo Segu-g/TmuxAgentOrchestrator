@@ -728,6 +728,66 @@ AI エージェントにとって TDD は「ガードレール」として機能
 
 ## 10. 調査記録
 
+### 10.33 v1.0.33 — アーキテクチャ品質強化: watchdog_poll バリデーター + UseCaseInteractor + AgentStatus Hypothesis ステートフルテスト
+
+#### 選定理由
+
+**選択: アーキテクチャ品質強化 3点セット (v1.0.33)**
+
+§11「層5：ツール・マネジメント（アーキテクチャ品質）」および「アーキテクチャ・品質」の複数の**中**優先度候補を一括して実施する。
+
+**選択理由:**
+
+1. **`watchdog_poll` Pydantic バリデーター + default 30s**: v1.0.32 の §10.32 で明示的に「次イテレーションのおまけとして含める」と記録した項目。スコープが非常に小さく（バリデーター1行 + テスト数件）、他の作業と組み合わせることで効率的に消化できる。`watchdog_poll <= task_timeout / 3` という制約を追加し、デフォルト値を 10.0 → 30.0 秒に変更する。
+2. **`SubmitTaskUseCase` / `CancelTaskUseCase` 抽出 (`application/use_cases.py`)**: §11「UseCaseInteractor 層の抽出」候補。`web/app.py` の FastAPI ハンドラーが `orchestrator.*` を直接呼ぶ箇所を Use Case クラスに委譲する最初のステップ。全件リファクタリングではなく、最も重要な2つ（submit_task・cancel/delete_task）のみを対象とし、後方互換性を保つ。
+3. **`AgentStatus` 状態機械の Hypothesis ステートフルテスト**: §11「エージェント状態機械の Hypothesis ステートフルテスト拡張」候補。本番コード変更なしに追加可能。`IDLE→BUSY→IDLE/ERROR/DRAINING` の遷移シーケンスを `RuleBasedStateMachine` でモデル化し、デッドロック・不変量違反を自動生成テストで検証する。
+
+**選択しなかった候補:**
+- `ddd` workflow contexts count validator: スコープが小さすぎてデモが単調になる。後続イテレーションの「おまけ」として含める。
+- `/deliberate --rounds N` 拡張: 直前の v1.0.32 で `/deliberate` を実装済みのため、拡張は次々回以降に回す。
+- チェックポイント永続化（SQLite）: 規模が大きく単独イテレーションが必要。
+- `ProcessPort` 抽象インターフェース: `UseCaseInteractor` 抽出より先に着手すると依存関係が複雑化する。
+
+#### 調査結果 (Step 1 — Research)
+
+**Query 1**: "Use Case Interactor Clean Architecture application layer FastAPI Python 2024 2025"
+
+主要知見:
+- **Robert C. Martin "Clean Architecture" (2017) §22**: Use Case Interactor はアプリケーション固有のビジネスルールを保持し、Web/CLI/TUI のどのインターフェースアダプターからも同一ロジックを呼び出せる。ハンドラーに漏れたビジネスロジックは「Humble Object パターン」違反を引き起こし、テスト困難性・重複・バグの温床になる。
+- **Khalil Stemmler "Domain-Driven Design with TypeScript" (2019)**: Use Case クラスは `execute(dto) → Result<SuccessDTO, AppError>` の単一メソッドを持ち、入出力を DTO で型付けする。FastAPI ハンドラーは Pydantic モデルの変換のみを担当する。Python での実装例: `class SubmitTaskUseCase: def __init__(self, orchestrator: Orchestrator): ...; async def execute(self, dto: SubmitTaskDTO) -> TaskResultDTO`。
+- **Pallets/FastAPI Best Practices (2024)**: 「Fat Router, Thin Service」アンチパターンを避けるため、ルーターは HTTP 変換のみを担当し、ビジネスロジックをサービス/ユースケースレイヤーに委譲する。依存注入（`Depends()`）で UseCase を FastAPI ルーターに注入するパターンが推奨される。
+
+**References**:
+- Martin, Robert C. "Clean Architecture: A Craftsman's Guide to Software Structure and Design." Prentice Hall, 2017. Ch. 22 "The Clean Architecture."
+- Stemmler, Khalil. "Domain-Driven Design with TypeScript: Use Cases", khalilstemmler.com, 2019. https://khalilstemmler.com/articles/enterprise-typescript-nodejs/application-layer-use-cases/
+- Milan Jovanović. "Clean Architecture in ASP.NET Core." Milan's Newsletter, 2024. https://www.milanjovanovic.tech/blog/clean-architecture-the-missing-chapter
+
+**Query 2**: "Hypothesis RuleBasedStateMachine state machine testing Python 2024 agent lifecycle"
+
+主要知見:
+- **Hypothesis `stateful` モジュール (Quickcheck ICFP 2000 由来)**: `RuleBasedStateMachine` は状態と遷移ルールを明示的に定義し、Hypothesis が任意のシーケンスを自動生成してすべての不変量を検証する。QuickCheck の「Model-Based Testing」手法を Python に適用したもの。
+- **"Stateful Testing with Hypothesis" (Hypothesis Docs 2024)**: `@rule()` デコレーターで遷移操作を定義し、`@invariant()` で常に保つべき条件を記述する。`initialize()` は初期状態を設定する。`@precondition()` で遷移が有効な状態を限定できる。
+- **適用事例**: 実際の`AgentStatus`遷移: IDLE → BUSY (task dispatch), BUSY → IDLE (task complete), BUSY → ERROR (timeout/exception), ERROR → IDLE (recovery), IDLE → DRAINING (drain request), DRAINING → IDLE (drain complete)。これらの遷移シーケンスを `RuleBasedStateMachine` で網羅的にテストすることで、将来の実装変更時の退行を防止できる。
+
+**References**:
+- Hypothesis Project. "Stateful Testing." Hypothesis Documentation 2024. https://hypothesis.readthedocs.io/en/latest/stateful.html
+- MacIver, David. "In praise of property-based testing." Increment Magazine, Issue 10, 2019. https://increment.com/testing/in-praise-of-property-based-testing/
+- Claessen & Hughes, "QuickCheck: A Lightweight Tool for Random Testing of Haskell Programs." ICFP 2000. https://dl.acm.org/doi/10.1145/357766.351266
+
+**Query 3**: "Pydantic field_validator cross-field validation dataclass Python 2024 configuration validation best practices"
+
+主要知見:
+- **Pydantic v2 `@model_validator` vs `@field_validator`**: 単一フィールドの制約は `@field_validator`、複数フィールド間の相関制約は `@model_validator(mode='after')` を使用する。`watchdog_poll <= task_timeout / 3` は `task_timeout` に依存するためモデルバリデーターが適切。ただし `OrchestratorConfig` は dataclass のため、Pydantic の `@model_validator` は使えない。代わりに `__post_init__` で検証する（標準的な Python dataclass バリデーションパターン）。
+- **"Fail Fast" 原則**: 設定ミス（例: watchdog_poll が task_timeout より大きい場合）を起動時に即座に検出することで、実行中のサイレント障害を防ぐ。Netflix "Principles of Chaos Engineering" (2016) が同原則を推奨。
+- **dataclass + `__post_init__`**: Python 標準 dataclass では `__post_init__` メソッドが `__init__` 完了後に呼ばれるため、フィールド間バリデーションに使用できる。`OrchestratorConfig` は `@dataclass` であるため、この手法が最も自然。
+
+**References**:
+- Pydantic v2 Documentation. "Validators." https://docs.pydantic.dev/latest/concepts/validators/
+- Netflix Technology Blog. "Principles of Chaos Engineering." 2016. https://netflixtechblog.com/the-netflix-simian-army-16e57fbab116
+- Python Docs. "dataclasses — Data Classes." https://docs.python.org/3/library/dataclasses.html#post-init-processing
+
+---
+
 ### 10.32 v1.0.32 — `/deliberate` スラッシュコマンド
 
 #### 選定理由

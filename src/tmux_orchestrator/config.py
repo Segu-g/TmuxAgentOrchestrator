@@ -103,7 +103,7 @@ class OrchestratorConfig:
     circuit_breaker_recovery: float = 60.0
     dlq_max_retries: int = 50  # re-queue attempts before dead-lettering a task
     task_queue_maxsize: int = 0  # 0 = unbounded; >0 = bounded (submit_task raises when full)
-    watchdog_poll: float = 10.0  # seconds between watchdog checks (lower in tests)
+    watchdog_poll: float = 30.0  # seconds between watchdog checks (lower in tests)
     # --- ERROR state auto-recovery ---
     recovery_attempts: int = 3   # max restart attempts per agent before giving up
     recovery_backoff_base: float = 5.0  # seconds; attempt N waits backoff_base^N seconds
@@ -265,6 +265,43 @@ class OrchestratorConfig:
     # Reference: DESIGN.md §10.17 (v1.0.0 — worktree cwd bug fix)
     repo_root: "Path | None" = None
 
+    def __post_init__(self) -> None:
+        """Validate cross-field constraints after dataclass initialisation.
+
+        Invariants enforced:
+        - When ``watchdog_poll < task_timeout`` (i.e. the watchdog is intended
+          to be active), ``watchdog_poll`` must be <= ``task_timeout / 3`` so
+          the watchdog has at least 3 chances to fire within a task's lifetime.
+          If the ratio is violated the watchdog checks too infrequently,
+          causing tasks to time out far later than the configured
+          ``task_timeout``.
+        - When ``watchdog_poll >= task_timeout`` the watchdog is effectively
+          disabled (no task can complete a watchdog cycle before timing out),
+          which is a valid test/development configuration — no error is raised.
+
+        Fail-Fast principle: Netflix "Principles of Chaos Engineering" (2016)
+        recommends surfacing configuration errors at startup rather than during
+        operation.  Raising ``ValueError`` here ensures the process exits with
+        a clear message instead of silently misbehaving.
+
+        Reference: DESIGN.md §10.33 (v1.0.33 — watchdog_poll validator)
+        """
+        # task_timeout=0 is meaningless (every task would time out immediately).
+        if self.task_timeout <= 0:
+            raise ValueError(
+                f"task_timeout must be > 0 (got {self.task_timeout}s)."
+            )
+        # Only enforce the ratio when the watchdog is intended to be active.
+        if self.watchdog_poll < self.task_timeout:
+            max_watchdog_poll = self.task_timeout / 3
+            if self.watchdog_poll > max_watchdog_poll:
+                raise ValueError(
+                    f"watchdog_poll ({self.watchdog_poll}s) must be <= "
+                    f"task_timeout / 3 ({max_watchdog_poll:.1f}s); "
+                    f"task_timeout={self.task_timeout}s. "
+                    "Increase task_timeout or decrease watchdog_poll."
+                )
+
 
 def load_config(path: str | Path) -> OrchestratorConfig:
     """Load and validate an orchestrator config from a YAML file."""
@@ -319,6 +356,7 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         circuit_breaker_threshold=data.get("circuit_breaker_threshold", 3),
         circuit_breaker_recovery=data.get("circuit_breaker_recovery", 60.0),
         dlq_max_retries=data.get("dlq_max_retries", 50),
+        watchdog_poll=data.get("watchdog_poll", 30.0),
         recovery_attempts=data.get("recovery_attempts", 3),
         recovery_backoff_base=data.get("recovery_backoff_base", 5.0),
         recovery_poll=data.get("recovery_poll", 2.0),

@@ -17,6 +17,13 @@ Public re-exports:
         DriftMonitorProtocol,
         NullContextMonitor,
         NullDriftMonitor,
+        TaskService,
+        SubmitTaskDTO,
+        SubmitTaskResult,
+        CancelTaskDTO,
+        CancelTaskResult,
+        SubmitTaskUseCase,
+        CancelTaskUseCase,
     )
 
 References:
@@ -32,6 +39,15 @@ from tmux_orchestrator.application.monitor_protocols import (
     NullDriftMonitor,
 )
 from tmux_orchestrator.application.supervision import supervised_task
+from tmux_orchestrator.application.use_cases import (
+    CancelTaskDTO,
+    CancelTaskResult,
+    CancelTaskUseCase,
+    SubmitTaskDTO,
+    SubmitTaskResult,
+    SubmitTaskUseCase,
+    TaskService,
+)
 from tmux_orchestrator.application.workflow_service import (
     TaskSubmitter,
     Workflow,
@@ -40,10 +56,17 @@ from tmux_orchestrator.application.workflow_service import (
 )
 
 __all__ = [
+    "CancelTaskDTO",
+    "CancelTaskResult",
+    "CancelTaskUseCase",
     "ContextMonitorProtocol",
     "DriftMonitorProtocol",
     "NullContextMonitor",
     "NullDriftMonitor",
+    "SubmitTaskDTO",
+    "SubmitTaskResult",
+    "SubmitTaskUseCase",
+    "TaskService",
     "TaskSubmitter",
     "Workflow",
     "WorkflowStep",
