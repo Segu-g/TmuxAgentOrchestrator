@@ -23,6 +23,7 @@ from tmux_orchestrator.web.schemas import (
     MobReviewWorkflowSubmit,
     PairWorkflowSubmit,
     RedBlueWorkflowSubmit,
+    SpecFirstTddWorkflowSubmit,
     SpecFirstWorkflowSubmit,
     SocraticWorkflowSubmit,
     TddWorkflowSubmit,
@@ -3654,6 +3655,242 @@ def build_workflows_router(
             "implementer": implementer_task.id,
             "reviewer": reviewer_task.id,
             "revisor": revisor_task.id,
+        }
+        all_task_ids = list(task_ids_map.values())
+        run = wm.submit(name=wf_name, task_ids=all_task_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids_map,
+            "scratchpad_prefix": scratchpad_prefix,
+        }
+
+    # POST /workflows/spec-first-tdd
+    # -----------------------------------------------------------------------
+
+    @router.post(
+        "/workflows/spec-first-tdd",
+        summary="Submit a spec-writer→implementer→tester Spec-First TDD workflow",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_spec_first_tdd_workflow(
+        body: SpecFirstTddWorkflowSubmit,
+    ) -> dict:
+        """Submit a Spec-First TDD Workflow DAG.
+
+        Spawns 3 sequential agents: a **spec-writer** produces a formal SPEC.md,
+        an **implementer** implements the feature satisfying the spec, and a
+        **tester** writes and runs a pytest test suite validating every acceptance
+        criterion.
+
+        Workflow topology (sequential via depends_on)::
+
+            spec-writer → implementer → tester
+
+        Returns:
+        - ``workflow_id``: workflow run UUID for status polling
+        - ``name``: human-readable name (``spec-first-tdd/<topic>``)
+        - ``task_ids``: dict with keys ``spec_writer``, ``implementer``, ``tester``
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+          (e.g. ``sftdd_{run_id[:8]}``)
+
+        Design references:
+        - Vasilopoulos arXiv:2602.20478 "Codified Context" (2026): formal specs.
+        - Beck "Test-Driven Development by Example" (2003): TDD cycle.
+        - AgentCoder: programmer → test_designer → test_executor pipeline.
+        - DESIGN.md §10.54 (v1.1.22)
+        """
+        wm = orchestrator.get_workflow_manager()
+        topic_slug = body.topic[:40].strip().replace(" ", "_").replace("/", "_")
+        wf_name = f"spec-first-tdd/{topic_slug}"
+
+        pre_run_id = str(uuid.uuid4())
+        scratchpad_prefix = f"sftdd_{pre_run_id[:8]}"
+
+        spec_key = f"{scratchpad_prefix}_spec"
+        impl_key = f"{scratchpad_prefix}_impl"
+        test_result_key = f"{scratchpad_prefix}_test_result"
+
+        lang = body.language
+        lang_ext = lang.lower().split()[0]
+        impl_file = f"implementation.{lang_ext}"
+        test_file = f"test_implementation.{lang_ext}"
+
+        def _read_snippet(key: str) -> str:
+            return (
+                f"python3 -c \"\n"
+                f"import json, urllib.request, os\n"
+                f"api_key = os.environ.get('TMUX_ORCHESTRATOR_API_KEY', '')\n"
+                f"if not api_key:\n"
+                f"    try: api_key = open('__orchestrator_api_key__').read().strip()\n"
+                f"    except: pass\n"
+                f"ctx = json.load(open('__orchestrator_context__.json'))\n"
+                f"base_url = ctx['web_base_url']\n"
+                f"req = urllib.request.Request(base_url + '/scratchpad/{key}')\n"
+                f"req.add_header('X-API-Key', api_key)\n"
+                f"resp = urllib.request.urlopen(req, timeout=15)\n"
+                f"data = json.loads(resp.read())\n"
+                f"print(data.get('value', data))\n"
+                f"\""
+            )
+
+        def _write_snippet(key: str, filename: str) -> str:
+            return (
+                f"python3 -c \"\n"
+                f"import json, urllib.request, os\n"
+                f"content = open('{filename}', 'r', errors='replace').read()\n"
+                f"payload = json.dumps({{'value': content}}).encode()\n"
+                f"api_key = os.environ.get('TMUX_ORCHESTRATOR_API_KEY', '')\n"
+                f"if not api_key:\n"
+                f"    try: api_key = open('__orchestrator_api_key__').read().strip()\n"
+                f"    except: pass\n"
+                f"ctx = json.load(open('__orchestrator_context__.json'))\n"
+                f"base_url = ctx['web_base_url']\n"
+                f"req = urllib.request.Request(base_url + '/scratchpad/{key}', data=payload, method='PUT')\n"
+                f"req.add_header('Content-Type', 'application/json')\n"
+                f"req.add_header('X-API-Key', api_key)\n"
+                f"urllib.request.urlopen(req, timeout=15)\n"
+                f"print('Stored to scratchpad: {key}')\n"
+                f"\""
+            )
+
+        # --- Phase 1: spec-writer -------------------------------------------
+        spec_writer_prompt = (
+            f"You are the SPEC-WRITER agent in a Spec-First TDD workflow.\n"
+            f"\n"
+            f"**Topic:** {body.topic}\n"
+            f"**Language/Framework:** {lang}\n"
+            f"\n"
+            f"**Requirements:**\n"
+            f"{body.requirements}\n"
+            f"\n"
+            f"Your task is to write a formal specification document SPEC.md.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Write `SPEC.md` with these sections:\n"
+            f"   ```markdown\n"
+            f"   # Specification: {body.topic}\n"
+            f"   ## Context\n"
+            f"   <brief context>\n"
+            f"   ## Scope\n"
+            f"   <what is in/out of scope>\n"
+            f"   ## Type Signatures\n"
+            f"   <function/class signatures with types>\n"
+            f"   ## Preconditions\n"
+            f"   <what must be true before each operation>\n"
+            f"   ## Postconditions\n"
+            f"   <what must be true after each operation>\n"
+            f"   ## Acceptance Criteria\n"
+            f"   - AC-1: <testable criterion>\n"
+            f"   - AC-2: <testable criterion>\n"
+            f"   ...\n"
+            f"   ## Edge Cases\n"
+            f"   <error conditions, boundary values>\n"
+            f"   ```\n"
+            f"2. Store SPEC.md in the shared scratchpad:\n"
+            f"   ```python\n"
+            f"   {_write_snippet(spec_key, 'SPEC.md')}\n"
+            f"   ```\n"
+            f"\n"
+            f"Write a complete, precise specification. The implementer and tester "
+            f"will use it as their sole source of truth.\n"
+        )
+
+        # --- Phase 2: implementer -------------------------------------------
+        implementer_prompt = (
+            f"You are the IMPLEMENTER agent in a Spec-First TDD workflow.\n"
+            f"\n"
+            f"**Topic:** {body.topic}\n"
+            f"**Language/Framework:** {lang}\n"
+            f"\n"
+            f"Your task is to implement the feature as specified in SPEC.md.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read the formal specification from the shared scratchpad:\n"
+            f"   ```python\n"
+            f"   {_read_snippet(spec_key)}\n"
+            f"   ```\n"
+            f"2. Implement the feature satisfying EVERY acceptance criterion in SPEC.md.\n"
+            f"   Save your implementation to `{impl_file}`.\n"
+            f"   Include docstrings, type hints, and follow {lang} best practices.\n"
+            f"3. Store your implementation in the shared scratchpad:\n"
+            f"   ```python\n"
+            f"   {_write_snippet(impl_key, impl_file)}\n"
+            f"   ```\n"
+            f"\n"
+            f"Write complete, correct code. The tester will independently verify "
+            f"every acceptance criterion against your implementation.\n"
+        )
+
+        # --- Phase 3: tester ------------------------------------------------
+        tester_prompt = (
+            f"You are the TESTER agent in a Spec-First TDD workflow.\n"
+            f"\n"
+            f"**Topic:** {body.topic}\n"
+            f"**Language/Framework:** {lang}\n"
+            f"\n"
+            f"Your task is to write and run a test suite that validates every "
+            f"acceptance criterion in SPEC.md.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read the formal specification:\n"
+            f"   ```python\n"
+            f"   {_read_snippet(spec_key)}\n"
+            f"   ```\n"
+            f"2. Read the implementation:\n"
+            f"   ```python\n"
+            f"   {_read_snippet(impl_key)}\n"
+            f"   ```\n"
+            f"3. Save the implementation to `{impl_file}` so you can import it.\n"
+            f"4. Write a pytest test file `{test_file}` with one test function per\n"
+            f"   acceptance criterion (AC-N). Also test edge cases from SPEC.md.\n"
+            f"5. Run the tests: `python -m pytest {test_file} -v 2>&1 | tee test_output.txt`\n"
+            f"6. Write a summary to `test_results.md`:\n"
+            f"   ```markdown\n"
+            f"   # Test Results — {body.topic}\n"
+            f"   ## Verdict: PASS / FAIL\n"
+            f"   ## Tests Run: N passed, M failed\n"
+            f"   ## AC Coverage\n"
+            f"   - AC-1: PASS/FAIL\n"
+            f"   ...\n"
+            f"   ## Notes\n"
+            f"   ```\n"
+            f"7. Store the test results in the shared scratchpad:\n"
+            f"   ```python\n"
+            f"   {_write_snippet(test_result_key, 'test_results.md')}\n"
+            f"   ```\n"
+            f"\n"
+            f"Test every acceptance criterion. If tests fail, note which AC failed "
+            f"and why. Do NOT modify the implementation — only test it.\n"
+        )
+
+        # Auto-generate required_tags per role unless explicitly overridden
+        spec_req_tags = list(body.spec_tags) if body.spec_tags else ["sftdd_spec"]
+        impl_req_tags = list(body.impl_tags) if body.impl_tags else ["sftdd_impl"]
+        tester_req_tags = list(body.tester_tags) if body.tester_tags else ["sftdd_tester"]
+
+        spec_writer_task = await orchestrator.submit_task(
+            spec_writer_prompt,
+            required_tags=spec_req_tags,
+            depends_on=[],
+        )
+        implementer_task = await orchestrator.submit_task(
+            implementer_prompt,
+            required_tags=impl_req_tags,
+            depends_on=[spec_writer_task.id],
+        )
+        tester_task = await orchestrator.submit_task(
+            tester_prompt,
+            required_tags=tester_req_tags,
+            depends_on=[implementer_task.id],
+            reply_to=body.reply_to,
+        )
+
+        task_ids_map = {
+            "spec_writer": spec_writer_task.id,
+            "implementer": implementer_task.id,
+            "tester": tester_task.id,
         }
         all_task_ids = list(task_ids_map.values())
         run = wm.submit(name=wf_name, task_ids=all_task_ids)

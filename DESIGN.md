@@ -3670,3 +3670,98 @@ implementer → reviewer → revisor
 
 **29/29 チェック PASSED**
 
+## §10.54 — v1.1.22: Trust Dialog 根本修正 + `POST /workflows/spec-first-tdd`
+
+### Step 0 — 選択の根拠
+
+**選択: Trust Dialog 根本修正 (高優先度) + `POST /workflows/spec-first-tdd`**
+
+v1.1.21 デモで revisor エージェントが trust dialog に引っかかり dead-letter になった。
+build-log.md で「高優先度の次候補」として明示的に挙げられた。
+`demo.py` に Enter 送信ワークアラウンドを追加したが、これは根本修正ではない。
+
+**Trust Dialog 根本修正を選択した理由:**
+1. v1.1.21 デモで 1/3 エージェントが失敗した再現性ある障害（intermittent だが確認済み）
+2. 多エージェント並列起動時は他の Claude Code インスタンスが `~/.claude.json` を頻繁に書き換えるため、競合書き込みが発生しうる
+3. `pre_trust_worktree()` が書き込む entry に `hasTrustDialogHooksAccepted` フィールドが欠けている
+4. 現行エントリに `allowedTools: []` が欠けており trust recognition が不完全
+
+**追加機能: `POST /workflows/spec-first-tdd`**
+§11「ワークフローテンプレート」カテゴリの自然な拡張。
+spec-writer → implementer → tester の3エージェント直列 DAG で trust fix 後のデモ実証に適する。
+
+**選択しなかった候補と理由:**
+- Trace Replay CLI（低）: ResultStore 拡張が大規模。ROI 低い。
+- DECISION.md 標準フォーマット（低）: ドキュメントのみ。デモ実証困難。
+
+### Step 1 — Research
+
+**Query 1**: "Claude Code trust dialog ~/.claude.json hasTrustDialogAccepted projects format 2026"
+
+主要知見:
+- **Issue #5572 (github.com/anthropics/claude-code)**: `hasTrustDialogHooksAccepted` という新しいフィールドが追加された。`claude config set` では設定不可。SessionStart hooks の trust は `hasTrustDialogHooksAccepted` で制御されている可能性がある。
+- **Issue #9113**: Pre-configured `~/.claude.json` の projects エントリが尊重されないバグ（v2.0.8 以降で regression）。`allowedTools` フィールドが deprecated/removed されたが trust logic が更新されなかった。CLOSED AS NOT PLANNED。
+- **Issue #11519**: SessionStart hooks が workspace trust dialog にブロックされる。`hasTrustDialogAccepted: true` を設定しても SessionStart hook が実行されない。v2.0.37 で確認。
+- **VS Code extension overwrites ~/.claude.json (#29029)**: extension が `toolUsage` カウント更新のたびに `~/.claude.json` 全体を書き換えるため、競合書き込みが発生する。
+
+References:
+- Issue #5572: https://github.com/anthropics/claude-code/issues/5572
+- Issue #9113: https://github.com/anthropics/claude-code/issues/9113
+- Issue #11519: https://github.com/anthropics/claude-code/issues/11519
+- Issue #29029: https://github.com/anthropics/claude-code/issues/29029
+
+**Query 2**: "Claude Code workspace trust folder accept programmatic ~/.claude.json allowedTools 2025 2026"
+
+主要知見:
+- Claude Code v2.0.8 で `allowedTools` が `~/.claude.json` から deprecated → `settings.json` へ移行。しかし workspace trust logic は更新されず、pre-configured path が無視されるバグが発生。
+- Issue #12227 "trust not persisting in CLI": trust prompt が毎セッション表示される。
+- **Parent directory trust cascading**: Claude Code は trust チェック時に親ディレクトリを遡って確認する。
+- `allowedTools: []` エントリが trust recognition に必要な可能性がある（deprecated だが内部的に参照されている可能性）。
+
+References:
+- Issue #12227: https://github.com/anthropics/claude-code/issues/12227
+- Configure permissions: https://code.claude.com/docs/en/permissions
+
+**Query 3**: "Claude Code hasTrustDialogHooksAccepted issue #5572 trust dialog worktree automation"
+
+主要知見:
+- `hasTrustDialogHooksAccepted` は hooks 関連の trust dialog を制御する新フィールド。SessionStart hook が trust dialog にブロックされる症状は、この field が欠けていることが原因の可能性。
+- Issue #28506: `--dangerously-skip-permissions` は workspace trust dialog をバイパスしない。
+- **結論**: `pre_trust_worktree()` が書き込む entry に `hasTrustDialogHooksAccepted: true` を追加することで hooks blocking を解消できる可能性がある。
+
+References:
+- Issue #28506: https://github.com/anthropics/claude-code/issues/28506
+
+**Query 4**: "Claude Code 2.1 dangerously-skip-permissions trust dialog bypass skip worktree automation 2026"
+
+主要知見:
+- Claude Code 2.1.71 (現在のインストール済みバージョン) では trust dialog は git repo でも出る場合がある。
+- **競合書き込み問題**: 別の Claude Code インスタンス（既存の pane で動作中）が `~/.claude.json` を更新する間に新しいエージェントが起動すると、pre-trust エントリが上書きされる可能性がある。現行の POSIX advisory lock はプロセス間で協調するが、Claude Code 自体は lock を使わないため無効。
+
+**実装への示唆**:
+1. `hasTrustDialogHooksAccepted: true` を entry に追加 — hooks trust も承認
+2. `allowedTools: []` を entry に追加 — 古い trust チェックとの互換性
+3. write-then-verify パターン: エントリ書き込み後、最大 3 回リトライして書き込みが保持されているか確認する
+4. 競合書き込み対策: write 後に short sleep + re-read して entry が消えていたら再書き込み
+
+### Step 2 — 実装サマリー
+
+**実装ファイル**:
+- `src/tmux_orchestrator/infrastructure/claude_trust.py` — trust dialog rootfix:
+  - `hasTrustDialogHooksAccepted: true` フィールド追加
+  - `allowedTools: []` フィールド追加（後方互換性）
+  - `already_trusted` 判定を両フィールド必須に変更
+  - write-then-verify ループ追加（最大3回、50ms sleep、競合書き込み検出・再書き込み）
+- `src/tmux_orchestrator/trust.py` — shim に `_VERIFY_RETRIES`, `_VERIFY_SLEEP_S`, `_TRUST_LOCK_PATH` を追加
+- `src/tmux_orchestrator/web/schemas.py` — `SpecFirstTddWorkflowSubmit` Pydantic v2 モデル追加
+- `src/tmux_orchestrator/web/routers/workflows.py` — `POST /workflows/spec-first-tdd` エンドポイント追加
+- `examples/workflows/spec-first-tdd.yaml` — セルフコンテインド YAML テンプレート
+- `tests/test_claude_trust.py` — trust rootfix の回帰テスト (10テスト)
+- `tests/test_workflow_spec_first_tdd.py` — spec-first-tdd ワークフローテスト (44テスト)
+- `tests/fixtures/openapi_schema.json` — OpenAPI スナップショット更新
+- `pyproject.toml` — version 1.1.21 → 1.1.22
+
+**テスト数**: 2452 → 2506 (+54 テスト)
+
+**バージョン**: 1.1.22
+

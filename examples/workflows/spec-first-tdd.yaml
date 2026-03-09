@@ -1,0 +1,91 @@
+# Spec-First TDD Workflow Template
+# ==================================
+# 3-agent sequential pipeline: spec-writer → implementer → tester
+#
+# Based on Spec-First Development + TDD:
+#   - spec-writer  : writes formal SPEC.md with acceptance criteria (Phase 1)
+#   - implementer  : implements the feature satisfying every AC (Phase 2)
+#   - tester       : writes pytest suite, runs it, reports results (Phase 3)
+#
+# Pipeline (sequential, each step depends_on the previous):
+#   spec-writer → implementer → tester
+#
+# Scratchpad keys (written by agents, read by next stage):
+#   {prefix}_spec         — spec-writer's formal SPEC.md
+#   {prefix}_impl         — implementer's code
+#   {prefix}_test_result  — tester's test execution summary
+#
+# Output files:
+#   SPEC.md                       — formal specification (spec-writer worktree)
+#   implementation.{ext}          — implementation (implementer worktree)
+#   test_implementation.{ext}     — pytest test suite (tester worktree)
+#   test_results.md               — test execution results (tester worktree)
+#
+# Endpoint: POST /workflows/spec-first-tdd
+# References:
+#   - Vasilopoulos arXiv:2602.20478 "Codified Context" (2026)
+#   - Beck "Test-Driven Development by Example" (2003)
+#   - AgentCoder (Chen et al.): programmer → test_designer → test_executor pipeline
+#   - DESIGN.md §10.54 (v1.1.22)
+#
+# --- IMPORTANT: Agent routing (required_tags) ---
+# By default, the orchestrator auto-generates role-based required_tags:
+#   spec-writer → required_tags: ["sftdd_spec"]
+#   implementer → required_tags: ["sftdd_impl"]
+#   tester      → required_tags: ["sftdd_tester"]
+#
+# Your YAML agent config MUST tag each agent accordingly:
+#
+#   agents:
+#     - id: spec-writer
+#       type: claude_code
+#       tags: ["sftdd_spec"]
+#     - id: implementer
+#       type: claude_code
+#       tags: ["sftdd_impl"]
+#     - id: tester
+#       type: claude_code
+#       tags: ["sftdd_tester"]
+#
+# Set spec_tags/impl_tags/tester_tags to override the defaults.
+
+workflow:
+  endpoint: /workflows/spec-first-tdd
+
+# --- Required fields ---
+
+# Short topic name (used for workflow name and scratchpad prefix)
+topic: "Roman numeral converter"
+
+# Detailed requirements text for the spec-writer
+requirements: |
+  Write a function to_roman(n: int) -> str that converts an integer
+  to its Roman numeral representation.
+  - Valid input range: 1 to 3999 inclusive
+  - Raise ValueError for out-of-range inputs
+  - Use standard Roman numeral notation (I, V, X, L, C, D, M)
+  - Handle subtractive notation (IV=4, IX=9, XL=40, XC=90, CD=400, CM=900)
+
+# Language / framework context (used in filenames and prompts)
+language: "Python"
+
+# --- Optional fields ---
+
+# Agent capability routing (empty = use auto-generated role tags).
+# Override only if you want custom routing.
+spec_tags: []
+impl_tags: []
+tester_tags: []
+
+# If set, the tester's RESULT is delivered to this agent's mailbox
+reply_to: null
+
+# --- Curl example ---
+# curl -s -X POST http://localhost:8000/workflows/spec-first-tdd \
+#   -H "Content-Type: application/json" \
+#   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+#   -d '{
+#     "topic": "Roman numeral converter",
+#     "requirements": "Write to_roman(n: int) -> str. Range 1-3999. Raise ValueError otherwise.",
+#     "language": "Python"
+#   }'

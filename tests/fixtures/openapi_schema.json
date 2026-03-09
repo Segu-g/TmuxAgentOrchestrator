@@ -1269,6 +1269,65 @@
         "title": "SpawnAgent",
         "type": "object"
       },
+      "SpecFirstTddWorkflowSubmit": {
+        "description": "Request body for POST /workflows/spec-first-tdd.\n\nSubmits a 3-agent sequential Spec-First TDD Workflow DAG:\n\n  - **spec-writer**: reads requirements and produces a formal SPEC.md (preconditions,\n    postconditions, invariants, type signatures, acceptance criteria).\n    Stores it in the shared scratchpad.\n  - **implementer**: reads SPEC.md from the scratchpad, implements the feature\n    satisfying every acceptance criterion.  Stores the implementation in the\n    scratchpad.\n  - **tester**: reads SPEC.md + the implementation from the scratchpad, writes\n    a full pytest test suite that validates every acceptance criterion, runs the\n    tests, and stores the test results in the scratchpad.\n\nWorkflow topology (strictly sequential via depends_on)::\n\n    spec-writer \u2192 implementer \u2192 tester\n\nDesign references:\n- Vasilopoulos arXiv:2602.20478 \"Codified Context\" (2026): formal specification\n  documents help agents maintain consistency across sessions.\n- Beck \"Test-Driven Development by Example\" (2003): Red\u2192Green\u2192Refactor TDD cycle.\n- AgentCoder (Chen et al.): programmer \u2192 test_designer \u2192 test_executor pipeline\n  improves correctness on HumanEval benchmarks.\n- DESIGN.md \u00a710.54 (v1.1.22)\n\nScratchpad keys (Blackboard pattern):\n- ``{prefix}_spec``        : spec-writer's SPEC.md formal specification\n- ``{prefix}_impl``        : implementer's implementation code\n- ``{prefix}_test_result`` : tester's test execution results summary\n\nArtefacts produced:\n- ``SPEC.md``                     \u2014 formal specification (spec-writer worktree)\n- ``implementation.{ext}``        \u2014 implementation (implementer worktree)\n- ``test_implementation.{ext}``   \u2014 pytest test suite (tester worktree)",
+        "properties": {
+          "impl_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Impl Tags",
+            "type": "array"
+          },
+          "language": {
+            "default": "Python",
+            "title": "Language",
+            "type": "string"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "requirements": {
+            "title": "Requirements",
+            "type": "string"
+          },
+          "spec_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Spec Tags",
+            "type": "array"
+          },
+          "tester_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Tester Tags",
+            "type": "array"
+          },
+          "topic": {
+            "title": "Topic",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic",
+          "requirements"
+        ],
+        "title": "SpecFirstTddWorkflowSubmit",
+        "type": "object"
+      },
       "SpecFirstWorkflowSubmit": {
         "description": "Request body for POST /workflows/spec-first \u2014 Spec-First development workflow.\n\nSubmits a 2-agent sequential Spec-First Workflow DAG where a spec-writer\nproduces a formal specification (SPEC.md) that an implementer then follows\nto write code and tests:\n\n  - **spec-writer**: reads the requirements, produces a formal SPEC.md with\n    preconditions, postconditions, invariants, type signatures, and acceptance\n    criteria.  Stores the spec in the shared scratchpad.\n  - **implementer**: reads SPEC.md from the scratchpad, implements the feature\n    satisfying every acceptance criterion, writes tests, and runs them.\n\nScratchpad keys (Blackboard pattern):\n\n- ``{scratchpad_prefix}_spec``  : spec-writer's SPEC.md content\n- ``{scratchpad_prefix}_impl``  : implementer's completion summary\n\nArtifacts produced by agents:\n\n- ``SPEC.md``          \u2014 formal specification (in spec-writer worktree)\n- ``<impl>.py``        \u2014 implementation (in implementer worktree)\n- ``test_<impl>.py``   \u2014 tests (in implementer worktree)\n\nDesign references:\n\n- Vasilopoulos arXiv:2602.20478 \"Codified Context\" (2026): Formal specification\n  documents help agents maintain consistency across sessions.\n- Hou et al. \"Position: Trustworthy AI Agents Require Formal Methods\" (2025):\n  TLA+/Hoare assertions integrated into LLM agent pipelines.\n- SYSMOBENCH arXiv:2509.23130 (2025): LLM formal specification generation\n  evaluated on 200 system models.\n- DESIGN.md \u00a710.44 (v1.1.8)",
         "properties": {
@@ -4921,6 +4980,47 @@
           }
         },
         "summary": "Submit a 2-agent Spec-First (spec-writer \u2192 implementer) workflow"
+      }
+    },
+    "/workflows/spec-first-tdd": {
+      "post": {
+        "description": "Submit a Spec-First TDD Workflow DAG.\n\nSpawns 3 sequential agents: a **spec-writer** produces a formal SPEC.md,\nan **implementer** implements the feature satisfying the spec, and a\n**tester** writes and runs a pytest test suite validating every acceptance\ncriterion.\n\nWorkflow topology (sequential via depends_on)::\n\n    spec-writer \u2192 implementer \u2192 tester\n\nReturns:\n- ``workflow_id``: workflow run UUID for status polling\n- ``name``: human-readable name (``spec-first-tdd/<topic>``)\n- ``task_ids``: dict with keys ``spec_writer``, ``implementer``, ``tester``\n- ``scratchpad_prefix``: scratchpad namespace for this run\n  (e.g. ``sftdd_{run_id[:8]}``)\n\nDesign references:\n- Vasilopoulos arXiv:2602.20478 \"Codified Context\" (2026): formal specs.\n- Beck \"Test-Driven Development by Example\" (2003): TDD cycle.\n- AgentCoder: programmer \u2192 test_designer \u2192 test_executor pipeline.\n- DESIGN.md \u00a710.54 (v1.1.22)",
+        "operationId": "submit_spec_first_tdd_workflow_workflows_spec_first_tdd_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpecFirstTddWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Spec First Tdd Workflow Workflows Spec First Tdd Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a spec-writer\u2192implementer\u2192tester Spec-First TDD workflow"
       }
     },
     "/workflows/tdd": {

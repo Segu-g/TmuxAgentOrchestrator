@@ -13,12 +13,18 @@ Reference: DESIGN.md §10.N (v1.0.16 — infrastructure/ layer extraction)
 # ruff: noqa: F401,F403
 from tmux_orchestrator.infrastructure.claude_trust import (
     _DEFAULT_CLAUDE_JSON,
+    _TRUST_LOCK_PATH,
+    _VERIFY_RETRIES,
+    _VERIFY_SLEEP_S,
     _atomic_write_json,
     pre_trust_worktree,
 )
 
 __all__ = [
     "_DEFAULT_CLAUDE_JSON",
+    "_TRUST_LOCK_PATH",
+    "_VERIFY_RETRIES",
+    "_VERIFY_SLEEP_S",
     "_atomic_write_json",
     "pre_trust_worktree",
 ]

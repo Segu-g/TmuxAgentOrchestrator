@@ -1221,3 +1221,69 @@ class IterativeReviewWorkflowSubmit(BaseModel):
         if not v.strip():
             raise ValueError("task must not be empty")
         return v
+
+
+class SpecFirstTddWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/spec-first-tdd.
+
+    Submits a 3-agent sequential Spec-First TDD Workflow DAG:
+
+      - **spec-writer**: reads requirements and produces a formal SPEC.md (preconditions,
+        postconditions, invariants, type signatures, acceptance criteria).
+        Stores it in the shared scratchpad.
+      - **implementer**: reads SPEC.md from the scratchpad, implements the feature
+        satisfying every acceptance criterion.  Stores the implementation in the
+        scratchpad.
+      - **tester**: reads SPEC.md + the implementation from the scratchpad, writes
+        a full pytest test suite that validates every acceptance criterion, runs the
+        tests, and stores the test results in the scratchpad.
+
+    Workflow topology (strictly sequential via depends_on)::
+
+        spec-writer → implementer → tester
+
+    Design references:
+    - Vasilopoulos arXiv:2602.20478 "Codified Context" (2026): formal specification
+      documents help agents maintain consistency across sessions.
+    - Beck "Test-Driven Development by Example" (2003): Red→Green→Refactor TDD cycle.
+    - AgentCoder (Chen et al.): programmer → test_designer → test_executor pipeline
+      improves correctness on HumanEval benchmarks.
+    - DESIGN.md §10.54 (v1.1.22)
+
+    Scratchpad keys (Blackboard pattern):
+    - ``{prefix}_spec``        : spec-writer's SPEC.md formal specification
+    - ``{prefix}_impl``        : implementer's implementation code
+    - ``{prefix}_test_result`` : tester's test execution results summary
+
+    Artefacts produced:
+    - ``SPEC.md``                     — formal specification (spec-writer worktree)
+    - ``implementation.{ext}``        — implementation (implementer worktree)
+    - ``test_implementation.{ext}``   — pytest test suite (tester worktree)
+    """
+
+    # Topic / feature name (used for workflow name and scratchpad prefix)
+    topic: str
+    # Detailed requirements text given to spec-writer
+    requirements: str
+    # Language / framework context for implementer and tester
+    language: str = "Python"
+    # Optional routing tags per role (empty list = auto-generate from role name)
+    spec_tags: list[str] = []
+    impl_tags: list[str] = []
+    tester_tags: list[str] = []
+    # When set, the tester's RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    @field_validator("topic")
+    @classmethod
+    def topic_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("topic must not be empty")
+        return v
+
+    @field_validator("requirements")
+    @classmethod
+    def requirements_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("requirements must not be empty")
+        return v
