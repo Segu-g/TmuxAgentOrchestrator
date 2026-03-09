@@ -381,6 +381,41 @@ def build_system_router(
             "workflow_ids": list(workflows.keys()),
         }
     
+    @router.get(
+        "/telemetry/spans",
+        summary="Recent OTel spans (ring buffer)",
+        dependencies=[Depends(auth)],
+    )
+    async def get_telemetry_spans(limit: int = 50) -> list:
+        """Return recently captured OTel spans from the in-process ring buffer.
+
+        When ``telemetry_enabled: true`` is set and no ``OTEL_EXPORTER_OTLP_ENDPOINT``
+        is configured, spans are accumulated in a ``RingBufferSpanExporter`` (capacity
+        200).  This endpoint returns up to *limit* of the most recent spans as JSON
+        dicts for debugging and testing purposes.
+
+        Returns an empty list when:
+        - telemetry is disabled, or
+        - an OTLP exporter is active (spans flow to an external collector, not a ring buffer).
+
+        Each span dict contains: ``name``, ``trace_id``, ``span_id``, ``parent_id``,
+        ``start_time``, ``end_time``, ``status``, ``attributes``.
+
+        Reference: OTel GenAI Semantic Conventions
+                   https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/
+                   DESIGN.md §10.20 (v1.1.10).
+        """
+        telemetry = orchestrator.get_telemetry()
+        if telemetry is None:
+            return []
+        from tmux_orchestrator.telemetry import RingBufferSpanExporter  # noqa: PLC0415
+        ring = telemetry.ring_buffer_exporter
+        if ring is None:
+            return []
+        spans = ring.get_spans()
+        # Return the most recent *limit* spans (newest-last ordering preserved)
+        return spans[-limit:]
+
     @router.get("/telemetry/status", summary="OpenTelemetry status", dependencies=[Depends(auth)])
     async def get_telemetry_status() -> dict:
         """Return the current telemetry configuration.

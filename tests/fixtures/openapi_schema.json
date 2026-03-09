@@ -3843,6 +3843,49 @@
         "summary": "Cancel a pending task"
       }
     },
+    "/telemetry/spans": {
+      "get": {
+        "description": "Return recently captured OTel spans from the in-process ring buffer.\n\nWhen ``telemetry_enabled: true`` is set and no ``OTEL_EXPORTER_OTLP_ENDPOINT``\nis configured, spans are accumulated in a ``RingBufferSpanExporter`` (capacity\n200).  This endpoint returns up to *limit* of the most recent spans as JSON\ndicts for debugging and testing purposes.\n\nReturns an empty list when:\n- telemetry is disabled, or\n- an OTLP exporter is active (spans flow to an external collector, not a ring buffer).\n\nEach span dict contains: ``name``, ``trace_id``, ``span_id``, ``parent_id``,\n``start_time``, ``end_time``, ``status``, ``attributes``.\n\nReference: OTel GenAI Semantic Conventions\n           https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/\n           DESIGN.md \u00a710.20 (v1.1.10).",
+        "operationId": "get_telemetry_spans_telemetry_spans_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {},
+                  "title": "Response Get Telemetry Spans Telemetry Spans Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recent OTel spans (ring buffer)"
+      }
+    },
     "/telemetry/status": {
       "get": {
         "description": "Return the current telemetry configuration.\n\nWhen ``telemetry_enabled: true`` is set in the YAML config, this endpoint\nreports whether an OTLP exporter is configured or whether the fallback\nConsoleSpanExporter is active.\n\nReturns ``{\"enabled\": false}`` when telemetry is disabled.\n\nReference: OTel GenAI Semantic Conventions\n           https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-agent-spans/\n           DESIGN.md \u00a710.14 (v0.47.0).",

@@ -93,6 +93,20 @@ class JsonFormatter(logging.Formatter):
             obj["agent_id"] = aid
         if record.exc_info:
             obj["exc"] = self.formatException(record.exc_info)
+        # Propagate OpenTelemetry span context into JSON logs when inside a span.
+        # This correlates structured log records with OTel traces without requiring
+        # a separate log exporter.  Fields: otel_trace_id, otel_span_id.
+        # Reference: OTel logging spec (correlation via TraceId/SpanId fields).
+        try:
+            from opentelemetry import trace as _otel_trace  # lazy import
+
+            span = _otel_trace.get_current_span()
+            ctx = span.get_span_context()
+            if ctx is not None and ctx.trace_id != 0:
+                obj["otel_trace_id"] = format(ctx.trace_id, "032x")
+                obj["otel_span_id"] = format(ctx.span_id, "016x")
+        except Exception:  # pragma: no cover — OTel not installed or no span
+            pass
         return json.dumps(obj, ensure_ascii=False)
 
 

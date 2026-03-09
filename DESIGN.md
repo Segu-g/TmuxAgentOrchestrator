@@ -2402,4 +2402,73 @@ class AgentStatusMachine(RuleBasedStateMachine):
 
 全テスト: **2010** (2007 + 3 新規)。
 
+---
+
+## §10.20 v1.1.10 — OpenTelemetry GenAI Semantic Conventions 準拠トレース出力
+
+### Step 0 — 選択の根拠
+
+**選択: OpenTelemetry GenAI Semantic Conventions 準拠トレース出力**
+
+§11「アーキテクチャ・品質」高優先度候補3件のうち最もコストパフォーマンスが高い。
+
+| 候補 | 優先度 | 理由 |
+|------|--------|------|
+| **OpenTelemetry GenAI Semantic Conventions** | **選択** | 既存 `trace_id` + JSON 構造化ログ基盤の上に計装レイヤーを追加するだけ。エージェント挙動・API 互換性に影響なし。`opentelemetry-sdk` と `opentelemetry-exporter-otlp-proto-grpc` の追加で完結。中程度の実装コスト。 |
+| チェックポイント永続化 SQLite | 見送り | SQLite スキーマ設計・`--resume` フラグ・ワークフロー状態再構築と範囲が広く、1 イテレーション内に収めると品質を損なうリスクが高い。 |
+| ProcessPort 抽象インターフェース | 見送り | `ClaudeCodeAgent` 全体の依存方向逆転を伴う大規模リファクタリング。 libtmux 依存除去により既存 E2E テストへの影響が大きい。 |
+
+**実装スコープ**:
+1. `src/tmux_orchestrator/telemetry.py` — `TelemetryProvider` singleton: TracerProvider 初期化、OTLP gRPC/HTTP エクスポーター設定、ConsoleSpanExporter (開発用)。
+2. `gen_ai.*` Semantic Convention 属性を主要イベントに付与:
+   - タスクディスパッチ: `gen_ai.operation.name="invoke"`, `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.request.model`
+   - タスク完了: `gen_ai.response.finish_reason`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`
+   - ワークフロー: `gen_ai.workflow.id`, `gen_ai.workflow.type`, `gen_ai.workflow.phase`
+3. 既存 `trace_id` ベース JSON ログとの相関: span context (trace_id + span_id) を structlog に伝播。
+4. `GET /telemetry/spans` — 直近 N スパンを JSON で返す (ConsoleSpanExporter の代替、テスト用)。
+5. `OTEL_EXPORTER_OTLP_ENDPOINT` 環境変数で外部 Collector URL を設定可能。未設定時は ConsoleExporter のみ動作。
+
+### Step 1 — Research
+
+**Query 1**: "OpenTelemetry GenAI Semantic Conventions gen_ai.* attributes AI agents 2025"
+
+主要知見:
+- **OTel GenAI Semantic Conventions** (opentelemetry.io/docs/specs/semconv/gen-ai/): エージェント固有属性として `gen_ai.agent.id`、`gen_ai.agent.name`、`gen_ai.agent.description`、`gen_ai.agent.version` が "Development" 安定度で定義されている。
+- スパン名は `{gen_ai.operation.name} {gen_ai.request.model}` の形式。エージェント呼び出しの operation は `invoke_agent`、ツール実行は `execute_tool`。
+- 推奨属性: `gen_ai.response.finish_reasons`、`gen_ai.usage.input_tokens`、`gen_ai.usage.output_tokens`。
+- `gen_ai.system` はプロバイダー名（例: `"claude"` は `"anthropic"` が正式だが、`"claude"` も許容される incubating 属性）。
+
+**References**:
+- OTel GenAI Semantic Conventions spans: https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/
+- OTel GenAI attributes registry: https://opentelemetry.io/docs/specs/semconv/attributes-registry/gen-ai/
+
+**Query 2**: "OpenTelemetry Python SDK TracerProvider manual instrumentation BatchSpanProcessor OTLP 2025"
+
+主要知見:
+- **Python SDK 手動計装**: `tracer.start_as_current_span("name")` コンテキストマネージャーでスパンを作成。`span.set_attribute(key, value)` で属性を付与。
+- **BatchSpanProcessor** vs **SimpleSpanProcessor**: 本番環境では `BatchSpanProcessor` を使うべき（バックグラウンドスレッドで非同期エクスポート、スループット向上）。テストには `SimpleSpanProcessor`（同期エクスポート）。
+- **OTLP gRPC エクスポーター**: `OTLPSpanExporter(endpoint="localhost:4317")` で設定。`OTEL_EXPORTER_OTLP_ENDPOINT` 環境変数でも設定可能。
+- **InMemorySpanExporter**: テストおよび `GET /telemetry/spans` 的な REST 公開用のリングバッファとして利用可能。
+
+**References**:
+- OTel Python instrumentation: https://opentelemetry.io/docs/languages/python/instrumentation/
+- OTel Python SDK BatchSpanProcessor docs
+
+**Query 3**: "OpenTelemetry AI agent observability 2025 blog gen_ai semantic conventions"
+
+主要知見:
+- **OTel AI Agent Observability Blog** (opentelemetry.io/blog/2025): AI エージェントフレームワーク（CrewAI, AutoGen, LangGraph）が OTel GenAI SIG 標準に収斂しつつある。Baked-in instrumentation と External OTel library の2アプローチ。
+- **スパン伝播**: W3C Trace Context フォーマットが標準。`trace_id` は structlog JSON ログとの相関に利用できる。
+- **エージェント識別**: `gen_ai.agent.id`（一意ID）、`gen_ai.agent.name`（ヒューマンリーダブル名）、`gen_ai.agent.description`（役割説明）、`gen_ai.agent.version`（バージョン）の4属性が推奨。
+
+**References**:
+- OpenTelemetry AI Agent Observability (2025): https://opentelemetry.io/blog/2025/ai-agent-observability/
+- OTel GenAI SIG Slack: #otel-genai-instrumentation
+
+**実装ギャップ分析** (v0.47.0 既実装との比較):
+- **実装済み**: `TelemetrySetup`, `agent_span()`, `task_queued_span()`, `GET /telemetry/status`, Orchestrator統合 (30テスト)
+- **未実装**: `workflow_span()` (ワークフロー単位トレース), `GET /telemetry/spans` REST エンドポイント, `gen_ai.agent.description`/`version` 属性, `BatchSpanProcessor` 本番設定, OTel trace_id → structlog 伝播
+
+### Step 2 — 実装
+
 
