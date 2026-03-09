@@ -3765,3 +3765,16 @@ References:
 
 **バージョン**: 1.1.22
 
+**E2E デモ** (`~/Demonstration/v1.1.22-trust-spec-first-tdd/`):
+- 3 実エージェント (`spec-writer`, `implementer`, `tester`) が独立ワークツリーで直列動作
+- トピック: FizzBuzz 関数 — spec-writer が SPEC.md 生成 → implementer が実装 → tester がテスト
+- 全 3 エージェントが **1 秒以内**に起動 (05:23:43〜05:23:44)、trust dialog なし
+- v1.1.21 デモで必要だった Enter キーワークアラウンドは不要
+- spec-writer: ~43 秒 (3272 文字)、implementer: ~46 秒 (692 文字)、tester: ~70 秒 (1321 文字)
+- 合計 3 分以内に完了
+- **30/30 チェック PASSED (初回実行)**
+
+**デバッグ**: 修正が有効 — 初回実行で 30/30 PASS。
+Trust fix: `hasTrustDialogHooksAccepted=true` + `allowedTools=[]` + write-then-verify ループが
+v1.1.21 の intermittent trust dialog ブロック問題を完全解消。
+
