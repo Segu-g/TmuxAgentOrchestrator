@@ -3061,3 +3061,41 @@ class AgentStatusMachine(RuleBasedStateMachine):
 3. YAML テンプレートは「設定をコードから分離する」原則に従い、フィールドに詳細なコメントを付ける
 4. README.md は各ワークフローの agents/pipeline 構造・scratchpad キー・出力ファイルを一覧化する
 
+
+### Step 2 — 実装サマリー
+
+**実装ファイル**:
+- `examples/workflows/tdd.yaml` — TDD ワークフローテンプレート
+- `examples/workflows/pair.yaml` — PairCoder テンプレート
+- `examples/workflows/debate.yaml` — Debate テンプレート
+- `examples/workflows/adr.yaml` — ADR テンプレート
+- `examples/workflows/delphi.yaml` — Delphi テンプレート
+- `examples/workflows/redblue.yaml` — Red Team/Blue Team テンプレート
+- `examples/workflows/socratic.yaml` — Socratic テンプレート
+- `examples/workflows/spec-first.yaml` — Spec-First テンプレート
+- `examples/workflows/clean-arch.yaml` — Clean Architecture テンプレート
+- `examples/workflows/ddd.yaml` — DDD テンプレート
+- `examples/workflows/competition.yaml` — Competition テンプレート
+- `examples/workflows/README.md` — フィールド一覧・クイックスタート・curl 例
+- `tests/test_workflow_yaml_templates.py` — 91 テスト (6 テストクラス)
+- `pyproject.toml`: version = "1.1.16"
+
+**テスト数**: 2199 → 2290 (+91テスト)
+
+**テストクラス**:
+- `TestTemplateFilesExist` (13): ディレクトリ・11ファイル・README の存在確認
+- `TestTemplatesAreValidYaml` (33): YAML パース可能性・`workflow` キー・`endpoint` キー確認
+- `TestTemplateSchemaValidation` (22): 全テンプレートの Pydantic バリデーション + フィールドアサーション
+- `TestOptionalTagDefaults` (6): `*_tags=[]`・`reply_to=None` のデフォルト確認
+- `TestSchemaRejectionOfInvalidData` (6): 不正データをスキーマが拒否することを確認
+- `TestEndpointMetadataConsistency` (11): `workflow.endpoint` が期待値と一致することを確認
+
+**E2E デモ** (`~/Demonstration/v1.1.16-workflow-yaml-templates/`):
+- agent-navigator (35s): `math_ops.py` の PLAN.md を作成 → scratchpad `pair_{prefix}_plan` に保存
+- agent-driver (44s): PLAN.md を読み取り → `math_ops.py` + テスト実装
+- 11テンプレート × Pydantic スキーマバリデーション = すべて PASS
+- `pair.yaml` テンプレートから POST /workflows/pair を提出 → ワークフロー実行完了
+
+**デバッグ**: (1) pair ワークフローの scratchpad_prefix は UUID ベース (`pair_<uuid[:8]>`) であり、固定キーではない。POST レスポンスの `scratchpad_prefix` フィールドから動的に取得する必要があった。(2) タスク ID も `task_ids.navigator`/`task_ids.driver` フィールドとして POST レスポンスに含まれており、履歴ポーリングより確実。
+
+**35/35 チェック PASSED**
