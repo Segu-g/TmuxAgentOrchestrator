@@ -169,6 +169,46 @@ class AgentRegistry:
             for a in self._agents.values()
         ]
 
+    def get_one_dict(
+        self,
+        agent_id: str,
+        drop_counts: dict[str, int] | None = None,
+    ) -> "dict | None":
+        """Return a JSON-serialisable dict for a single agent, or ``None``.
+
+        O(1) lookup — avoids building the full agent list as :meth:`list_all`
+        does.  Returns the same field shape as :meth:`list_all` for consistency.
+
+        *drop_counts* should be ``Bus.get_drop_counts()`` from the caller.
+
+        Design reference: DESIGN.md §10.41 (v1.1.5).
+        """
+        a = self._agents.get(agent_id)
+        if a is None:
+            return None
+        drops = drop_counts or {}
+        return {
+            "id": a.id,
+            "status": a.status.value,
+            "current_task": a._current_task.id if a._current_task else None,
+            "role": getattr(a, "role", AgentRole.WORKER),
+            "parent_id": self._agent_parents.get(a.id),
+            "tags": list(getattr(a, "tags", [])),
+            "bus_drops": drops.get(a.id, 0),
+            "circuit_breaker": (
+                self._breakers[a.id].state.value
+                if a.id in self._breakers
+                else None
+            ),
+            "worktree_path": (
+                str(a.worktree_path) if a.worktree_path is not None else None
+            ),
+            "started_at": (
+                a.started_at.isoformat() if a.started_at is not None else None
+            ),
+            "uptime_s": a.uptime_s,
+        }
+
     # ------------------------------------------------------------------
     # P2P permission
     # ------------------------------------------------------------------

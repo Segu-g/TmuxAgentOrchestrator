@@ -278,3 +278,72 @@ def test_list_all_zero_drops_when_not_provided():
     reg.register(agent)
     result = reg.list_all()
     assert result[0]["bus_drops"] == 0
+
+
+# ---------------------------------------------------------------------------
+# get_one_dict — O(1) single-agent lookup (v1.1.5)
+# ---------------------------------------------------------------------------
+
+
+def test_get_one_dict_returns_dict_for_known_agent():
+    """get_one_dict returns the same shape as list_all() for a single agent."""
+    bus = Bus()
+    reg = make_registry()
+    agent = StubAgent("agent-x", bus)
+    agent.status = AgentStatus.IDLE
+    reg.register(agent)
+
+    result = reg.get_one_dict("agent-x")
+
+    assert result is not None
+    assert result["id"] == "agent-x"
+    assert result["status"] == AgentStatus.IDLE.value
+
+
+def test_get_one_dict_returns_none_for_unknown_agent():
+    """get_one_dict returns None when agent is not registered."""
+    reg = make_registry()
+    assert reg.get_one_dict("nonexistent") is None
+
+
+def test_get_one_dict_matches_list_all_field_shape():
+    """get_one_dict and list_all return the same field set for the same agent."""
+    bus = Bus()
+    reg = make_registry()
+    agent = StubAgent("agent-y", bus)
+    agent.status = AgentStatus.BUSY
+    reg.register(agent)
+
+    from_one = reg.get_one_dict("agent-y", drop_counts={"agent-y": 3})
+    from_all = reg.list_all(drop_counts={"agent-y": 3})
+
+    assert len(from_all) == 1
+    # Both must have the exact same keys
+    assert set(from_one.keys()) == set(from_all[0].keys())  # type: ignore[union-attr]
+    # Non-timing fields must match
+    for key in ("id", "status", "role", "bus_drops", "circuit_breaker", "worktree_path"):
+        assert from_one[key] == from_all[0][key], f"Mismatch on key {key!r}"  # type: ignore[index]
+
+
+def test_get_one_dict_respects_drop_counts():
+    """get_one_dict passes drop_counts through correctly."""
+    bus = Bus()
+    reg = make_registry()
+    agent = StubAgent("drop-agent", bus)
+    reg.register(agent)
+
+    result = reg.get_one_dict("drop-agent", drop_counts={"drop-agent": 42})
+    assert result is not None
+    assert result["bus_drops"] == 42
+
+
+def test_get_one_dict_zero_drops_when_not_provided():
+    """get_one_dict defaults bus_drops to 0 when drop_counts is not provided."""
+    bus = Bus()
+    reg = make_registry()
+    agent = StubAgent("nd-agent", bus)
+    reg.register(agent)
+
+    result = reg.get_one_dict("nd-agent")
+    assert result is not None
+    assert result["bus_drops"] == 0

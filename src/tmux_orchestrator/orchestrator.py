@@ -592,9 +592,13 @@ class Orchestrator:
         """Return a JSON-serialisable dict for a single agent by ID, or ``None``.
 
         Uses the same dict shape as :meth:`list_agents` for consistency.
+
+        Delegates to :meth:`~AgentRegistry.get_one_dict` for an O(1) direct
+        lookup rather than building the full list and scanning it linearly.
+
+        Design reference: DESIGN.md §10.41 (v1.1.5).
         """
-        agents = self.registry.list_all(self.bus.get_drop_counts())
-        return next((a for a in agents if a["id"] == agent_id), None)
+        return self.registry.get_one_dict(agent_id, self.bus.get_drop_counts())
 
     def get_director(self) -> "Agent | None":
         """Return the director agent, or None if no director is registered."""
