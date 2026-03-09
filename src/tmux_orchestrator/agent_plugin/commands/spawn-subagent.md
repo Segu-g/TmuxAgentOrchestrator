@@ -8,7 +8,7 @@ Usage:
 Execute this Python snippet:
 
 ```python
-import json, os, urllib.request, urllib.error
+import json, os, os, urllib.request, urllib.error
 from pathlib import Path
 
 template_id = """$ARGUMENTS""".strip()
@@ -18,16 +18,29 @@ if not template_id:
     print("    /spawn-subagent worker-1")
     raise SystemExit(1)
 
-ctx    = json.loads(Path("__orchestrator_context__.json").read_text())
+# Discover context file: per-agent file takes priority (safe for shared cwd).
+_aid = os.environ.get("TMUX_ORCHESTRATOR_AGENT_ID", "")
+_ctx_path = Path(f"__orchestrator_context__{_aid}__.json") if _aid else None
+if _ctx_path is None or not _ctx_path.exists():
+    _aid = os.environ.get("TMUX_ORCHESTRATOR_AGENT_ID", "")
+    _ctx_path = Path(f"__orchestrator_context__{_aid}__.json") if _aid else None
+    if _ctx_path is None or not _ctx_path.exists():
+        _ctx_path = Path("__orchestrator_context__.json")
+ctx    = json.loads(_ctx_path.read_text())
 my_id  = ctx["agent_id"]
 url    = f"{ctx['web_base_url'].rstrip('/')}/agents"
 
-# Read API key securely: env var takes priority, then __orchestrator_api_key__ file
+# Read API key securely: env var takes priority, then per-agent file, then legacy file
 api_key = os.environ.get("TMUX_ORCHESTRATOR_API_KEY", "")
 if not api_key:
-    key_file = Path("__orchestrator_api_key__")
-    if key_file.exists():
-        api_key = key_file.read_text().strip()
+    _aid2 = os.environ.get("TMUX_ORCHESTRATOR_AGENT_ID", "")
+    per_agent_key = Path(f"__orchestrator_api_key__{_aid2}__") if _aid2 else None
+    if per_agent_key and per_agent_key.exists():
+        api_key = per_agent_key.read_text().strip()
+    else:
+        key_file = Path("__orchestrator_api_key__")
+        if key_file.exists():
+            api_key = key_file.read_text().strip()
 
 headers = {"Content-Type": "application/json"}
 if api_key:

@@ -3,19 +3,28 @@ List all registered agents and their current status (IDLE, BUSY, ERROR, STOPPED)
 Execute this Python snippet:
 
 ```python
-import json, os, urllib.request
+import json, os, os, urllib.request
 from pathlib import Path
 
-ctx      = json.loads(Path("__orchestrator_context__.json").read_text())
+_aid = os.environ.get("TMUX_ORCHESTRATOR_AGENT_ID", "")
+_ctx_p = Path(f"__orchestrator_context__{_aid}__.json") if _aid else None
+if _ctx_p is None or not _ctx_p.exists():
+    _ctx_p = Path("__orchestrator_context__.json")
+ctx      = json.loads(_ctx_p.read_text())
 my_id    = ctx["agent_id"]
 base_url = ctx["web_base_url"].rstrip("/")
 
-# Read API key securely: env var takes priority, then __orchestrator_api_key__ file
+# Read API key securely: env var takes priority, then per-agent file, then legacy file
 api_key = os.environ.get("TMUX_ORCHESTRATOR_API_KEY", "")
 if not api_key:
-    key_file = Path("__orchestrator_api_key__")
-    if key_file.exists():
-        api_key = key_file.read_text().strip()
+    _aid2 = os.environ.get("TMUX_ORCHESTRATOR_AGENT_ID", "")
+    per_agent_key = Path(f"__orchestrator_api_key__{_aid2}__") if _aid2 else None
+    if per_agent_key and per_agent_key.exists():
+        api_key = per_agent_key.read_text().strip()
+    else:
+        key_file = Path("__orchestrator_api_key__")
+        if key_file.exists():
+            api_key = key_file.read_text().strip()
 
 headers = {}
 if api_key:

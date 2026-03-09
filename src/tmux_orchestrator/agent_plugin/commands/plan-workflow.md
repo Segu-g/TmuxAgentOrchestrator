@@ -10,7 +10,7 @@ This command implements the Planner Agent pattern (§12 自律モード):
 Execute this Python snippet:
 
 ```python
-import json, os, sys, urllib.request, urllib.error
+import json, os, os, sys, urllib.request, urllib.error
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -23,7 +23,10 @@ if not description:
     print("  /plan-workflow Build a Python async priority queue with tests")
     raise SystemExit(1)
 
-ctx_path = Path("__orchestrator_context__.json")
+_aid = os.environ.get("TMUX_ORCHESTRATOR_AGENT_ID", "")
+ctx_path = Path(f"__orchestrator_context__{_aid}__.json") if _aid else None
+if ctx_path is None or not ctx_path.exists():
+    ctx_path = Path("__orchestrator_context__.json")
 if not ctx_path.exists():
     print("ERROR: Not in an orchestrated environment (__orchestrator_context__.json not found).")
     raise SystemExit(1)

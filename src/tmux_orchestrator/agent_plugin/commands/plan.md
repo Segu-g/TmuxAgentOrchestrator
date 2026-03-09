@@ -9,7 +9,7 @@ Usage: `/plan <task description>`
 Execute this Python snippet:
 
 ```python
-import json, sys
+import json, os, sys
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -19,7 +19,10 @@ if not description:
     print("  Writes PLAN.md with steps, acceptance criteria, and TDD test strategy.")
     raise SystemExit(1)
 
-ctx_path = Path("__orchestrator_context__.json")
+_aid = os.environ.get("TMUX_ORCHESTRATOR_AGENT_ID", "")
+ctx_path = Path(f"__orchestrator_context__{_aid}__.json") if _aid else None
+if ctx_path is None or not ctx_path.exists():
+    ctx_path = Path("__orchestrator_context__.json")
 agent_id = json.loads(ctx_path.read_text())["agent_id"] if ctx_path.exists() else "unknown"
 
 plan_path = Path("PLAN.md")

@@ -3,10 +3,14 @@ List all unread messages waiting in your mailbox inbox. Run this whenever you re
 Read `__orchestrator_context__.json` in your current working directory, then execute this Python snippet to list your unread messages:
 
 ```python
-import json
+import json, os
 from pathlib import Path
 
-ctx_path = Path("__orchestrator_context__.json")
+# Discover context file: per-agent file takes priority (safe for shared cwd).
+_aid = os.environ.get("TMUX_ORCHESTRATOR_AGENT_ID", "")
+ctx_path = Path(f"__orchestrator_context__{_aid}__.json") if _aid else None
+if ctx_path is None or not ctx_path.exists():
+    ctx_path = Path("__orchestrator_context__.json")
 if not ctx_path.exists():
     print("Not running in an orchestrated environment (__orchestrator_context__.json not found).")
     raise SystemExit(0)

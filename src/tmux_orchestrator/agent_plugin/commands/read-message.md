@@ -5,7 +5,7 @@ Usage: `/read-message <msg_id>`
 Execute this Python snippet (replace MSG_ID with `$ARGUMENTS` or the actual ID):
 
 ```python
-import json, shutil
+import json, os, shutil
 from pathlib import Path
 
 msg_id = """$ARGUMENTS""".strip()
@@ -14,7 +14,11 @@ if not msg_id:
     print("Run /check-inbox first to see available message IDs.")
     raise SystemExit(1)
 
-ctx = json.loads(Path("__orchestrator_context__.json").read_text())
+_aid = os.environ.get("TMUX_ORCHESTRATOR_AGENT_ID", "")
+_ctx_path = Path(f"__orchestrator_context__{_aid}__.json") if _aid else None
+if _ctx_path is None or not _ctx_path.exists():
+    _ctx_path = Path("__orchestrator_context__.json")
+ctx = json.loads(_ctx_path.read_text())
 agent_id = ctx["agent_id"]
 session  = ctx["session_name"]
 base     = Path(ctx["mailbox_dir"]).expanduser() / session / agent_id

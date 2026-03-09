@@ -239,7 +239,25 @@ class Agent(ABC):
         self.worktree_path = None
 
     def _write_context_file(self, cwd: Path) -> None:
-        """Write ``__orchestrator_context__.json`` to the agent's working directory."""
+        """Write per-agent context file to the agent's working directory.
+
+        Writes ``__orchestrator_context__{agent_id}__.json`` as the primary context
+        file.  This per-agent naming prevents a race condition when multiple agents
+        share the same working directory (``isolate: false``): each agent's file is
+        independent, so concurrent startup writes cannot overwrite each other.
+
+        The legacy ``__orchestrator_context__.json`` is **not** written by this method.
+        Slash commands discover the correct file by checking the
+        ``TMUX_ORCHESTRATOR_AGENT_ID`` environment variable first, then falling
+        back to the legacy name for backward compatibility.
+
+        Design reference:
+        - SEI CERT C POS38-C — race conditions with shared file names
+          https://wiki.sei.cmu.edu/confluence/display/c/POS38-C.+Beware+of+race+conditions+when+using+fork+and+file+descriptors
+        - Apple Developer "Race Conditions and Secure File Operations" (2024)
+          https://developer.apple.com/library/archive/documentation/Security/Conceptual/SecureCodingGuide/Articles/RaceConditions.html
+        - DESIGN.md §10.N (v1.0.19 — isolate:false context file race fix)
+        """
         if self.mailbox is not None:
             # mailbox._root is {mailbox_dir}/{session_name}; parent recovers mailbox_dir
             mailbox_dir = str(self.mailbox._root.parent)
@@ -251,8 +269,16 @@ class Agent(ABC):
             "worktree_path": str(cwd),
         }
         ctx.update(self._context_extras())
-        (cwd / "__orchestrator_context__.json").write_text(json.dumps(ctx, indent=2))
-        logger.debug("Agent %s wrote context file to %s", self.id, cwd)
+        content = json.dumps(ctx, indent=2)
+        # Write per-agent file (safe for shared cwd — no race with sibling agents).
+        per_agent_path = cwd / f"__orchestrator_context__{self.id}__.json"
+        per_agent_path.write_text(content)
+        # Also write the legacy file for single-agent scenarios and backward
+        # compatibility with tools/scripts that still reference the old name.
+        # In shared-cwd scenarios this file may be overwritten by sibling agents,
+        # but the per-agent file is always authoritative.
+        (cwd / "__orchestrator_context__.json").write_text(content)
+        logger.debug("Agent %s wrote context file to %s (per-agent + legacy)", self.id, cwd)
 
     def _context_extras(self) -> dict[str, Any]:
         """Return additional keys for the context file. Override in subclasses."""

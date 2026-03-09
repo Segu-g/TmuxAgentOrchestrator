@@ -14,7 +14,7 @@ Examples:
 Execute this Python snippet:
 
 ```python
-import json, os, shlex, urllib.request, urllib.error
+import json, os, os, shlex, urllib.request, urllib.error
 from pathlib import Path
 
 raw_args = """$ARGUMENTS""".strip()
@@ -48,7 +48,15 @@ if pattern not in valid_patterns:
     print(f"Unknown pattern {pattern!r}. Valid: {sorted(valid_patterns)}")
     raise SystemExit(1)
 
-ctx    = json.loads(Path("__orchestrator_context__.json").read_text())
+# Discover context file: per-agent file takes priority (safe for shared cwd).
+_aid = os.environ.get("TMUX_ORCHESTRATOR_AGENT_ID", "")
+_ctx_path = Path(f"__orchestrator_context__{_aid}__.json") if _aid else None
+if _ctx_path is None or not _ctx_path.exists():
+    _aid = os.environ.get("TMUX_ORCHESTRATOR_AGENT_ID", "")
+    _ctx_path = Path(f"__orchestrator_context__{_aid}__.json") if _aid else None
+    if _ctx_path is None or not _ctx_path.exists():
+        _ctx_path = Path("__orchestrator_context__.json")
+ctx    = json.loads(_ctx_path.read_text())
 my_id  = ctx["agent_id"]
 url    = f"{ctx['web_base_url'].rstrip('/')}/agents/{my_id}/change-strategy"
 

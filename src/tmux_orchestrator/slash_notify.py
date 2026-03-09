@@ -63,8 +63,17 @@ def _read_api_key(cwd: Path | None = None) -> str:
         return env_key
 
     # Phase 1: dedicated key file with chmod 600
+    # Try per-agent file first (safe for shared cwd), then legacy file.
     if cwd is None:
         cwd = _cwd()
+    agent_id_env = os.environ.get("TMUX_ORCHESTRATOR_AGENT_ID", "")
+    if agent_id_env:
+        per_agent_key = cwd / f"__orchestrator_api_key__{agent_id_env}__"
+        if per_agent_key.exists():
+            try:
+                return per_agent_key.read_text().strip()
+            except OSError:
+                pass
     key_file = cwd / "__orchestrator_api_key__"
     if key_file.exists():
         try:
@@ -147,7 +156,11 @@ def notify_parent(
         ``False`` if context is missing, parent is not set, or an error occurred.
     """
     cwd = _cwd()
-    ctx_path = cwd / "__orchestrator_context__.json"
+    # Discover context file: per-agent file takes priority (safe for shared cwd).
+    agent_id_env = os.environ.get("TMUX_ORCHESTRATOR_AGENT_ID", "")
+    ctx_path = cwd / f"__orchestrator_context__{agent_id_env}__.json" if agent_id_env else None
+    if ctx_path is None or not ctx_path.exists():
+        ctx_path = cwd / "__orchestrator_context__.json"
 
     if not ctx_path.exists():
         # Not running inside an orchestrated environment — silent no-op.

@@ -189,29 +189,44 @@ class ClaudeCodeAgent(Agent):
         }
 
     def _write_api_key_file(self, cwd: Path) -> None:
-        """Write the API key to ``__orchestrator_api_key__`` with mode 0o600.
+        """Write the API key to per-agent and legacy key files with mode 0o600.
 
-        The file is created atomically using ``os.open()`` with ``O_CREAT |
-        O_TRUNC | O_WRONLY`` and explicit permission bits, preventing the
-        system umask from widening the permissions.
+        Writes two files atomically using ``os.open()`` with ``O_CREAT |
+        O_TRUNC | O_WRONLY`` and explicit permission bits (0o600), preventing the
+        system umask from widening the permissions:
 
-        If *api_key* is empty, no file is created.
+        1. ``__orchestrator_api_key__{agent_id}__`` — per-agent file, safe for
+           shared cwd (no race with sibling agents).
+        2. ``__orchestrator_api_key__`` — legacy file for backward compatibility
+           with single-agent scenarios.
+
+        If *api_key* is empty, no files are created.
 
         References:
           - OpenStack Security Guidelines "Apply Restrictive File Permissions"
             https://security.openstack.org/guidelines/dg_apply-restrictive-file-permissions.html
           - OWASP Secrets Management Cheat Sheet (2025)
+          - DESIGN.md §10.N (v1.0.19 — per-agent key file naming)
         """
         if not self._api_key:
             return
-        key_path = cwd / "__orchestrator_api_key__"
+        key_content = (self._api_key + "\n").encode()
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-        fd = os.open(str(key_path), flags, 0o600)
+        # Write per-agent file (safe for shared cwd).
+        per_agent_path = cwd / f"__orchestrator_api_key__{self.id}__"
+        fd = os.open(str(per_agent_path), flags, 0o600)
         try:
-            os.write(fd, (self._api_key + "\n").encode())
+            os.write(fd, key_content)
         finally:
             os.close(fd)
-        logger.debug("Agent %s wrote API key file to %s", self.id, key_path)
+        # Write legacy file for backward compatibility.
+        legacy_path = cwd / "__orchestrator_api_key__"
+        fd = os.open(str(legacy_path), flags, 0o600)
+        try:
+            os.write(fd, key_content)
+        finally:
+            os.close(fd)
+        logger.debug("Agent %s wrote API key files to %s (per-agent + legacy)", self.id, cwd)
 
     # ------------------------------------------------------------------
     # Context localization — writes agent-specific files to worktree
