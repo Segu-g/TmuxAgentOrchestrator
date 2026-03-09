@@ -108,6 +108,7 @@ class ClaudeCodeAgent(Agent):
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
+        self._record_start_time()
         loop = asyncio.get_running_loop()
         # Per-agent env vars are injected via libtmux's new_window/split
         # ``environment`` parameter (maps to ``tmux new-window -e KEY=VALUE``).

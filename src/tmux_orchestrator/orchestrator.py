@@ -245,6 +245,15 @@ class Orchestrator:
         # Reference: GitHub Webhooks; Stripe Webhooks; RFC 2104 HMAC;
         # Zalando RESTful API Guidelines §webhook. DESIGN.md §10.25 (v0.30.0)
         self._webhook_manager = WebhookManager(timeout=config.webhook_timeout)
+        # Register static webhooks defined in the YAML config at startup.
+        # Dynamic webhooks may also be added at runtime via POST /webhooks.
+        # Reference: DESIGN.md §10.N (v1.0.21 — static webhook config)
+        for wh_cfg in config.webhooks:
+            self._webhook_manager.register(
+                url=wh_cfg.url,
+                events=wh_cfg.events,
+                secret=wh_cfg.secret,
+            )
         # Checkpoint store — SQLite-backed fault-tolerant persistence.
         # Saves task queue and workflow state after each mutation so that an
         # unclean shutdown can be recovered with --resume.
@@ -1809,6 +1818,24 @@ class Orchestrator:
                         payload={"event": "agent_drained", "agent_id": drain_agent_id},
                     ))
                     logger.info("Agent %s drained and stopped after task completion", drain_agent_id)
+            elif msg.type == MessageType.STATUS:
+                # Webhook: agent_status event for IDLE/BUSY/ERROR transitions.
+                # Fires a non-blocking background deliver for each registered webhook
+                # whose event list includes "agent_status" or "*".
+                # Design reference:
+                #   DESIGN.md §10.N (v1.0.21 — Webhook コールバック)
+                #   GitHub Webhooks best practices: fire-and-forget, at-most-once.
+                event_name = msg.payload.get("event", "")
+                if event_name in {"agent_busy", "agent_idle", "agent_error"}:
+                    asyncio.create_task(
+                        self._webhook_manager.deliver("agent_status", {
+                            "agent_id": msg.payload.get("agent_id", msg.from_id),
+                            "status": msg.payload.get("status"),
+                            "event": event_name,
+                            "task_id": msg.payload.get("task_id"),
+                        }),
+                        name=f"wh-agent-status-{msg.from_id[:8]}-{event_name}",
+                    )
             self._bus_queue.task_done()
 
     # ------------------------------------------------------------------

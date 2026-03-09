@@ -161,6 +161,10 @@ class AgentRegistry:
                 "worktree_path": (
                     str(a.worktree_path) if a.worktree_path is not None else None
                 ),
+                "started_at": (
+                    a.started_at.isoformat() if a.started_at is not None else None
+                ),
+                "uptime_s": a.uptime_s,
             }
             for a in self._agents.values()
         ]

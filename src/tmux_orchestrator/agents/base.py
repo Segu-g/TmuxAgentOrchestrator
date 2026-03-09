@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -54,10 +55,34 @@ class Agent(ABC):
         self._merge_target: str | None = None
         self._cwd_override: Path | None = None
         self.worktree_path: Path | None = None
+        # Startup time (set by _record_start_time() in concrete start() implementations)
+        self.started_at: datetime | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    def _record_start_time(self) -> None:
+        """Record the agent start time. Call from concrete start() implementations.
+
+        Sets ``started_at`` to the current UTC time.  Idempotent — a second call
+        overwrites the previous value (re-start after error recovery).
+
+        Design reference:
+        - Kubernetes Pod ``startTime`` — recorded at container process start
+          https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#PodStatus
+        - RFC 3339 / ISO 8601 UTC timestamps for interoperability
+          https://datatracker.ietf.org/doc/html/rfc3339
+        - DESIGN.md §10.N (v1.0.21 — started_at / uptime_s)
+        """
+        self.started_at = datetime.now(tz=timezone.utc)
+
+    @property
+    def uptime_s(self) -> float | None:
+        """Seconds since the agent was started, or None if not yet started."""
+        if self.started_at is None:
+            return None
+        return (datetime.now(tz=timezone.utc) - self.started_at).total_seconds()
 
     @abstractmethod
     async def start(self) -> None:

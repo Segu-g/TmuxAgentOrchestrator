@@ -56,6 +56,31 @@ class AgentConfig:
 
 
 @dataclass
+class WebhookConfig:
+    """Configuration for a single outbound webhook endpoint.
+
+    Loaded from the ``webhooks`` list in the YAML config.
+    Each entry registers one webhook at server startup via WebhookManager.register().
+
+    Fields:
+        url:    HTTP(S) endpoint that receives POST requests.
+        events: List of event names to deliver (e.g. ``["agent_status", "task_complete"]``).
+                Use ``["*"]`` to receive all events.
+        secret: Optional HMAC-SHA256 signing secret.  When set, each delivery
+                includes an ``X-Signature-SHA256`` header for verification.
+
+    Reference:
+        GitHub Webhooks https://docs.github.com/en/webhooks
+        Stripe Webhooks https://docs.stripe.com/webhooks
+        DESIGN.md §10.N (v1.0.21)
+    """
+
+    url: str
+    events: list[str] = field(default_factory=list)
+    secret: str | None = None
+
+
+@dataclass
 class OrchestratorConfig:
     session_name: str = "orchestrator"
     agents: list[AgentConfig] = field(default_factory=list)
@@ -140,10 +165,14 @@ class OrchestratorConfig:
     groups: list[dict] = field(default_factory=list)
     # --- Webhook notifications ---
     # webhook_timeout: HTTP timeout (seconds) per delivery attempt.
+    # webhooks: pre-configured webhook endpoints registered at server startup.
+    #   Each entry is a WebhookConfig with url, events, and optional secret.
+    #   Webhooks registered here supplement any dynamically added via POST /webhooks.
     # Reference: GitHub Webhooks; Stripe Webhooks; RFC 2104 HMAC;
     # Zalando RESTful API Guidelines §webhook; Shopify webhook verification.
-    # DESIGN.md §10.25 (v0.30.0)
+    # DESIGN.md §10.25 (v0.30.0); §10.N (v1.0.21 — static webhook config)
     webhook_timeout: float = 5.0
+    webhooks: list[WebhookConfig] = field(default_factory=list)
     # --- Task TTL (Time-to-Live / expiry) ---
     # default_task_ttl: global default TTL in seconds applied to tasks that do
     #   not set an explicit ttl.  None = no default (tasks never expire unless
@@ -240,6 +269,15 @@ def load_config(path: str | Path) -> OrchestratorConfig:
 
     p2p = [tuple(pair) for pair in data.get("p2p_permissions", [])]
 
+    webhooks = [
+        WebhookConfig(
+            url=w["url"],
+            events=w.get("events", []),
+            secret=w.get("secret"),
+        )
+        for w in data.get("webhooks", [])
+    ]
+
     return OrchestratorConfig(
         session_name=data.get("session_name", "orchestrator"),
         agents=agents,
@@ -273,6 +311,7 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         result_store_dir=data.get("result_store_dir", "~/.tmux_orchestrator/results"),
         groups=data.get("groups", []),
         webhook_timeout=data.get("webhook_timeout", 5.0),
+        webhooks=webhooks,
         default_task_ttl=data.get("default_task_ttl"),
         ttl_reaper_poll=data.get("ttl_reaper_poll", 1.0),
         cors_origins=data.get("cors_origins", [
