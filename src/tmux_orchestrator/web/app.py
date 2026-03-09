@@ -906,6 +906,75 @@ class CleanArchWorkflowSubmit(BaseModel):
         return v
 
 
+class DDDWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/ddd — DDD Bounded Context decomposition.
+
+    Submits a 3-phase workflow DAG using Domain-Driven Design patterns:
+
+      Phase 1 (sequential):
+        ``context-mapper``: performs EventStorming analysis; identifies Bounded
+        Contexts and their Ubiquitous Language; writes ``EVENTSTORMING.md`` and
+        ``BOUNDED_CONTEXTS.md``; stores context list in scratchpad.
+
+      Phase 2 (parallel, one agent per Bounded Context):
+        ``domain-expert-{context}``: reads ``BOUNDED_CONTEXTS.md``; designs domain
+        model (Entities, Aggregates, Value Objects, Domain Services) for its
+        assigned context; writes ``DOMAIN_{CONTEXT}.md`` and stores in scratchpad.
+
+      Phase 3 (sequential, depends on ALL domain-expert tasks):
+        ``integration-designer``: reads all domain models; produces
+        ``CONTEXT_MAP.md`` with explicit context-mapping patterns (Shared Kernel,
+        Customer–Supplier, Anti-Corruption Layer) between every pair of contexts.
+
+    All handoffs use the shared scratchpad (Blackboard pattern).
+    Scratchpad keys use underscores (not slashes) as namespace separator.
+
+    The ``contexts`` field is optional. When omitted the context-mapper agent
+    discovers and names the Bounded Contexts autonomously from the feature
+    description. When provided (e.g. ``["Orders", "Inventory", "Shipping"]``),
+    those names are used directly.
+
+    Design references:
+    - Evans, "Domain-Driven Design" (2003): Bounded Context + Ubiquitous Language
+      as the core strategic-design patterns.
+    - Brandolini, "Introducing EventStorming" (2021): discovery workshop technique.
+    - IJCSE V12I3P102, "Designing Scalable Multi-Agent AI Systems using EventStorming
+      and DDD" (2025): EventStorming maps directly to agent communication protocols.
+    - Russ Miles, "Domain-Driven Agent Design", Engineering Agents Substack, 2025:
+      DICE framework — Bounded Context as LLM agent context constraint.
+    - Bakthavachalu, "Applying DDD for Agentic Applications", Medium, 2025:
+      Risk / Regulatory / Validation bounded-context decomposition case study.
+    - DESIGN.md §10.31 (v1.0.31)
+    """
+
+    topic: str
+    contexts: list[str] = []
+    language: str = "python"
+    # Optional per-role required_tags for agent capability routing
+    context_mapper_tags: list[str] = []
+    domain_expert_tags: list[str] = []
+    integration_designer_tags: list[str] = []
+    # When set, the integration-designer RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    from pydantic import field_validator
+
+    @field_validator("topic")
+    @classmethod
+    def topic_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("topic must not be empty")
+        return v
+
+    @field_validator("contexts")
+    @classmethod
+    def contexts_names_must_not_be_blank(cls, v: list) -> list:
+        for name in v:
+            if not str(name).strip():
+                raise ValueError("context names must not be blank")
+        return v
+
+
 # ---------------------------------------------------------------------------
 # Module-level auth state
 # ---------------------------------------------------------------------------
@@ -4411,6 +4480,366 @@ def create_app(
             "adapter_designer": adapter_task.id,
             "framework_designer": framework_task.id,
         }
+
+        all_task_ids = list(task_ids_map.values())
+        run = wm.submit(name=wf_name, task_ids=all_task_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids_map,
+            "scratchpad_prefix": scratchpad_prefix,
+        }
+
+    @app.post(
+        "/workflows/ddd",
+        summary="Submit a DDD Bounded Context decomposition workflow",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_ddd_workflow(body: DDDWorkflowSubmit) -> dict:
+        """Submit a DDD Bounded Context Decomposition Workflow DAG.
+
+        Three-phase pipeline:
+
+        1. **context-mapper** (Phase 1 — sequential): performs EventStorming
+           analysis on the topic; identifies Bounded Contexts and their Ubiquitous
+           Language; writes ``EVENTSTORMING.md`` and ``BOUNDED_CONTEXTS.md``;
+           stores context list in scratchpad under ``{prefix}_contexts``.
+
+        2. **domain-expert-{context}** (Phase 2 — parallel, one per context):
+           reads ``BOUNDED_CONTEXTS.md``; designs the domain model for its
+           assigned context (Entities, Aggregates, Value Objects, Domain Services);
+           writes ``DOMAIN_{CONTEXT}.md`` and stores in ``{prefix}_domain_{context}``.
+
+        3. **integration-designer** (Phase 3 — sequential, depends on all domain
+           experts): reads all domain models; produces ``CONTEXT_MAP.md`` with
+           context-mapping patterns (Shared Kernel / Customer–Supplier / ACL)
+           between every pair of Bounded Contexts.
+
+        All artifacts are passed via the shared scratchpad (Blackboard pattern).
+        Scratchpad keys use underscores (not slashes) as namespace separator.
+
+        If ``contexts`` is supplied in the request body, those names are used
+        directly (skipping autonomous discovery). If omitted, the context-mapper
+        discovers them from the topic description.
+
+        Returns:
+        - ``workflow_id``: workflow run UUID for status polling
+        - ``name``: human-readable name (``ddd/<topic>``)
+        - ``task_ids``: dict with keys ``context_mapper``,
+          ``domain_expert_{context}`` (one per context), and
+          ``integration_designer``, mapping to global task IDs
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+          (e.g. ``ddd_{run_id[:8]}``)
+
+        Design references:
+        - Evans, "Domain-Driven Design" (2003): Bounded Context + Ubiquitous Language.
+        - IJCSE V12I3P102 (2025): EventStorming → agent communication protocols.
+        - Russ Miles, "Domain-Driven Agent Design", 2025 (DICE framework).
+        - DESIGN.md §10.31 (v1.0.31)
+        """
+        import uuid as _uuid  # noqa: PLC0415
+
+        lang = body.language
+        topic = body.topic
+        wm = orchestrator.get_workflow_manager()
+        wf_name = f"ddd/{topic}"
+
+        pre_run_id = str(_uuid.uuid4())
+        scratchpad_prefix = f"ddd_{pre_run_id[:8]}"
+
+        # Scratchpad keys
+        contexts_key = f"{scratchpad_prefix}_contexts"
+        bounded_contexts_key = f"{scratchpad_prefix}_bounded_contexts"
+
+        # Shared bash snippet for reading context + API key
+        _ctx_snippet = (
+            "WEB_BASE_URL=$(python3 -c \""
+            "import json; d=json.load(open('__orchestrator_context__.json')); "
+            "print(d['web_base_url'])\")\n"
+            "   API_KEY=$(cat __orchestrator_api_key__ 2>/dev/null || "
+            "echo \"$TMUX_ORCHESTRATOR_API_KEY\")"
+        )
+
+        def _write_snippet(key: str, var: str = "CONTENT") -> str:
+            return (
+                f"   curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     -H 'Content-Type: application/json' \\\n"
+                f"     -d '{{\"value\": \"'${var}'\"}}'  "
+            )
+
+        def _read_snippet(key: str, varname: str) -> str:
+            return (
+                f"   {varname}=$(curl -s -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"value\"])')\n"
+            )
+
+        # Determine contexts list: use provided or defer to agent discovery
+        contexts: list[str] = [c.strip() for c in body.contexts if c.strip()]
+        contexts_hint = (
+            f"Use these Bounded Context names exactly: {', '.join(contexts)}"
+            if contexts
+            else "Identify 2–4 Bounded Contexts autonomously from the topic description."
+        )
+
+        # ---------------------------------------------------------------
+        # Phase 1: CONTEXT-MAPPER prompt
+        # ---------------------------------------------------------------
+        context_mapper_prompt = (
+            f"You are the CONTEXT-MAPPER agent in a DDD (Domain-Driven Design) workflow.\n"
+            f"\n"
+            f"**Topic:** {topic}\n"
+            f"**Language:** {lang}\n"
+            f"\n"
+            f"Your role is to perform an **EventStorming** analysis and identify the\n"
+            f"**Bounded Contexts** that structure the domain.\n"
+            f"\n"
+            f"{contexts_hint}\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Write `EVENTSTORMING.md` in your working directory:\n"
+            f"   ```markdown\n"
+            f"   # EventStorming: {topic}\n"
+            f"   ## Domain Events\n"
+            f"   (Orange stickies — past-tense facts: 'OrderPlaced', 'PaymentFailed')\n"
+            f"   ## Commands\n"
+            f"   (Blue stickies — actions that trigger events: 'PlaceOrder', 'ProcessPayment')\n"
+            f"   ## Aggregates\n"
+            f"   (Yellow stickies — clusters of related events and commands)\n"
+            f"   ## Bounded Contexts Identified\n"
+            f"   (List each context name with a 1-sentence purpose)\n"
+            f"   ```\n"
+            f"2. Write `BOUNDED_CONTEXTS.md` in your working directory:\n"
+            f"   ```markdown\n"
+            f"   # Bounded Contexts: {topic}\n"
+            f"   (For each context, include:)\n"
+            f"   ## <Context Name>\n"
+            f"   **Purpose:** <one sentence>\n"
+            f"   **Ubiquitous Language:** <key domain terms specific to this context>\n"
+            f"   **Core Aggregates:** <names>\n"
+            f"   **Inbound Events:** <events this context reacts to>\n"
+            f"   **Outbound Events:** <events this context produces>\n"
+            f"   ```\n"
+            f"3. Store BOUNDED_CONTEXTS.md in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            f"   CONTENT=$(cat BOUNDED_CONTEXTS.md)\n"
+            + _write_snippet(bounded_contexts_key)
+            + f"\n"
+            f"   ```\n"
+            f"4. Store the comma-separated list of context names (no spaces around commas):\n"
+            f"   ```bash\n"
+            f"   # Example: CONTEXT_NAMES='Orders,Inventory,Shipping'\n"
+            f"   CONTEXT_NAMES='<comma-separated list>'\n"
+            + _write_snippet(contexts_key, "CONTEXT_NAMES")
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Keep EVENTSTORMING.md and BOUNDED_CONTEXTS.md under 600 words combined.\n"
+            f"Focus on strategic design — do NOT write implementation code."
+        )
+
+        # ---------------------------------------------------------------
+        # Phase 2: DOMAIN-EXPERT prompts (one per context)
+        # ---------------------------------------------------------------
+        # Build per-context scratchpad keys and prompts
+        def _domain_key(ctx_name: str) -> str:
+            safe = ctx_name.lower().replace(" ", "_").replace("-", "_")
+            return f"{scratchpad_prefix}_domain_{safe}"
+
+        def _domain_expert_prompt(ctx_name: str) -> str:
+            dk = _domain_key(ctx_name)
+            safe = ctx_name.lower().replace(" ", "_").replace("-", "_")
+            return (
+                f"You are the DOMAIN-EXPERT agent for the **{ctx_name}** Bounded Context\n"
+                f"in a DDD workflow.\n"
+                f"\n"
+                f"**Overall Topic:** {topic}\n"
+                f"**Your Bounded Context:** {ctx_name}\n"
+                f"**Language:** {lang}\n"
+                f"\n"
+                f"Steps:\n"
+                f"1. Read the full Bounded Contexts overview from the shared scratchpad:\n"
+                f"   ```bash\n"
+                f"   {_ctx_snippet}\n"
+                + _read_snippet(bounded_contexts_key, "BOUNDED_CONTEXTS")
+                + f"   echo \"Bounded contexts loaded: $(echo $BOUNDED_CONTEXTS | wc -c) chars\"\n"
+                f"   ```\n"
+                f"2. Write `DOMAIN_{safe.upper()}.md` in your working directory:\n"
+                f"   ```markdown\n"
+                f"   # Domain Model: {ctx_name}\n"
+                f"   ## Entities\n"
+                f"   (Objects with identity — list each with fields and invariants)\n"
+                f"   ## Value Objects\n"
+                f"   (Immutable descriptors without identity)\n"
+                f"   ## Aggregates\n"
+                f"   (Consistency boundaries — specify aggregate root and invariants)\n"
+                f"   ## Domain Services\n"
+                f"   (Stateless operations that don't belong to a single aggregate)\n"
+                f"   ## Domain Events\n"
+                f"   (Past-tense facts this context produces)\n"
+                f"   ## Ubiquitous Language\n"
+                f"   (Term → definition, unique to this context)\n"
+                f"   ```\n"
+                f"3. Write stub {lang} classes for entities/value objects in\n"
+                f"   `domain_{safe}.py` (pure {lang} — stdlib only, no frameworks).\n"
+                f"4. Store the domain model in the shared scratchpad:\n"
+                f"   ```bash\n"
+                f"   CONTENT=$(cat DOMAIN_{safe.upper()}.md)\n"
+                + _write_snippet(dk)
+                + f"\n"
+                f"   ```\n"
+                f"\n"
+                f"Focus ONLY on the {ctx_name} context. Do NOT design other contexts.\n"
+                f"Keep it under 400 words."
+            )
+
+        # ---------------------------------------------------------------
+        # Phase 3: INTEGRATION-DESIGNER prompt
+        # ---------------------------------------------------------------
+        def _integration_designer_prompt(ctx_names: list[str]) -> str:
+            read_all = ""
+            for ctx in ctx_names:
+                dk = _domain_key(ctx)
+                safe_var = ctx.upper().replace(" ", "_").replace("-", "_")
+                read_all += _read_snippet(dk, f"DOMAIN_{safe_var}")
+            return (
+                f"You are the INTEGRATION-DESIGNER agent in a DDD workflow.\n"
+                f"\n"
+                f"**Topic:** {topic}\n"
+                f"**Language:** {lang}\n"
+                f"\n"
+                f"Your role is to produce a **Context Map** — the strategic diagram\n"
+                f"that shows how the Bounded Contexts relate and integrate.\n"
+                f"\n"
+                f"Steps:\n"
+                f"1. Read all domain models from the shared scratchpad:\n"
+                f"   ```bash\n"
+                f"   {_ctx_snippet}\n"
+                + _read_snippet(bounded_contexts_key, "BOUNDED_CONTEXTS")
+                + read_all
+                + f"   echo \"All domain models loaded\"\n"
+                f"   ```\n"
+                f"2. Write `CONTEXT_MAP.md` in your working directory:\n"
+                f"   ```markdown\n"
+                f"   # Context Map: {topic}\n"
+                f"   ## Summary\n"
+                f"   (1–2 sentences: what the full domain does)\n"
+                f"   ## Bounded Contexts\n"
+                f"   (Recap: one line per context with its core responsibility)\n"
+                f"   ## Context Relationships\n"
+                f"   (For each pair of contexts that interact, specify the pattern:)\n"
+                f"   ### <Context A> ↔ <Context B>\n"
+                f"   **Pattern:** Shared Kernel | Customer–Supplier | Conformist | ACL | Published Language\n"
+                f"   **Direction:** <upstream> → <downstream>\n"
+                f"   **Shared Concepts:** <terms or events shared across the boundary>\n"
+                f"   **Integration Mechanism:** <domain events / REST API / message queue / direct call>\n"
+                f"   ## Anti-Corruption Layers\n"
+                f"   (List any ACLs required and what they translate)\n"
+                f"   ## Shared Kernel\n"
+                f"   (List any truly shared types, if applicable; otherwise 'None')\n"
+                f"   ## Key Design Decisions\n"
+                f"   (Rationale for the chosen integration patterns)\n"
+                f"   ```\n"
+                f"3. Store CONTEXT_MAP.md in the shared scratchpad:\n"
+                f"   ```bash\n"
+                f"   CONTENT=$(cat CONTEXT_MAP.md)\n"
+                + _write_snippet(f"{scratchpad_prefix}_context_map")
+                + f"\n"
+                f"   ```\n"
+                f"\n"
+                f"Use standard DDD context-mapping patterns (Evans 2003, Vernon 2013).\n"
+                f"Keep CONTEXT_MAP.md under 600 words."
+            )
+
+        # ---------------------------------------------------------------
+        # Submit the DAG
+        # Phase 1: context-mapper (no dependencies)
+        # Phase 2: domain-expert-N (each depends on context-mapper)
+        # Phase 3: integration-designer (depends on ALL domain-experts)
+        # ---------------------------------------------------------------
+        context_mapper_task = await orchestrator.submit_task(
+            context_mapper_prompt,
+            required_tags=body.context_mapper_tags or None,
+        )
+
+        # For provided contexts, submit phase 2 immediately (with dependency on context-mapper).
+        # If contexts not provided, we still need to submit the domain-expert tasks; we use the
+        # provided-contexts path. When contexts=[], we fall back to a single placeholder context
+        # that instructs the agent to read the context list from scratchpad.
+        effective_contexts = contexts if contexts else ["(auto-discovered)"]
+
+        domain_expert_tasks = []
+        task_ids_map: dict[str, str] = {"context_mapper": context_mapper_task.id}
+
+        if contexts:
+            # Contexts are known — submit domain-expert tasks now
+            for ctx_name in contexts:
+                prompt = _domain_expert_prompt(ctx_name)
+                t = await orchestrator.submit_task(
+                    prompt,
+                    required_tags=body.domain_expert_tags or None,
+                    depends_on=[context_mapper_task.id],
+                )
+                safe = ctx_name.lower().replace(" ", "_").replace("-", "_")
+                task_ids_map[f"domain_expert_{safe}"] = t.id
+                domain_expert_tasks.append(t)
+        else:
+            # Contexts not provided — submit a single domain-expert task that reads
+            # the context list from scratchpad and designs all contexts in one pass.
+            auto_prompt = (
+                f"You are the DOMAIN-EXPERT agent in a DDD workflow.\n"
+                f"\n"
+                f"**Topic:** {topic}\n"
+                f"**Language:** {lang}\n"
+                f"\n"
+                f"The context-mapper agent has already identified the Bounded Contexts.\n"
+                f"Read the context list and design ALL domain models in a single pass.\n"
+                f"\n"
+                f"Steps:\n"
+                f"1. Read the Bounded Contexts overview from the shared scratchpad:\n"
+                f"   ```bash\n"
+                f"   {_ctx_snippet}\n"
+                + _read_snippet(bounded_contexts_key, "BOUNDED_CONTEXTS")
+                + _read_snippet(contexts_key, "CONTEXT_NAMES")
+                + f"   echo \"Contexts: $CONTEXT_NAMES\"\n"
+                f"   ```\n"
+                f"2. For EACH context in CONTEXT_NAMES, write a `DOMAIN_<CONTEXT>.md` file\n"
+                f"   with Entities, Value Objects, Aggregates, Domain Services, Domain Events,\n"
+                f"   and Ubiquitous Language sections.\n"
+                f"3. Store each domain model in the scratchpad:\n"
+                f"   ```bash\n"
+                f"   for CTX in $(echo $CONTEXT_NAMES | tr ',' ' '); do\n"
+                f"     SAFE=$(echo $CTX | tr '[:upper:]' '[:lower:]' | tr ' -' '_')\n"
+                f"     CONTENT=$(cat DOMAIN_${{CTX}}.md 2>/dev/null || echo \"(empty)\")\n"
+                + _write_snippet(f"{scratchpad_prefix}_domain_$SAFE")
+                + f"\n"
+                f"   done\n"
+                f"   ```\n"
+                f"\n"
+                f"Keep each domain model under 300 words. Focus on strategic design."
+            )
+            t = await orchestrator.submit_task(
+                auto_prompt,
+                required_tags=body.domain_expert_tags or None,
+                depends_on=[context_mapper_task.id],
+            )
+            task_ids_map["domain_expert_auto"] = t.id
+            domain_expert_tasks.append(t)
+
+        # Phase 3: integration-designer depends on ALL domain-expert tasks
+        integration_prompt = _integration_designer_prompt(
+            contexts if contexts else ["(all contexts from scratchpad)"]
+        )
+        integration_task = await orchestrator.submit_task(
+            integration_prompt,
+            required_tags=body.integration_designer_tags or None,
+            depends_on=[t.id for t in domain_expert_tasks],
+            reply_to=body.reply_to,
+        )
+        task_ids_map["integration_designer"] = integration_task.id
 
         all_task_ids = list(task_ids_map.values())
         run = wm.submit(name=wf_name, task_ids=all_task_ids)

@@ -728,6 +728,77 @@ AI エージェントにとって TDD は「ガードレール」として機能
 
 ## 10. 調査記録
 
+### 10.31 v1.0.31 — POST /workflows/ddd — DDD Bounded Context 分解ワークフロー
+
+#### 選定理由
+
+**選択: `POST /workflows/ddd` — DDD Bounded Context 分解ワークフロー (v1.0.31)**
+
+§11「ワークフローテンプレート」の**中**優先度候補として記載されている。v1.0.30 で clean-arch ワークフローが完成し、4エージェントシーケンシャルパイプラインの基盤が確立した。次の未実装ワークフローとして `ddd` を選択する。
+
+**選択理由:**
+1. **最長保留の未実装ワークフロー**: `ddd` は v0.25.0 から候補に挙げられ、`clean-arch` の前提条件（role template ライブラリ）待ちで保留されていた。clean-arch が実装済みの今が実装タイミング。
+2. **明確なマルチエージェント協調パターン**: context-mapper（EventStormingで要件分解）→ domain-expert × N（各 Bounded Context の実装）→ integration-designer（コンテキスト間統合設計）の3ステップは、各エージェントが前のエージェントの成果物を `context_files` / スクラッチパッド経由で読み込む実践的な Blackboard パターン。
+3. **clean-arch との差別化**: clean-arch は技術層（Domain/UseCase/Adapter/Framework）を4エージェントで実装する。ddd は戦略的設計（Bounded Context 識別 → 並列ドメイン実装 → 統合設計）を3フェーズで実施し、並列フェーズを含むより複雑なDAGを持つ。
+4. **業界での実用価値**: DDD の Bounded Context が LLM エージェント責務分割境界に直接対応するという知見（Russ Miles, Bakthavachalu 2025）を実装で実証できる。
+
+**選択しなかった候補:**
+- `/deliberate` スラッシュコマンド: 「中」優先度。ddd より実装価値が低い（2エージェントのみ、デモパターンが単調）。
+- Semantic RAG for episode injection: 現状の keyword/recent で十分機能しており、改善効果が不明確。
+- `watchdog_poll` バリデーション: スコープが非常に小さくデモが単調になる。
+
+#### 調査結果 (Step 1 — Research)
+
+**Query 1**: "Domain-Driven Design bounded context decomposition multi-agent LLM EventStorming 2025"
+
+主要知見:
+- **Combining EventStorming and DDD for Multi-Agent Systems** (IJCSE Vol.12 Issue 3, 2025): Event Storming がドメインイベントを発見し、それがエージェント間通信プロトコルになる。各 Bounded Context が独立したエージェントドメインに対応し、Anti-Corruption Layer がコンテキスト境界でのプロトコル変換を担う。Evans の DDD パターン + Brandolini の EventStorming の組み合わせが MAS 設計に直接応用可能。
+- **codecentric "From Stories to Code"** (2025): Domain Storytelling と EventStorming のアーティファクトが LLM コンテキストとして直接利用可能。Bounded Context 境界を明確にすることで集約が適切に構造化され、仕様が簡潔になる。
+- **ContextMapper** (contextmapper.org): EventStorming 結果を CML (Context Mapper Language) として形式化し、コード生成やアーキテクチャ文書に変換する OSS ツール。
+
+**References**:
+- "Designing Scalable Multi-Agent AI Systems using EventStorming and DDD", IJCSE V12I3P102, 2025. https://www.internationaljournalssrg.org/IJCSE/2025/Volume12-Issue3/IJCSE-V12I3P102.pdf
+- "From Stories to Code: Collaborative Modeling and LLMs", codecentric 2025. https://www.codecentric.de/en/knowledge-hub/blog/from-stories-to-code-how-domain-storytelling-and-eventstorming-give-llms-the-context-they-need
+- "Model Event Storming Results in Context Mapper", contextmapper.org. https://contextmapper.org/docs/event-storming/
+
+**Query 2**: "DDD context mapping patterns aggregate domain expert AI agents arXiv 2025"
+
+主要知見:
+- **Russ Miles "Domain-Driven Agent Design"** (Engineering Agents Substack, 2025): DICE フレームワーク（Domain-Integrated Context Engineering）。Bounded Context をエージェントのコンテキスト制約に直接マッピング。ドメインオブジェクトをファーストクラスのコンテキスト単位として扱うことで、エージェントの精度と一貫性が向上する。
+- **Bakthavachalu "Applying DDD for Agentic Applications"** (Medium, 2025): 大手投資銀行の3 Bounded Context 実装事例（Risk / Regulatory / Validation）。各コンテキストに専門エージェントを配置し、ユビキタス言語で通信することでコンプライアンス違反を防止。
+- **James Croft "Applying DDD principles to multi-agent AI systems"** (2025): コンテキストマッピングパターン（Shared Kernel, Customer/Supplier, ACL）が LLM エージェント間の依存関係を構造化する。
+
+**References**:
+- Russ Miles, "Domain-Driven Agent Design", Engineering Agents Substack, 2025. https://engineeringagents.substack.com/p/domain-driven-agent-design
+- Sathiyan Bakthavachalu, "Applying DDD for Agentic Applications", Medium, 2025. https://sathiyan.medium.com/revolutionizing-enterprise-ai-applying-domain-driven-design-for-agentic-applications-aa321fb991f4
+- James Croft, "Applying DDD principles to multi-agent AI systems", 2025. https://www.jamescroft.co.uk/applying-domain-driven-design-principles-to-multi-agent-ai-systems/
+
+**Query 3**: "DDD bounded context canvas context mapper ubiquitous language LLM automated workflow 2025"
+
+主要知見:
+- **ddd-crew/bounded-context-canvas** (GitHub, 2025): Bounded Context Canvas は各コンテキストの名前・説明・戦略的分類・インバウンド/アウトバウンドコミュニケーション・ユビキタス言語を体系化するワークショップツール。Canvas のフィールドがそのまま AI エージェントの PLAN.md フォーマットに転用できる。
+- **"DDD Bounded Contexts for LLMs"** (understandingdata.com, 2025): Bounded Context により LLM のコンテキスト読み込み量が 75-85% 削減（全コードベースの 15-25% のみロード）。境界違反率 35% → 3%、コード精度 55% → 88% に改善。
+- **Martin Fowler bliki "Bounded Context"**: Bounded Context はユビキタス言語の適用範囲を明示的に定義し、チーム間の意味的混乱を防ぐ基本パターン。コンテキスト間の変換は明示的なマッピング層（ACL）が担う。
+
+**References**:
+- ddd-crew, "Bounded Context Canvas", GitHub, 2025. https://github.com/ddd-crew/bounded-context-canvas
+- "DDD Bounded Contexts: Clear Domain Boundaries for LLM Code Generation", understandingdata.com, 2025. https://understandingdata.com/posts/ddd-bounded-contexts-for-llms/
+- Martin Fowler, "Bounded Context", martinfowler.com. https://www.martinfowler.com/bliki/BoundedContext.html
+
+#### 実装方針
+
+ワークフロー構成:
+1. **context-mapper**: 機能要求を読んで EventStorming マップ (`EVENTSTORMING.md`) を作成し、Bounded Context の一覧と各コンテキストのユビキタス言語を `BOUNDED_CONTEXTS.md` に書き出す。スクラッチパッドに `context_list` キーでコンテキスト名リストを格納。
+2. **domain-expert-{N}** (並列、各コンテキストに1エージェント): `BOUNDED_CONTEXTS.md` を `context_files` で受け取り、担当コンテキストのドメインモデル・集約・値オブジェクト・ドメインサービスを実装する。成果物パスをスクラッチパッドに格納。
+3. **integration-designer**: 全 domain-expert の出力を読み取り、コンテキスト間のコンテキストマッピング（`CONTEXT_MAP.md`）を作成する。統合パターン（Shared Kernel / Customer-Supplier / ACL）を選択し根拠を記録。
+
+エンドポイント: `POST /workflows/ddd`
+リクエスト: `{ "topic": str, "contexts": list[str] | None, "base_url": str, "tags": list[str], "priority": int }`
+
+`contexts` が指定された場合はそのリストを使用し、指定されない場合は context-mapper が自動推論する。
+
+---
+
 ### 10.25 v1.0.26 — Stop Hook 不発火の根本原因調査・修正
 
 #### 選定理由

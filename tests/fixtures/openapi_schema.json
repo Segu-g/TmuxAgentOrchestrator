@@ -272,6 +272,68 @@
         "title": "CleanArchWorkflowSubmit",
         "type": "object"
       },
+      "DDDWorkflowSubmit": {
+        "description": "Request body for POST /workflows/ddd \u2014 DDD Bounded Context decomposition.\n\nSubmits a 3-phase workflow DAG using Domain-Driven Design patterns:\n\n  Phase 1 (sequential):\n    ``context-mapper``: performs EventStorming analysis; identifies Bounded\n    Contexts and their Ubiquitous Language; writes ``EVENTSTORMING.md`` and\n    ``BOUNDED_CONTEXTS.md``; stores context list in scratchpad.\n\n  Phase 2 (parallel, one agent per Bounded Context):\n    ``domain-expert-{context}``: reads ``BOUNDED_CONTEXTS.md``; designs domain\n    model (Entities, Aggregates, Value Objects, Domain Services) for its\n    assigned context; writes ``DOMAIN_{CONTEXT}.md`` and stores in scratchpad.\n\n  Phase 3 (sequential, depends on ALL domain-expert tasks):\n    ``integration-designer``: reads all domain models; produces\n    ``CONTEXT_MAP.md`` with explicit context-mapping patterns (Shared Kernel,\n    Customer\u2013Supplier, Anti-Corruption Layer) between every pair of contexts.\n\nAll handoffs use the shared scratchpad (Blackboard pattern).\nScratchpad keys use underscores (not slashes) as namespace separator.\n\nThe ``contexts`` field is optional. When omitted the context-mapper agent\ndiscovers and names the Bounded Contexts autonomously from the feature\ndescription. When provided (e.g. ``[\"Orders\", \"Inventory\", \"Shipping\"]``),\nthose names are used directly.\n\nDesign references:\n- Evans, \"Domain-Driven Design\" (2003): Bounded Context + Ubiquitous Language\n  as the core strategic-design patterns.\n- Brandolini, \"Introducing EventStorming\" (2021): discovery workshop technique.\n- IJCSE V12I3P102, \"Designing Scalable Multi-Agent AI Systems using EventStorming\n  and DDD\" (2025): EventStorming maps directly to agent communication protocols.\n- Russ Miles, \"Domain-Driven Agent Design\", Engineering Agents Substack, 2025:\n  DICE framework \u2014 Bounded Context as LLM agent context constraint.\n- Bakthavachalu, \"Applying DDD for Agentic Applications\", Medium, 2025:\n  Risk / Regulatory / Validation bounded-context decomposition case study.\n- DESIGN.md \u00a710.31 (v1.0.31)",
+        "properties": {
+          "context_mapper_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Context Mapper Tags",
+            "type": "array"
+          },
+          "contexts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Contexts",
+            "type": "array"
+          },
+          "domain_expert_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Domain Expert Tags",
+            "type": "array"
+          },
+          "integration_designer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Integration Designer Tags",
+            "type": "array"
+          },
+          "language": {
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "topic": {
+            "title": "Topic",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic"
+        ],
+        "title": "DDDWorkflowSubmit",
+        "type": "object"
+      },
       "DebateWorkflowSubmit": {
         "description": "Request body for POST /workflows/debate \u2014 3-role multi-round debate workflow.\n\nSubmits an Advocate/Critic/Judge Workflow DAG with structured argumentation:\n\nFor each round 1..max_rounds:\n  - ``advocate_r{n}``: builds or refines the affirmative argument\n  - ``critic_r{n}``: challenges the argument (Devil's Advocate)\nFinal:\n  - ``judge``: synthesizes all rounds and writes ``DECISION.md`` to scratchpad\n\nArtifacts are passed via the shared scratchpad (Blackboard pattern):\n  ``{scratchpad_prefix}_r{n}_advocate`` \u2014 advocate's argument for round n\n  ``{scratchpad_prefix}_r{n}_critic``   \u2014 critic's rebuttal for round n\n  ``{scratchpad_prefix}_decision``      \u2014 judge's final decision\n\nDesign references:\n- Du et al. \"Improving Factuality and Reasoning in Language Models through\n  Multiagent Debate\" ICML 2024 (arXiv:2305.14325): multi-agent debate\n  significantly improves factuality and reasoning.\n- DEBATE: Devil's Advocate-Based Assessment ACL 2024 (arXiv:2405.09935):\n  Commander + Scorer + Critic structure; terminates when critic outputs\n  \"NO ISSUE\" or max iterations reached.\n- ChatEval ICLR 2024 (arXiv:2308.07201): role diversity (different\n  role_descriptions) is the most critical factor in debate quality.\n- DESIGN.md \u00a710.32 (v0.37.0)",
         "properties": {
@@ -3869,6 +3931,47 @@
           }
         },
         "summary": "Submit a 4-agent Clean Architecture pipeline workflow"
+      }
+    },
+    "/workflows/ddd": {
+      "post": {
+        "description": "Submit a DDD Bounded Context Decomposition Workflow DAG.\n\nThree-phase pipeline:\n\n1. **context-mapper** (Phase 1 \u2014 sequential): performs EventStorming\n   analysis on the topic; identifies Bounded Contexts and their Ubiquitous\n   Language; writes ``EVENTSTORMING.md`` and ``BOUNDED_CONTEXTS.md``;\n   stores context list in scratchpad under ``{prefix}_contexts``.\n\n2. **domain-expert-{context}** (Phase 2 \u2014 parallel, one per context):\n   reads ``BOUNDED_CONTEXTS.md``; designs the domain model for its\n   assigned context (Entities, Aggregates, Value Objects, Domain Services);\n   writes ``DOMAIN_{CONTEXT}.md`` and stores in ``{prefix}_domain_{context}``.\n\n3. **integration-designer** (Phase 3 \u2014 sequential, depends on all domain\n   experts): reads all domain models; produces ``CONTEXT_MAP.md`` with\n   context-mapping patterns (Shared Kernel / Customer\u2013Supplier / ACL)\n   between every pair of Bounded Contexts.\n\nAll artifacts are passed via the shared scratchpad (Blackboard pattern).\nScratchpad keys use underscores (not slashes) as namespace separator.\n\nIf ``contexts`` is supplied in the request body, those names are used\ndirectly (skipping autonomous discovery). If omitted, the context-mapper\ndiscovers them from the topic description.\n\nReturns:\n- ``workflow_id``: workflow run UUID for status polling\n- ``name``: human-readable name (``ddd/<topic>``)\n- ``task_ids``: dict with keys ``context_mapper``,\n  ``domain_expert_{context}`` (one per context), and\n  ``integration_designer``, mapping to global task IDs\n- ``scratchpad_prefix``: scratchpad namespace for this run\n  (e.g. ``ddd_{run_id[:8]}``)\n\nDesign references:\n- Evans, \"Domain-Driven Design\" (2003): Bounded Context + Ubiquitous Language.\n- IJCSE V12I3P102 (2025): EventStorming \u2192 agent communication protocols.\n- Russ Miles, \"Domain-Driven Agent Design\", 2025 (DICE framework).\n- DESIGN.md \u00a710.31 (v1.0.31)",
+        "operationId": "submit_ddd_workflow_workflows_ddd_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DDDWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Ddd Workflow Workflows Ddd Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a DDD Bounded Context decomposition workflow"
       }
     },
     "/workflows/debate": {
