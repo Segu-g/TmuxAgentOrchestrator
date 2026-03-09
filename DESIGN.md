@@ -728,6 +728,54 @@ AI エージェントにとって TDD は「ガードレール」として機能
 
 ## 10. 調査記録
 
+### 10.34 v1.0.34 — ProcessPort を `ClaudeCodeAgent` の正規インターフェース型に昇格 + WebhookManager DI
+
+#### 選定理由
+
+**選択: ProcessPort 統合 + WebhookManager DI (v1.0.34)**
+
+§11「層5：ツール・マネジメント（アーキテクチャ品質）」の**高**優先度候補。
+
+**選択理由:**
+
+1. **ProcessPort 統合**: `ProcessPort` Protocol は `infrastructure/process_port.py` に存在するが、
+   `ClaudeCodeAgent` 内部でまだ生の `libtmux.Pane`（`self.pane`）を多箇所で直接操作している。
+   `send_keys` / `capture_pane` だけでなく、`send_interrupt()` や `pane_id` プロパティも
+   Protocol に追加し、ClaudeCodeAgent が `libtmux.Pane` を直接参照しないよう完成させる。
+   これにより tmux なし環境での単体テストが `StdioProcessAdapter` で完全に可能になる。
+
+2. **WebhookManager DI**: `orchestrator.py` で `ContextMonitor`/`DriftMonitor` は Protocol + DI
+   済みだが `WebhookManager` は `__init__` でハードコード生成されている。
+   コンストラクタ注入を追加し DI パターンを統一する。
+
+**非選択:**
+- `contexts` count validator for /workflows/ddd — スコープが小さすぎる
+- `/deliberate --rounds N` — `max_rounds` で既に多ラウンド対応済み
+
+#### リサーチ
+
+- **Hexagonal Architecture Design: Python Ports and Adapters for Modularity 2026** (johal.in, 2026):
+  「Ports define interfaces: output ports for driven adapters (like tmux, email, DB).
+  Hexagonal Architecture decouples core logic from externalities, reducing maintenance costs by up to 35%.」
+  URL: https://johal.in/hexagonal-architecture-design-python-ports-and-adapters-for-modularity-2026/
+
+- **Dependency Injection: a Python Way — Rost Glukhov** (glukhov.org, 2025-12):
+  「Constructor injection makes dependencies explicit and required — when you look at __init__,
+  you immediately see what a component needs.」
+  URL: https://www.glukhov.org/post/2025/12/dependency-injection-in-python
+
+- **Leveraging Typing.Protocol: Faster Error Detection — Pybites** (pybit.es, 2025):
+  「Protocol is preferred over ABC because it doesn't require inheritance; any object
+  satisfying the interface works. @runtime_checkable enables isinstance() checks.」
+  URL: https://pybit.es/articles/typing-protocol-abc-alternative/
+
+- **How to Implement Dependency Injection in Python — OneUptime** (oneuptime.com, 2026-02):
+  「Constructor injection is the preferred approach because dependencies become explicit;
+  injecting fakes/mocks in tests makes unit tests fast, isolated, and free of external services.」
+  URL: https://oneuptime.com/blog/post/2026-02-03-python-dependency-injection/view
+
+---
+
 ### 10.33 v1.0.33 — アーキテクチャ品質強化: watchdog_poll バリデーター + UseCaseInteractor + AgentStatus Hypothesis ステートフルテスト
 
 #### 選定理由

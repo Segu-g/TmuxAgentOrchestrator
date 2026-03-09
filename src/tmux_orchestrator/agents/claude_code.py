@@ -19,6 +19,11 @@ from tmux_orchestrator.bus import Message, MessageType
 from tmux_orchestrator.config import AgentRole
 from tmux_orchestrator.trust import pre_trust_worktree
 
+from tmux_orchestrator.infrastructure.process_port import (
+    ProcessPort,
+    TmuxProcessAdapter,
+)
+
 if TYPE_CHECKING:
     import libtmux
 
@@ -81,8 +86,16 @@ class ClaudeCodeAgent(Agent):
         self._api_key = api_key
         # Normalise role to AgentRole enum for consistent comparisons
         self.role: AgentRole = AgentRole(role) if isinstance(role, str) else role
-        # When set, the agent is a sub-agent and shares its parent's tmux window
+        # When set, the agent is a sub-agent and shares its parent's tmux window.
+        # Still typed as libtmux.Pane because new_subpane() requires the raw pane
+        # object; TmuxInterface.new_subpane is an infrastructure operation outside
+        # the ProcessPort scope.
         self._parent_pane: "libtmux.Pane | None" = parent_pane
+        # ProcessPort interface — set in start(); wraps the raw libtmux.Pane.
+        # All send_keys / capture_pane / send_interrupt / pane_id operations on the
+        # running claude process go through this port (not self._raw_pane directly).
+        # Reference: DESIGN.md §10.34 (v1.0.34).
+        self.process: "ProcessPort | None" = None
         # Context engineering: per-agent context localization
         self._system_prompt: str | None = system_prompt
         self._context_files: list[str] = context_files or []
@@ -130,7 +143,11 @@ class ClaudeCodeAgent(Agent):
             pane = await loop.run_in_executor(
                 None, self._tmux.new_pane, self.id, pane_env
             )
+        # Keep the raw libtmux.Pane reference for watch/unwatch operations (TmuxInterface
+        # infrastructure); expose all process interactions via the ProcessPort abstraction.
+        # Reference: DESIGN.md §10.34 (v1.0.34 — ProcessPort as canonical interface).
         self.pane = pane
+        self.process = TmuxProcessAdapter(pane=pane, tmux=self._tmux)
         cwd = await self._setup_worktree()
         self._cwd = cwd
         if cwd is not None:
@@ -169,14 +186,19 @@ class ClaudeCodeAgent(Agent):
             if cwd
             else command
         )
-        await loop.run_in_executor(None, self._tmux.send_keys, pane, launch)
+        self.process.send_keys(launch)
         self._tmux.watch_pane(pane, self.id)
         self._tmux.start_watcher()
         await self._wait_for_ready()
         self.status = AgentStatus.IDLE
         self._run_task = asyncio.create_task(self._run_loop(), name=f"{self.id}-loop")
         await self._start_message_loop()
-        logger.info("ClaudeCodeAgent %s started in pane %s (role=%s)", self.id, pane.id, self.role)
+        logger.info(
+            "ClaudeCodeAgent %s started in pane %s (role=%s)",
+            self.id,
+            self.process.get_pane_id(),
+            self.role,
+        )
 
     def _context_extras(self) -> dict[str, Any]:
         # NOTE: api_key is intentionally excluded from the context file.
@@ -565,9 +587,13 @@ use the plain form without a namespace prefix.
             self._msg_task.cancel()
         if self.pane:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(
-                None, self._tmux.send_keys, self.pane, "q", True
-            )
+            # Use process port for send_keys; keep raw pane for unwatch (infrastructure).
+            if self.process is not None:
+                await loop.run_in_executor(None, self.process.send_keys, "q")
+            else:
+                await loop.run_in_executor(
+                    None, self._tmux.send_keys, self.pane, "q", True
+                )
             self._tmux.unwatch_pane(self.pane)
         await self.bus.unsubscribe(self.id)
         # Delegate completion-strategy cleanup (e.g. remove Stop hook settings file).
@@ -605,10 +631,21 @@ use the plain form without a namespace prefix.
         if self.pane is None:
             return False
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None, self.pane.send_keys, "C-c"
+        if self.process is not None:
+            # Preferred: use ProcessPort.send_interrupt() — no direct libtmux dependency.
+            # Reference: DESIGN.md §10.34 (v1.0.34).
+            await loop.run_in_executor(None, self.process.send_interrupt)
+            pane_label = self.process.get_pane_id()
+        else:
+            # Fallback: direct libtmux.Pane call for code paths that set self.pane
+            # without going through start() (e.g. legacy tests).
+            await loop.run_in_executor(None, self.pane.send_keys, "C-c")
+            pane_label = getattr(self.pane, "id", str(self.pane))
+        logger.info(
+            "ClaudeCodeAgent %s: sent C-c interrupt to pane %s",
+            self.id,
+            pane_label,
         )
-        logger.info("ClaudeCodeAgent %s: sent C-c interrupt to pane %s", self.id, self.pane.id)
         return True
 
     # ------------------------------------------------------------------
@@ -616,7 +653,7 @@ use the plain form without a namespace prefix.
     # ------------------------------------------------------------------
 
     async def _dispatch_task(self, task: Task) -> None:
-        if self.pane is None:
+        if self.pane is None or self.process is None:
             raise RuntimeError(f"Agent {self.id} has no pane")
         loop = asyncio.get_running_loop()
         # Notify the completion strategy before sending the prompt so it can
@@ -627,9 +664,9 @@ use the plain form without a namespace prefix.
             )
         from tmux_orchestrator.security import sanitize_prompt
         safe_prompt = sanitize_prompt(task.prompt)
-        await loop.run_in_executor(
-            None, self._tmux.send_keys, self.pane, safe_prompt
-        )
+        # Use ProcessPort instead of self._tmux.send_keys(self.pane, ...)
+        # Reference: DESIGN.md §10.34 (v1.0.34 — ProcessPort canonical interface).
+        await loop.run_in_executor(None, self.process.send_keys, safe_prompt)
         await self._completion.wait(self, task)
 
     async def _wait_for_ready(self) -> None:
@@ -664,11 +701,11 @@ use the plain form without a namespace prefix.
 
     async def notify_stdin(self, notification: str) -> None:
         """Send *notification* to the tmux pane via send_keys."""
-        if self.pane is None:
+        if self.pane is None or self.process is None:
             return
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None, self._tmux.send_keys, self.pane, notification
-        )
+        # Use ProcessPort instead of self._tmux.send_keys(self.pane, ...).
+        # Reference: DESIGN.md §10.34 (v1.0.34 — ProcessPort canonical interface).
+        await loop.run_in_executor(None, self.process.send_keys, notification)
 
 

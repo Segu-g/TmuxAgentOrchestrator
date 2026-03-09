@@ -62,6 +62,7 @@ class Orchestrator:
         task_queue: "TaskQueue | None" = None,
         context_monitor: "ContextMonitorProtocol | None" = None,
         drift_monitor: "DriftMonitorProtocol | None" = None,
+        webhook_manager: "WebhookManager | None" = None,
     ) -> None:
         self.bus = bus
         self.tmux = tmux
@@ -242,9 +243,16 @@ class Orchestrator:
         self._workflow_manager = WorkflowManager()
         # Outbound webhook notification manager.
         # Fire-and-forget delivery of task/agent/workflow events to registered URLs.
+        # Injected via webhook_manager parameter; defaults to WebhookManager for
+        # production use.  Pass a custom instance for testing or alternate backends.
         # Reference: GitHub Webhooks; Stripe Webhooks; RFC 2104 HMAC;
-        # Zalando RESTful API Guidelines §webhook. DESIGN.md §10.25 (v0.30.0)
-        self._webhook_manager = WebhookManager(timeout=config.webhook_timeout)
+        # Zalando RESTful API Guidelines §webhook. DESIGN.md §10.25 (v0.30.0),
+        # §10.34 (v1.0.34 — WebhookManager DI).
+        self._webhook_manager: WebhookManager = (
+            webhook_manager
+            if webhook_manager is not None
+            else WebhookManager(timeout=config.webhook_timeout)
+        )
         # Register static webhooks defined in the YAML config at startup.
         # Dynamic webhooks may also be added at runtime via POST /webhooks.
         # Reference: DESIGN.md §10.N (v1.0.21 — static webhook config)

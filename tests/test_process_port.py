@@ -4,7 +4,8 @@ Design references:
 - PEP 544 Protocols: Structural subtyping (peps.python.org/pep-0544/)
 - Martin "Clean Architecture" (2017) Ch.22 — Port & Adapter pattern
 - "Hexagonal Architecture in Python" SoftwarePatternLexicon (2025)
-- DESIGN.md §10.13 (v0.46.0)
+- "Hexagonal Architecture Design: Python Ports and Adapters" johal.in (2026)
+- DESIGN.md §10.13 (v0.46.0), §10.34 (v1.0.34 — send_interrupt/get_pane_id)
 """
 
 from __future__ import annotations
@@ -28,9 +29,11 @@ def test_process_port_is_protocol():
 
 
 def test_process_port_has_required_methods():
-    """ProcessPort defines send_keys and capture_pane methods."""
+    """ProcessPort defines send_keys, capture_pane, send_interrupt, get_pane_id."""
     assert hasattr(ProcessPort, "send_keys")
     assert hasattr(ProcessPort, "capture_pane")
+    assert hasattr(ProcessPort, "send_interrupt")
+    assert hasattr(ProcessPort, "get_pane_id")
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +125,7 @@ def test_stdio_adapter_satisfies_process_port_protocol():
 
 
 def test_custom_class_satisfies_process_port_via_duck_typing():
-    """Any class with send_keys and capture_pane satisfies ProcessPort."""
+    """Any class with all four ProcessPort methods satisfies the protocol."""
 
     class MinimalAdapter:
         def send_keys(self, keys: str, enter: bool = True) -> None:
@@ -131,16 +134,27 @@ def test_custom_class_satisfies_process_port_via_duck_typing():
         def capture_pane(self) -> str:
             return "output"
 
+        def send_interrupt(self) -> None:
+            pass
+
+        def get_pane_id(self) -> str:
+            return "test-pane"
+
     adapter = MinimalAdapter()
     assert isinstance(adapter, ProcessPort)
 
 
 def test_missing_method_does_not_satisfy_process_port():
-    """A class without capture_pane does not satisfy ProcessPort."""
+    """A class without all required methods does not satisfy ProcessPort."""
 
     class Incomplete:
         def send_keys(self, keys: str, enter: bool = True) -> None:
             pass
+
+        def capture_pane(self) -> str:
+            return "output"
+
+        # Missing send_interrupt and get_pane_id
 
     adapter = Incomplete()
     assert not isinstance(adapter, ProcessPort)
@@ -189,3 +203,68 @@ def test_tmux_interface_has_create_adapter_method():
     """TmuxInterface provides a create_process_adapter() factory method."""
     from tmux_orchestrator.tmux_interface import TmuxInterface
     assert hasattr(TmuxInterface, "create_process_adapter")
+
+
+# ---------------------------------------------------------------------------
+# v1.0.34 — send_interrupt() and get_pane_id() additions
+# ---------------------------------------------------------------------------
+
+
+def test_stdio_adapter_send_interrupt_records_ctrl_c():
+    """StdioProcessAdapter.send_interrupt() records 'C-c' in sent keys history."""
+    adapter = StdioProcessAdapter()
+    adapter.send_interrupt()
+    assert "C-c" in adapter.sent_keys_history()
+
+
+def test_stdio_adapter_send_interrupt_does_not_modify_output():
+    """StdioProcessAdapter.send_interrupt() does not change the output buffer."""
+    adapter = StdioProcessAdapter()
+    adapter.set_output("some output ❯")
+    adapter.send_interrupt()
+    assert adapter.capture_pane() == "some output ❯"
+
+
+def test_stdio_adapter_get_pane_id_returns_stdio():
+    """StdioProcessAdapter.get_pane_id() returns the fixed string 'stdio'."""
+    adapter = StdioProcessAdapter()
+    assert adapter.get_pane_id() == "stdio"
+
+
+def test_stdio_adapter_satisfies_full_process_port():
+    """StdioProcessAdapter satisfies ProcessPort including new methods."""
+    adapter = StdioProcessAdapter()
+    assert isinstance(adapter, ProcessPort)
+
+
+def test_tmux_adapter_send_interrupt_calls_pane_send_keys():
+    """TmuxProcessAdapter.send_interrupt() calls pane.send_keys('C-c')."""
+    from tmux_orchestrator.process_port import TmuxProcessAdapter
+    from unittest.mock import MagicMock
+
+    mock_pane = MagicMock()
+    mock_tmux = MagicMock()
+    adapter = TmuxProcessAdapter(pane=mock_pane, tmux=mock_tmux)
+    adapter.send_interrupt()
+    mock_pane.send_keys.assert_called_once_with("C-c")
+
+
+def test_tmux_adapter_get_pane_id_returns_pane_id_attr():
+    """TmuxProcessAdapter.get_pane_id() returns pane.id from libtmux."""
+    from tmux_orchestrator.process_port import TmuxProcessAdapter
+    from unittest.mock import MagicMock
+
+    mock_pane = MagicMock()
+    mock_pane.id = "%42"
+    mock_tmux = MagicMock()
+    adapter = TmuxProcessAdapter(pane=mock_pane, tmux=mock_tmux)
+    assert adapter.get_pane_id() == "%42"
+
+
+def test_tmux_adapter_satisfies_full_process_port():
+    """TmuxProcessAdapter satisfies full ProcessPort including new methods."""
+    from tmux_orchestrator.process_port import TmuxProcessAdapter
+    from unittest.mock import MagicMock
+
+    adapter = TmuxProcessAdapter(pane=MagicMock(), tmux=MagicMock())
+    assert isinstance(adapter, ProcessPort)

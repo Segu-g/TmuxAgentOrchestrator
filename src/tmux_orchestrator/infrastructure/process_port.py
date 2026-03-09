@@ -18,7 +18,10 @@ Design references:
   https://softwarepatternslexicon.com/python/architectural-patterns/hexagonal-architecture-ports-and-adapters/
 - Naoyuki Sakai "AI Agent Architecture: Clean Architecture" (2025)
   https://dev.to/hieutran25/building-maintainable-python-applications-with-hexagonal-architecture-and-domain-driven-design-chp
-- DESIGN.md §10.13 (v0.46.0), §10.N (v1.0.17 — infrastructure/ continued)
+- "Hexagonal Architecture Design: Python Ports and Adapters for Modularity 2026"
+  https://johal.in/hexagonal-architecture-design-python-ports-and-adapters-for-modularity-2026/
+- DESIGN.md §10.13 (v0.46.0), §10.17 (v1.0.17 — infrastructure/ continued),
+  §10.34 (v1.0.34 — ProcessPort as canonical ClaudeCodeAgent interface)
 
 Module layout:
     ProcessPort         — @runtime_checkable Protocol (the Port)
@@ -37,6 +40,8 @@ Usage in ClaudeCodeAgent:
     self.process: ProcessPort = TmuxProcessAdapter(pane=raw_pane, tmux=tmux)
     self.process.send_keys(prompt)
     text = self.process.capture_pane()
+    self.process.send_interrupt()   # Ctrl-C
+    pid = self.process.pane_id     # pane identifier for logging
 """
 
 from __future__ import annotations
@@ -61,10 +66,11 @@ class ProcessPort(Protocol):
     """Abstract port for interacting with a running agent process.
 
     This protocol represents the minimal interface that ``ClaudeCodeAgent``
-    needs to drive its underlying process (send input, capture output).
+    needs to drive its underlying process (send input, capture output,
+    interrupt, and identify the pane).
 
-    Any class that provides ``send_keys(keys, enter=True)`` and
-    ``capture_pane() -> str`` is structurally compatible with this port —
+    Any class that provides ``send_keys``, ``capture_pane``, ``send_interrupt``,
+    and ``pane_id`` is structurally compatible with this port —
     no explicit inheritance required (PEP 544 structural subtyping).
 
     Adapters
@@ -72,7 +78,7 @@ class ProcessPort(Protocol):
     - ``TmuxProcessAdapter`` — wraps ``libtmux.Pane`` for production use
     - ``StdioProcessAdapter`` — in-memory fake for unit tests
 
-    Reference: DESIGN.md §10.13 (v0.46.0).
+    Reference: DESIGN.md §10.13 (v0.46.0), §10.34 (v1.0.34).
     """
 
     def send_keys(self, keys: str, enter: bool = True) -> None:
@@ -98,6 +104,28 @@ class ProcessPort(Protocol):
         """
         ...
 
+    def send_interrupt(self) -> None:
+        """Send a Ctrl-C interrupt signal to the running process.
+
+        Used to interrupt a long-running task inside the agent process.
+        Equivalent to the user pressing Ctrl-C in the terminal.
+        """
+        ...
+
+    def get_pane_id(self) -> str:
+        """Return a string identifier for this process/pane.
+
+        Used for logging and diagnostics.  For tmux adapters this is the
+        libtmux pane ID (e.g. ``%12``).  For the stdio adapter this is a
+        fixed string ``"stdio"``.
+
+        Returns
+        -------
+        str
+            Human-readable pane/process identifier.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Adapters
@@ -107,8 +135,8 @@ class ProcessPort(Protocol):
 class TmuxProcessAdapter:
     """Adapter that wraps a ``libtmux.Pane`` and its ``TmuxInterface``.
 
-    Delegates ``send_keys`` and ``capture_pane`` to the ``TmuxInterface``
-    helper methods, keeping the pane reference internal.
+    Delegates ``send_keys``, ``capture_pane``, ``send_interrupt``, and
+    ``get_pane_id`` to the underlying pane and ``TmuxInterface`` helpers.
 
     Parameters
     ----------
@@ -141,13 +169,26 @@ class TmuxProcessAdapter:
         """Capture the current pane output via ``TmuxInterface.capture_pane``."""
         return self._tmux.capture_pane(self._pane)
 
+    def send_interrupt(self) -> None:
+        """Send Ctrl-C to the tmux pane to interrupt the running process.
+
+        Calls ``libtmux.Pane.send_keys("C-c")`` directly, as the
+        ``TmuxInterface`` does not expose a dedicated interrupt method.
+        """
+        self._pane.send_keys("C-c")
+
+    def get_pane_id(self) -> str:
+        """Return the libtmux pane ID string (e.g. ``%12``)."""
+        return self._pane.id
+
 
 class StdioProcessAdapter:
     """In-memory fake process adapter for unit tests.
 
     Simulates a running agent process without requiring tmux or any external
     process.  ``send_keys()`` appends text to an internal output buffer;
-    ``capture_pane()`` returns the current buffer contents.
+    ``capture_pane()`` returns the current buffer contents;
+    ``send_interrupt()`` records a ``"C-c"`` entry in the sent keys history.
 
     Test helpers allow pre-seeding the output buffer (``set_output``,
     ``append_output``) and inspecting what was sent (``sent_keys_history``).
@@ -166,6 +207,7 @@ class StdioProcessAdapter:
 
         assert "hello.py" in adapter.sent_keys_history()[0]
         assert adapter.capture_pane().endswith("❯")
+        assert adapter.get_pane_id() == "stdio"
     """
 
     def __init__(self) -> None:
@@ -191,6 +233,18 @@ class StdioProcessAdapter:
     def capture_pane(self) -> str:
         """Return the current output buffer contents."""
         return self._output
+
+    def send_interrupt(self) -> None:
+        """Record a Ctrl-C interrupt in the sent keys history.
+
+        Does not modify the output buffer — callers can use ``append_output``
+        to simulate the effect of an interrupt if needed.
+        """
+        self._sent.append("C-c")
+
+    def get_pane_id(self) -> str:
+        """Return the fixed identifier ``"stdio"`` for this fake adapter."""
+        return "stdio"
 
     # ------------------------------------------------------------------
     # Test helpers (not part of the ProcessPort interface)
