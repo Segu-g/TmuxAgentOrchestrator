@@ -195,6 +195,19 @@ class OrchestratorConfig:
     # DESIGN.md §10.28 (v0.33.0)
     default_task_ttl: float | None = None
     ttl_reaper_poll: float = 1.0
+    # --- Episodic memory auto-record + auto-inject (MIRIX pattern, v1.0.29) ---
+    # memory_auto_record: when True, automatically append an episode to the
+    #   EpisodeStore on every explicit task-complete call.  The episode summary
+    #   is the output string submitted by the agent.
+    # memory_inject_count: number of most-recent episodes to prepend to the
+    #   task prompt at dispatch time.  0 = disabled (no injection).
+    # References:
+    #   Wang & Chen, "MIRIX", arXiv:2507.07957 (2025) — Active Retrieval pattern
+    #   "PlugMem", arXiv:2603.03296 (2025) — task-agnostic memory injection
+    #   "Design Patterns for Long-Term Memory", Serokell Blog (2025)
+    #   DESIGN.md §10.29 (v1.0.29)
+    memory_auto_record: bool = True
+    memory_inject_count: int = 5
     # --- Web API key (written to agent context files for authenticated REST calls) ---
     # When the web server is started with an API key, the key is stored here so that
     # agents can include it in REST requests (notify_parent, /progress, /send-message).
@@ -342,5 +355,7 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         checkpoint_db=data.get("checkpoint_db", "~/.tmux_orchestrator/checkpoint.db"),
         telemetry_enabled=data.get("telemetry_enabled", False),
         otlp_endpoint=data.get("otlp_endpoint", ""),
+        memory_auto_record=data.get("memory_auto_record", True),
+        memory_inject_count=data.get("memory_inject_count", 5),
         repo_root=Path(data["repo_root"]).expanduser().resolve() if data.get("repo_root") else None,
     )

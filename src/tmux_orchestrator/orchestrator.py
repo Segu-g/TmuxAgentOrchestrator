@@ -331,6 +331,13 @@ class Orchestrator:
         # (web lifespan) is responsible for calling start_agents() after the
         # HTTP server is up so that SessionStart hooks can reach the server.
         self._defer_agent_start: bool = False
+        # Episodic memory store — MIRIX-inspired auto-record + auto-inject (v1.0.29).
+        # Set by create_app() after the store is constructed so that both the
+        # web layer and the orchestrator dispatch loop share the same store instance.
+        # When None, auto-record and auto-inject are silently skipped.
+        # Reference: Wang & Chen "MIRIX" arXiv:2507.07957 (2025);
+        # DESIGN.md §10.29 (v1.0.29)
+        self._episode_store: "Any | None" = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1342,6 +1349,38 @@ class Orchestrator:
             self._task_started_prompt[task.id] = task.prompt
             # Track the Task object for potential retry on failure.
             self._active_tasks[task.id] = task
+            # --- Episode auto-inject (v1.0.29) ---
+            # If an EpisodeStore is attached and memory_inject_count > 0, prepend
+            # the agent's most-recent episodes to the task prompt so the agent has
+            # persistent memory from prior tasks without making manual API calls.
+            # Reference: Wang & Chen "MIRIX" arXiv:2507.07957 (2025) — Active
+            # Retrieval pattern; DESIGN.md §10.29 (v1.0.29).
+            inject_count = getattr(self.config, "memory_inject_count", 0)
+            if inject_count > 0 and self._episode_store is not None:
+                try:
+                    episodes = self._episode_store.list(agent.id, limit=inject_count)
+                    if episodes:
+                        lines = [
+                            f"## 過去のタスク経験 (直近{len(episodes)}件)\n"
+                        ]
+                        for i, ep in enumerate(episodes, 1):
+                            ts = ep.get("created_at", "")[:19]  # strip microseconds
+                            summary = ep.get("summary", "")
+                            outcome = ep.get("outcome", "")
+                            lines.append(f"{i}. [{ts}] {summary} | outcome: {outcome}")
+                        lines.append("\n---\n")
+                        prefix = "\n".join(lines)
+                        import dataclasses  # noqa: PLC0415
+                        task = dataclasses.replace(task, prompt=prefix + task.prompt)
+                        logger.debug(
+                            "Episode inject: prepended %d episodes to task %s for agent %s",
+                            len(episodes), task.id, agent.id,
+                        )
+                except Exception as _ep_err:  # noqa: BLE001
+                    logger.warning(
+                        "Episode inject failed for agent %s task %s: %s",
+                        agent.id, task.id, _ep_err,
+                    )
             # OTel span: record agent invocation with GenAI semconv attributes.
             if self._telemetry is not None:
                 from tmux_orchestrator.telemetry import agent_span

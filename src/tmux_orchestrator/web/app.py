@@ -1636,12 +1636,37 @@ def create_app(
             )
             return {"status": "nudged"}
 
+        # Capture task_id before handle_output() clears _current_task.
+        completed_task_id = agent._current_task.id if agent._current_task else None
         await agent.handle_output(output)
         logger.info(
             "Agent %s task-complete received via explicit signal (task_id=%s)",
             agent_id,
-            agent._current_task.id if agent._current_task else "unknown",
+            completed_task_id or "unknown",
         )
+        # --- Episode auto-record (v1.0.29) ---
+        # When memory_auto_record is enabled, automatically append an episode to
+        # the agent's JSONL store.  The output string becomes the episode summary.
+        # Reference: Wang & Chen "MIRIX" arXiv:2507.07957 (2025);
+        # DESIGN.md §10.29 (v1.0.29).
+        _auto_record = getattr(_orch_config, "memory_auto_record", True)
+        if _auto_record and output:
+            try:
+                _episode_store.append(
+                    agent_id,
+                    summary=output[:500],  # cap at 500 chars to keep episodes compact
+                    outcome="success",
+                    lessons="",
+                    task_id=completed_task_id,
+                )
+                logger.debug(
+                    "Episode auto-recorded for agent %s task %s",
+                    agent_id, completed_task_id,
+                )
+            except Exception as _ep_err:  # noqa: BLE001
+                logger.warning(
+                    "Episode auto-record failed for agent %s: %s", agent_id, _ep_err
+                )
         return {"status": "ok"}
 
     @app.post(
@@ -5170,6 +5195,10 @@ def create_app(
         root_dir=getattr(_orch_config, "mailbox_dir", "~/.tmux_orchestrator"),
         session_name=getattr(_orch_config, "session_name", "orchestrator"),
     )
+    # Share the episode store with the orchestrator dispatch loop so that
+    # episode auto-inject works without a second store instance.
+    # Reference: DESIGN.md §10.29 (v1.0.29)
+    orchestrator._episode_store = _episode_store  # type: ignore[attr-defined]
 
     @app.get(
         "/agents/{agent_id}/memory",
