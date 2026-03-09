@@ -178,3 +178,74 @@ class TestShims:
         assert hasattr(infrastructure, "PaneOutputEvent")
         assert hasattr(infrastructure, "POLL_INTERVAL")
         assert hasattr(infrastructure, "pre_trust_worktree")
+
+    def test_worktree_shim_re_exports_worktree_manager(self) -> None:
+        """worktree shim exposes WorktreeManager."""
+        import tmux_orchestrator.worktree as shim
+        assert hasattr(shim, "WorktreeManager")
+
+    def test_process_port_shim_re_exports_all_public_names(self) -> None:
+        """process_port shim exposes ProcessPort, TmuxProcessAdapter, StdioProcessAdapter."""
+        import tmux_orchestrator.process_port as shim
+        assert hasattr(shim, "ProcessPort")
+        assert hasattr(shim, "TmuxProcessAdapter")
+        assert hasattr(shim, "StdioProcessAdapter")
+
+    def test_messaging_shim_re_exports_mailbox(self) -> None:
+        """messaging shim exposes Mailbox."""
+        import tmux_orchestrator.messaging as shim
+        assert hasattr(shim, "Mailbox")
+
+    def test_infrastructure_init_re_exports_v1017_additions(self) -> None:
+        """infrastructure.__init__ re-exports WorktreeManager, ProcessPort, Mailbox (v1.0.17)."""
+        from tmux_orchestrator import infrastructure
+        assert hasattr(infrastructure, "WorktreeManager")
+        assert hasattr(infrastructure, "ProcessPort")
+        assert hasattr(infrastructure, "TmuxProcessAdapter")
+        assert hasattr(infrastructure, "StdioProcessAdapter")
+        assert hasattr(infrastructure, "Mailbox")
+
+
+# ---------------------------------------------------------------------------
+# Tests: canonical infrastructure module locations (v1.0.17)
+# ---------------------------------------------------------------------------
+
+class TestInfrastructureCanonicalModulesV1017:
+    def test_infrastructure_worktree_exists(self) -> None:
+        """infrastructure/worktree.py must exist (canonical WorktreeManager home)."""
+        worktree_py = SRC / "infrastructure" / "worktree.py"
+        assert worktree_py.is_file(), f"infrastructure/worktree.py not found at {worktree_py}"
+
+    def test_infrastructure_process_port_exists(self) -> None:
+        """infrastructure/process_port.py must exist (canonical ProcessPort home)."""
+        pp_py = SRC / "infrastructure" / "process_port.py"
+        assert pp_py.is_file(), f"infrastructure/process_port.py not found at {pp_py}"
+
+    def test_infrastructure_messaging_exists(self) -> None:
+        """infrastructure/messaging.py must exist (canonical Mailbox home)."""
+        msg_py = SRC / "infrastructure" / "messaging.py"
+        assert msg_py.is_file(), f"infrastructure/messaging.py not found at {msg_py}"
+
+    def test_worktree_manager_canonical_import(self) -> None:
+        """WorktreeManager is importable from both canonical and shim paths."""
+        from tmux_orchestrator.infrastructure.worktree import WorktreeManager as W1
+        from tmux_orchestrator.worktree import WorktreeManager as W2
+        assert W1 is W2, "shim re-export must be the same class as the canonical one"
+
+    def test_process_port_canonical_import(self) -> None:
+        """ProcessPort is importable from both canonical and shim paths."""
+        from tmux_orchestrator.infrastructure.process_port import ProcessPort as P1
+        from tmux_orchestrator.process_port import ProcessPort as P2
+        assert P1 is P2, "shim re-export must be the same class as the canonical one"
+
+    def test_stdio_process_adapter_canonical_import(self) -> None:
+        """StdioProcessAdapter is importable from both canonical and shim paths."""
+        from tmux_orchestrator.infrastructure.process_port import StdioProcessAdapter as A1
+        from tmux_orchestrator.process_port import StdioProcessAdapter as A2
+        assert A1 is A2, "shim re-export must be the same class as the canonical one"
+
+    def test_mailbox_canonical_import(self) -> None:
+        """Mailbox is importable from both canonical and shim paths."""
+        from tmux_orchestrator.infrastructure.messaging import Mailbox as M1
+        from tmux_orchestrator.messaging import Mailbox as M2
+        assert M1 is M2, "shim re-export must be the same class as the canonical one"
