@@ -5268,3 +5268,126 @@ Decision Outcome / Consequences / Pros and Cons of the Options
 ### Step 2 — 実装
 
 
+
+## §10.74 — v1.1.42: Delphi 型合意形成ワークフロー — デモ実証 (POST /workflows/delphi)
+
+### Step 0 — 選択理由
+
+**選択**: v1.1.42 — `POST /workflows/delphi` デモ実証
+
+**選択理由**:
+1. **§11 中優先度・デモ未実証**: §11「Delphi 型合意形成デモ — "マイクロサービス vs モノリス"」として明示的に記録済み。`POST /workflows/delphi` エンドポイント自体は v1.0.23 (§10.22) で実装済みだが、5ペルソナ・3ラウンドのフル機能デモが未実施。
+2. **§10.73 (AgentMesh) の完了後**: AgentMesh パイプラインのデモが完了し、今度は並列ペルソナ → 集約 → 複数ラウンドパターンを実証する最適タイミング。
+3. **研究的裏付けが強い**: DelphiAgent (ScienceDirect 2025)、RT-AID (ScienceDirect 2025)、Du et al. ICML 2024 がマルチラウンド合意形成の有効性を実証。
+
+**選択しなかった候補**:
+- `POST /workflows/redblue` 追加デモ: Delphi の方が §11 での優先度が高い。
+- ワークフロー出力フォーマット標準化: 実装コストが高く、個別ワークフローのデモを先に揃えるべき。
+
+### Step 1 — Research
+
+**Query 1**: "Delphi method consensus building multi-round anonymous expert aggregation structured forecasting"
+
+1. **Wikipedia, "Delphi method"**,
+   https://en.wikipedia.org/wiki/Delphi_method —
+   Delphi 法の定義: 複数の専門家が匿名で回答し、各ラウンド後にファシリテーターが匿名要約をフィードバック。
+   核心原則: 匿名性・反復・制御されたフィードバック。これらにより集団バイアスを低減する。
+   多ラウンド構造: 各ラウンドで意見が絞り込まれ、収束が進む。
+
+2. **SurveyLegend, "What is the Delphi Method and How To Use It"**,
+   https://www.surveylegend.com/research/what-is-the-delphi-method/ —
+   合意形成プロセスの詳細: 各ラウンドの後、ファシリテーターは平均レーティングや範囲などの統計とテーマ要約を
+   フィードバックし、専門家はグループフィードバックに基づき意見を修正する。十分な合意が得られるまで繰り返す。
+
+3. **Welphi, "Delphi Model Consensus Survey"**,
+   https://www.welphi.com/delphi-model-consensus-survey/ —
+   Delphi の実践的設計パターン: 匿名性確保のための手順、ラウンド間のフィードバック方法、収束判定基準。
+
+**Query 2**: "Delphi technique AI agents multi-round structured consensus LLM simulation"
+
+4. **arXiv:2502.21092, "An LLM-based Delphi Study to Predict GenAI Evolution"** (2025),
+   https://arxiv.org/html/2502.21092v1 —
+   LLM による Delphi 法の自動化を実証。組織エージェント（ファシリテーター役）と回答エージェント（専門家役）の
+   2種類のエージェント構成。マルチラウンド収束プロセスを LLM で再現。
+
+5. **arXiv:2508.09349, "The Human–AI Hybrid Delphi Model"** (2025),
+   https://arxiv.org/html/2508.09349v1 —
+   人間-AI ハイブリッド Delphi モデル。AI エージェントが専門家の役割を担い、匿名性を維持しながら
+   複数ラウンドで意見を洗練させる構造化フレームワーク。
+
+6. **ScienceDirect, "DelphiAgent: A trustworthy multi-agent verification framework"** (2025),
+   https://www.sciencedirect.com/science/article/abs/pii/S0306457325001827 —
+   複数の LLM エージェントが Delphi 法を模倣し、反復フィードバックと統合を通じて合意を形成。
+   各エージェントが独立して判断し、LLM エージェントが人間の専門家パネルよりも高い合意率を達成 (93.3% vs 81.5%)。
+
+**Query 3**: "multi-agent deliberation consensus convergence workflow LLM personas rounds"
+
+7. **arXiv:2310.20151, "Multi-Agent Consensus Seeking via Large Language Models"** (2024),
+   https://arxiv.org/html/2310.20151v2 —
+   LLM によるマルチエージェント合意探索。コンセンサス求解行動はラウンドを重ねるほど収束し、
+   7ラウンド討論で平均収束値 0.892 を達成 (σ = 0.074)。マルチラウンドの価値を定量的に実証。
+
+8. **Medium, "Patterns for Democratic Multi‑Agent AI: Debate-Based Consensus"** (2025),
+   https://medium.com/@edoardo.schepis/patterns-for-democratic-multi-agent-ai-debate-based-consensus-part-2-implementation-2348bf28f6a6 —
+   民主的マルチエージェント AI の実装パターン。モデレーターがコンセンサスビルダーとして機能し、
+   エージェント間の収束を促進する役割の重要性を説明。
+
+**設計結論**:
+
+- 既存の `POST /workflows/delphi` 実装 (v1.0.23) を活用してフル機能デモを実施。
+- 3ペルソナエージェント (backend_engineer, devops_lead, product_manager) × 2ラウンド構成。
+- 各ラウンドの `delphi_round_{n}.md` 生成と最終 `consensus.md` の実証が目標。
+- スクラッチパッド Blackboard パターンで各エージェントの出力を集約。
+
+### Step 2 — 実装
+
+v1.0.23 で `POST /workflows/delphi` は完全実装済み。40テストが全合格。
+本イテレーションはデモ実証に注力。
+
+実装ファイル:
+- `src/tmux_orchestrator/web/routers/workflows.py` — `submit_delphi_workflow()` (v1.0.23実装)
+- `src/tmux_orchestrator/web/schemas.py` — `DelphiWorkflowSubmit` (v1.0.23実装)
+- `tests/test_workflow_delphi.py` — 40テスト (v1.0.23実装)
+
+### Step 3 — E2E デモ実行結果
+
+**デモ構成**:
+- 5エージェント: delphi-persona-1/2/3 (tag: delphi_persona) + delphi-moderator + delphi-consensus (tag: delphi_moderator)
+- トピック: "SQLite vs Redis for the TmuxAgentOrchestrator scratchpad backend"
+- ペルソナ: backend_engineer, devops_lead, product_manager (3名)
+- ラウンド数: 2
+
+**スクラッチパッドサイズ**:
+
+| キー | サイズ |
+|-----|------|
+| `delphi_7e38589f_r1_backend_engineer` | 2360 chars |
+| `delphi_7e38589f_r1_devops_lead` | 2129 chars |
+| `delphi_7e38589f_r1_product_manager` | 2201 chars |
+| `delphi_7e38589f_r1_moderator` | 5964 chars |
+| `delphi_7e38589f_r2_backend_engineer` | 2249 chars |
+| `delphi_7e38589f_r2_devops_lead` | 2359 chars |
+| `delphi_7e38589f_r2_product_manager` | 2368 chars |
+| `delphi_7e38589f_r2_moderator` | 5383 chars |
+| `delphi_7e38589f_consensus` | 7513 chars |
+
+**consensus.md 冒頭**:
+```
+# Delphi Consensus: SQLite vs Redis for TmuxAgentOrchestrator Scratchpad Backend
+Recommended Decision: SQLite with WAL mode for current scale.
+```
+
+**結果**: **48/48 PASS** (初回実行で全合格)
+
+### Step 4 — フィードバック
+
+**デバッグ事項**: なし。初回実行で全チェック合格。
+
+**マルチエージェント協調パターン**:
+- Round 1: 3ペルソナが並列実行 (no depends_on)
+- Moderator: depends_on all Round 1 experts
+- Round 2: 3ペルソナが並列実行 (depends_on moderator_r1)
+- Consensus: depends_on moderator_r2
+- 匿名性確保: 各エージェントは他エージェントの意見をモデレーター要約経由でのみ参照
+
+**次候補**: DECISION.md 標準フォーマット規約 (§11 低優先度)、または追加ワークフロー実証。
