@@ -5561,7 +5561,7 @@ Recommended Decision: SQLite with WAL mode for current scale.
 
 | 課題 | 概要 |
 |---|---|
-| **ワークフロー内並列タスク記述 (低)** | `parallel:` ブロックを糖衣構文として追加。現状は `depends_on` を共通の前フェーズに向けることで暗黙的に並列実行できるため、新機能というより可読性向上。`loop:` との組み合わせ時に有用かもしれない程度。 |
+| **ワークフロー構造ブロック: `sequence:` / `parallel:`** | `PhaseItem = PhaseSpec | SequenceBlock | ParallelBlock | LoopBlock` の統一再帰型に拡張。`parallel:` 内に `sequence:` を入れることで「複数の順次ストリームを並列実行」を表現できる。`loop:` 内に `parallel:` も可。トップレベルの `phases:` はフラットな `sequence:` と等価なので後方互換。 |
 | **Worktree ↔ branch sync の UI 改善** | `POST /agents/{id}/sync` は実装済み (v1.1.39)。完了後に worktree を自動削除するオプション、merge conflict 時の通知改善。 |
 | **タスク優先度の動的更新** | `PATCH /tasks/{id}/priority` — キューに積まれたタスクの優先度をランタイムに変更。 |
 | **Codified Context + PairCoder デモ** | `.claude/specs/` に規約 YAML を配置、複数セッションにわたり規約違反ゼロを実証。 |
@@ -5569,3 +5569,62 @@ Recommended Decision: SQLite with WAL mode for current scale.
 ### バージョン方針
 - v1.1.44 (ループワークフロー) を最終 v1.1.x リリースとする
 - v1.1.44 完了後、次の実装から **v1.2.0** に移行する
+
+**実装ファイル**:
+- `src/tmux_orchestrator/domain/phase_strategy.py`: `LoopSpec`, `LoopBlock`, `PhaseItem` 追加
+- `src/tmux_orchestrator/phase_executor.py`: `expand_loop_iter`, `_expand_all_loop_iters`, `expand_phase_items_with_status`, `is_until_condition_met`, `_substitute_iter`, `_substitute_iter_in_phase`, `_iter_prefix_header`, `_inject_header_into_phase` 追加
+- `src/tmux_orchestrator/web/schemas.py`: `LoopSpecModel`, `LoopBlockModel`, `PhaseItemModel`, `PdcaWorkflowSubmit` 追加; `WorkflowSubmit.phases: list[Any]` に変更
+- `src/tmux_orchestrator/web/routers/workflows.py`: LoopBlock 検出・変換ロジック + `POST /workflows/pdca` エンドポイント追加
+- `tests/test_workflow_loop.py`: 49 新規テスト
+
+**設計決定**:
+- 静的事前展開 (静的DAG): `max` 回分のイテレーションを投入時に全展開。動的ディスパッチは WorkflowManager フックが必要 (将来課題)。
+- タスク local_id に `{loop_name}_i{iter}_` プレフィックス付与: 同名フェーズが複数イテレーションに現れた場合の DAG 衝突防止。
+- `until` 条件はエージェントプロンプトに埋め込み (エージェントがスクラッチパッドに条件信号を書く)。サーバー側ランタイム短絡は将来課題。
+
+### Step 3 — E2E デモ結果
+
+**デモ**: PDCA サイクルで Python バブルソートを段階的改良
+
+```
+Workflow ID: 5eeb9aea-823a-481e-9468-2a468911935e
+Scratchpad prefix: pdca_e66e36ae
+Max cycles: 2
+Task count: 8 (2 cycles × 4 phases)
+Workflow status: complete
+quality_approved: yes
+```
+
+**スクラッチパッドキー** (全 9 キー):
+```
+pdca_e66e36ae_plan_iter1: 1637 chars
+pdca_e66e36ae_do_iter1: 255 chars
+pdca_e66e36ae_check_iter1: 341 chars
+pdca_e66e36ae_act_iter1: 434 chars
+pdca_e66e36ae_plan_iter2: 2735 chars
+pdca_e66e36ae_do_iter2: 266 chars
+pdca_e66e36ae_check_iter2: 218 chars
+pdca_e66e36ae_act_iter2: 516 chars
+quality_approved: "yes"
+```
+
+**結果**: **26/26 PASS** (初回実行で全合格)
+
+### Step 4 — フィードバック
+
+**デバッグ事項**: なし。初回実行で全チェック合格。
+
+**マルチエージェント協調パターン**:
+- 4 エージェント: pdca-planner, pdca-doer, pdca-checker, pdca-actor
+- 各フェーズが前フェーズの出力に依存 (依存チェーン)
+- 2 イテレーション × 4 フェーズ = 8 タスク
+- `quality_approved=yes` がスクラッチパッドに書き込まれてループ完了信号
+
+**既知の制限 (Known Limitation)**:
+- `until` 条件のサーバー側ランタイム短絡なし: 全イテレーション事前投入。cycle 1 で quality_approved=yes が書かれても cycle 2 は実行される。
+- 動的早期終了には WorkflowManager フックが必要 (次候補)。
+
+**次候補**:
+- `until` 条件のランタイム評価 (WorkflowManager フック): 条件成立時に残イテレーションをキャンセル
+- ワークフローテンプレート YAML に LoopBlock 構文を追加
+- per-iteration フェーズステータスダッシュボード表示
