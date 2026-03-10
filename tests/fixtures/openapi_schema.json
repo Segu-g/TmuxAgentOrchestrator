@@ -1344,10 +1344,17 @@
         "type": "object"
       },
       "RedBlueWorkflowSubmit": {
-        "description": "Request body for POST /workflows/redblue \u2014 Red Team / Blue Team adversarial evaluation.\n\nSubmits a 3-agent adversarial evaluation DAG:\n\n  1. ``blue_team``: constructs a design, implementation plan, or proposal for\n     *topic* and stores it in ``{scratchpad_prefix}_blue_design``.\n  2. ``red_team``: reads the blue-team output and attacks it from an adversarial\n     perspective \u2014 identifying vulnerabilities, flaws, and risks.  Stores\n     findings in ``{scratchpad_prefix}_red_findings``.\n  3. ``arbiter``: reads both artifacts and produces a balanced risk assessment\n     report with prioritised recommendations.  Stores result in\n     ``{scratchpad_prefix}_risk_report``.\n\nDesign references:\n- Harrasse et al. \"Debate, Deliberate, Decide (D3)\" arXiv:2410.04663 (2026):\n  adversarial multi-agent evaluation reduces positional/verbosity bias.\n- \"Red-Teaming LLM Multi-Agent Systems via Communication Attacks\" ACL 2025\n  (arXiv:2502.14847): structured adversarial evaluation improves system robustness.\n- Farzulla, \"Autonomous Red Team and Blue Team AI\" DISSENSUS DAI-2513 (2025):\n  pairing adversarial + defensive agents produces realistic security assessments.\n- DESIGN.md \u00a710.23 (v1.0.24)",
+        "description": "Request body for POST /workflows/redblue \u2014 Red Team / Blue Team security review.\n\nSubmits a 3-agent sequential security review DAG:\n\n  1. ``implement`` (blue-team): implements *feature_description* in *language*,\n     stores code in ``{scratchpad_prefix}_implementation``.\n  2. ``attack`` (red-team): reads implementation, identifies vulnerabilities based\n     on *security_focus* list (OWASP categories, severity, line references),\n     stores findings in ``{scratchpad_prefix}_vulnerabilities``.\n  3. ``assess`` (arbiter): reads both artifacts, produces CVSS-style risk assessment\n     with overall risk level (LOW/MEDIUM/HIGH/CRITICAL),\n     stores report in ``{scratchpad_prefix}_risk_report``.\n\nDesign references:\n- arXiv:2601.19138, \"AgenticSCR: Autonomous Agentic Secure Code Review\" (2025):\n  agentic multi-iteration code review with contextual awareness and adaptability.\n- \"Red-Teaming LLM Multi-Agent Systems via Communication Attacks\" ACL 2025\n  (arXiv:2502.14847): structured adversarial evaluation improves system robustness.\n- OWASP Top 10 for LLMs 2025: Prompt Injection, Excessive Agency, System Prompt\n  Leakage \u2014 structured security_focus list maps directly to OWASP categories.\n- DESIGN.md \u00a710.75 (v1.1.43)",
         "properties": {
+          "agent_timeout": {
+            "default": 300,
+            "title": "Agent Timeout",
+            "type": "integer"
+          },
           "arbiter_tags": {
-            "default": [],
+            "default": [
+              "redblue_arbiter"
+            ],
             "items": {
               "type": "string"
             },
@@ -1355,15 +1362,28 @@
             "type": "array"
           },
           "blue_tags": {
-            "default": [],
+            "default": [
+              "redblue_blue"
+            ],
             "items": {
               "type": "string"
             },
             "title": "Blue Tags",
             "type": "array"
           },
+          "feature_description": {
+            "title": "Feature Description",
+            "type": "string"
+          },
+          "language": {
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
           "red_tags": {
-            "default": [],
+            "default": [
+              "redblue_red"
+            ],
             "items": {
               "type": "string"
             },
@@ -1381,13 +1401,26 @@
             ],
             "title": "Reply To"
           },
-          "topic": {
-            "title": "Topic",
+          "scratchpad_prefix": {
+            "default": "redblue",
+            "title": "Scratchpad Prefix",
             "type": "string"
+          },
+          "security_focus": {
+            "default": [
+              "input_validation",
+              "authentication",
+              "injection"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "title": "Security Focus",
+            "type": "array"
           }
         },
         "required": [
-          "topic"
+          "feature_description"
         ],
         "title": "RedBlueWorkflowSubmit",
         "type": "object"
@@ -5239,7 +5272,7 @@
     },
     "/workflows/redblue": {
       "post": {
-        "description": "Submit a 3-agent adversarial evaluation Workflow DAG.\n\nPipeline (strictly sequential):\n\n  1. **blue_team**: designs or implements a solution for *topic*, stores\n     result in ``{scratchpad_prefix}_blue_design``.\n  2. **red_team**: reads blue_team output and attacks it \u2014 lists\n     vulnerabilities, flaws, and risks; stores result in\n     ``{scratchpad_prefix}_red_findings``.\n  3. **arbiter**: reads both artifacts, produces a balanced risk\n     assessment with prioritised recommendations; stores result in\n     ``{scratchpad_prefix}_risk_report``.\n\nReturns:\n- ``workflow_id``: workflow run UUID for status polling\n- ``name``: human-readable name (``redblue/<topic>``)\n- ``task_ids``: dict with keys ``blue_team``, ``red_team``, ``arbiter``\n- ``scratchpad_prefix``: scratchpad namespace for this run\n\nDesign references:\n- Harrasse et al. \"D3\" arXiv:2410.04663 (2026): adversarial multi-agent\n  evaluation reduces bias and improves agreement with human judgments.\n- \"Red-Teaming LLM MAS via Communication Attacks\" ACL 2025 arXiv:2502.14847.\n- Farzulla \"Autonomous Red Team and Blue Team AI\" DAI-2513 (2025).\n- DESIGN.md \u00a710.23 (v1.0.24)",
+        "description": "Submit a 3-agent sequential security review Workflow DAG.\n\nPipeline (strictly sequential):\n\n  1. **implement** (blue-team): implements *feature_description* in *language*,\n     stores code in ``{scratchpad_prefix}_implementation``.\n  2. **attack** (red-team): reads implementation, identifies vulnerabilities\n     based on *security_focus* list (OWASP categories, severity, line refs),\n     stores findings in ``{scratchpad_prefix}_vulnerabilities``.\n  3. **assess** (arbiter): reads both artifacts, produces CVSS-style risk\n     assessment with overall risk level (LOW/MEDIUM/HIGH/CRITICAL),\n     stores report in ``{scratchpad_prefix}_risk_report``.\n\nReturns:\n- ``workflow_id``: workflow run UUID for status polling\n- ``name``: human-readable name (``redblue/<feature_description>``)\n- ``task_ids``: dict with keys ``implement``, ``attack``, ``assess``\n- ``scratchpad_prefix``: scratchpad namespace for this run\n\nDesign references:\n- arXiv:2601.19138, \"AgenticSCR: Autonomous Agentic Secure Code Review\" (2025):\n  agentic multi-iteration code review with contextual awareness.\n- \"Red-Teaming LLM MAS via Communication Attacks\" ACL 2025 arXiv:2502.14847.\n- OWASP Top 10 for LLMs 2025: structured security_focus maps to OWASP categories.\n- DESIGN.md \u00a710.75 (v1.1.43)",
         "operationId": "submit_redblue_workflow_workflows_redblue_post",
         "requestBody": {
           "content": {
@@ -5275,7 +5308,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Submit a Red Team / Blue Team adversarial evaluation workflow"
+        "summary": "Submit a Red Team / Blue Team security review workflow"
       }
     },
     "/workflows/socratic": {

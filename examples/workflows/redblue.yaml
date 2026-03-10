@@ -1,33 +1,49 @@
-# Red Team / Blue Team Workflow Template
-# ========================================
-# Adversarial evaluation: Blue Team design → Red Team attack → Arbiter report.
-#
-# Pipeline:
-#   blue_team → red_team → arbiter
+# Red Team / Blue Team Security Review Workflow Template
+# ======================================================
+# Sequential security review pipeline:
+#   implement (blue-team) → attack (red-team) → assess (arbiter)
 #
 # Scratchpad keys (written by agents):
-#   {scratchpad_prefix}_blue_design  — blue-team's design/proposal
-#   {scratchpad_prefix}_red_findings — red-team's vulnerabilities list
-#   {scratchpad_prefix}_risk_report  — arbiter's risk assessment report
+#   {scratchpad_prefix}_{uuid}_implementation  — blue-team's implementation code
+#   {scratchpad_prefix}_{uuid}_vulnerabilities — red-team's vulnerability findings
+#   {scratchpad_prefix}_{uuid}_risk_report     — arbiter's risk assessment report
 #
 # Endpoint: POST /workflows/redblue
-# Reference: Farzulla DISSENSUS DAI-2513 (2025); arXiv:2502.14847 ACL 2025
+# Reference: arXiv:2601.19138 AgenticSCR (2025); arXiv:2502.14847 ACL 2025
+# DESIGN.md §10.75 (v1.1.43)
 
 workflow:
   endpoint: /workflows/redblue
 
 # --- Required fields ---
 
-# Topic to evaluate adversarially
-# (e.g. "authentication system design using JWT tokens")
-topic: "Authentication system design using JWT tokens and refresh token rotation"
+# Feature to implement and security-review
+# (e.g. "REST endpoint for user authentication with JWT tokens")
+feature_description: "Implement a simple REST API endpoint that accepts a username and password, validates against a hardcoded list, and returns a JWT token on success."
 
 # --- Optional fields ---
 
-# Agent capability routing (empty = any available agent)
-blue_tags: []
-red_tags: []
-arbiter_tags: []
+# Implementation language (default: python)
+language: "python"
+
+# Security focus areas for the red-team attack phase
+# Maps to OWASP vulnerability categories
+security_focus:
+  - "input_validation"
+  - "authentication"
+  - "rate_limiting"
+  - "injection"
+
+# Scratchpad namespace prefix (default: redblue)
+scratchpad_prefix: "redblue"
+
+# Per-task timeout in seconds (default: 300)
+agent_timeout: 300
+
+# Agent capability routing (empty = use defaults: redblue_blue/redblue_red/redblue_arbiter)
+blue_tags: ["redblue_blue"]
+red_tags: ["redblue_red"]
+arbiter_tags: ["redblue_arbiter"]
 
 # If set, the arbiter's RESULT is delivered to this agent's mailbox
 reply_to: null
@@ -37,5 +53,8 @@ reply_to: null
 #   -H "Content-Type: application/json" \
 #   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
 #   -d '{
-#     "topic": "Authentication system design using JWT tokens and refresh token rotation"
+#     "feature_description": "Implement a REST endpoint for user authentication with JWT tokens",
+#     "language": "python",
+#     "security_focus": ["input_validation", "authentication", "injection"],
+#     "agent_timeout": 300
 #   }'

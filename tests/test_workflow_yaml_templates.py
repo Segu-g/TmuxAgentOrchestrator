@@ -168,10 +168,10 @@ class TestTemplateSchemaValidation:
             "delphi.yaml: experts must be between 2 and 5"
         )
 
-    def test_redblue_topic_field(self):
+    def test_redblue_feature_description_field(self):
         data = load_template("redblue.yaml")
         instance = RedBlueWorkflowSubmit.model_validate(data)
-        assert instance.topic, "redblue.yaml: topic must not be empty"
+        assert instance.feature_description, "redblue.yaml: feature_description must not be empty"
 
     def test_socratic_topic_field(self):
         data = load_template("socratic.yaml")

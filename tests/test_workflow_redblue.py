@@ -1,20 +1,20 @@
-"""Tests for POST /workflows/redblue — Red Team / Blue Team adversarial evaluation.
+"""Tests for POST /workflows/redblue — Red Team / Blue Team security review workflow.
 
 The Red-Blue workflow builds a strictly sequential 3-agent DAG:
 
-  blue_team ──→ red_team ──→ arbiter
+  implement (blue-team) ──→ attack (red-team) ──→ assess (arbiter)
 
-- blue_team:  designs or implements a solution for *topic*
-- red_team:   attacks the blue-team output, finding vulnerabilities and risks
-- arbiter:    produces a balanced risk assessment and prioritised recommendations
+- implement:  blue-team agent implements the feature_description in language
+- attack:     red-team agent identifies vulnerabilities based on security_focus list
+- assess:     arbiter produces a CVSS-style risk assessment report
 
 Design references:
-- Harrasse et al. "Debate, Deliberate, Decide (D3)" arXiv:2410.04663 (2026):
-  adversarial multi-agent evaluation reduces positional/verbosity bias.
+- arXiv:2601.19138, "AgenticSCR: Autonomous Agentic Secure Code Review" (2025):
+  agentic multi-iteration secure code review with contextual awareness.
 - "Red-Teaming LLM Multi-Agent Systems via Communication Attacks" ACL 2025
   (arXiv:2502.14847): structured adversarial evaluation improves robustness.
-- Farzulla "Autonomous Red Team and Blue Team AI" DISSENSUS DAI-2513 (2025).
-- DESIGN.md §10.23 (v1.0.24)
+- OWASP Top 10 for LLMs 2025: security_focus maps to OWASP vulnerability categories.
+- DESIGN.md §10.75 (v1.1.43)
 """
 
 from __future__ import annotations
@@ -98,45 +98,87 @@ def auth_headers() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_redblue_submit_empty_topic_rejected():
-    """Empty topic should raise ValueError."""
+def test_redblue_submit_empty_feature_description_rejected():
+    """Empty feature_description should raise ValueError."""
     with pytest.raises(Exception):
-        RedBlueWorkflowSubmit(topic="")
+        RedBlueWorkflowSubmit(feature_description="")
 
 
-def test_redblue_submit_whitespace_topic_rejected():
-    """Whitespace-only topic should raise ValueError."""
+def test_redblue_submit_whitespace_feature_description_rejected():
+    """Whitespace-only feature_description should raise ValueError."""
     with pytest.raises(Exception):
-        RedBlueWorkflowSubmit(topic="   ")
+        RedBlueWorkflowSubmit(feature_description="   ")
 
 
 def test_redblue_submit_valid_minimal():
     """Minimal valid request should construct with defaults."""
-    obj = RedBlueWorkflowSubmit(topic="FastAPI endpoint authentication design")
-    assert obj.topic == "FastAPI endpoint authentication design"
-    assert obj.blue_tags == []
-    assert obj.red_tags == []
-    assert obj.arbiter_tags == []
+    obj = RedBlueWorkflowSubmit(
+        feature_description="REST endpoint for user authentication with JWT tokens"
+    )
+    assert obj.feature_description == "REST endpoint for user authentication with JWT tokens"
+    assert obj.language == "python"
+    assert obj.security_focus == ["input_validation", "authentication", "injection"]
+    assert obj.scratchpad_prefix == "redblue"
+    assert obj.agent_timeout == 300
     assert obj.reply_to is None
 
 
-def test_redblue_submit_with_tags():
-    """Tags should be accepted on all three roles."""
+def test_redblue_submit_default_language_is_python():
+    """Default language should be 'python'."""
+    obj = RedBlueWorkflowSubmit(feature_description="some feature")
+    assert obj.language == "python"
+
+
+def test_redblue_submit_custom_language():
+    """Custom language should be accepted."""
+    obj = RedBlueWorkflowSubmit(feature_description="some feature", language="go")
+    assert obj.language == "go"
+
+
+def test_redblue_submit_custom_security_focus():
+    """Custom security_focus list should be accepted."""
     obj = RedBlueWorkflowSubmit(
-        topic="Database schema design",
-        blue_tags=["architect"],
-        red_tags=["security"],
-        arbiter_tags=["senior"],
+        feature_description="feature",
+        security_focus=["sql_injection", "xss", "csrf"],
     )
-    assert obj.blue_tags == ["architect"]
-    assert obj.red_tags == ["security"]
-    assert obj.arbiter_tags == ["senior"]
+    assert obj.security_focus == ["sql_injection", "xss", "csrf"]
+
+
+def test_redblue_submit_default_tags():
+    """Default tags should be redblue_blue, redblue_red, redblue_arbiter."""
+    obj = RedBlueWorkflowSubmit(feature_description="feature")
+    assert obj.blue_tags == ["redblue_blue"]
+    assert obj.red_tags == ["redblue_red"]
+    assert obj.arbiter_tags == ["redblue_arbiter"]
+
+
+def test_redblue_submit_custom_tags():
+    """Custom tags should override defaults."""
+    obj = RedBlueWorkflowSubmit(
+        feature_description="feature",
+        blue_tags=["custom_blue"],
+        red_tags=["custom_red"],
+        arbiter_tags=["custom_arbiter"],
+    )
+    assert obj.blue_tags == ["custom_blue"]
+    assert obj.red_tags == ["custom_red"]
+    assert obj.arbiter_tags == ["custom_arbiter"]
 
 
 def test_redblue_submit_with_reply_to():
     """reply_to field should be accepted."""
-    obj = RedBlueWorkflowSubmit(topic="API design", reply_to="director-1")
+    obj = RedBlueWorkflowSubmit(
+        feature_description="API design", reply_to="director-1"
+    )
     assert obj.reply_to == "director-1"
+
+
+def test_redblue_submit_agent_timeout():
+    """agent_timeout should be accepted."""
+    obj = RedBlueWorkflowSubmit(
+        feature_description="feature", agent_timeout=900
+    )
+    assert obj.agent_timeout == 900
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +190,7 @@ def test_redblue_workflow_requires_auth(client):
     """Endpoint should return 401 without API key."""
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": "FastAPI endpoint design"},
+        json={"feature_description": "JWT authentication endpoint"},
     )
     assert resp.status_code == 401
 
@@ -157,24 +199,24 @@ def test_redblue_workflow_wrong_api_key(client):
     """Endpoint should return 401 with wrong API key."""
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": "FastAPI endpoint design"},
+        json={"feature_description": "JWT authentication endpoint"},
         headers={"X-API-Key": "wrong-key"},
     )
     assert resp.status_code == 401
 
 
-def test_redblue_workflow_empty_topic_returns_422(client):
-    """Empty topic should return 422 Unprocessable Entity."""
+def test_redblue_workflow_empty_feature_description_returns_422(client):
+    """Empty feature_description should return 422 Unprocessable Entity."""
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": ""},
+        json={"feature_description": ""},
         headers=auth_headers(),
     )
     assert resp.status_code == 422
 
 
-def test_redblue_workflow_missing_topic_returns_422(client):
-    """Missing topic field should return 422."""
+def test_redblue_workflow_missing_feature_description_returns_422(client):
+    """Missing feature_description field should return 422."""
     resp = client.post(
         "/workflows/redblue",
         json={},
@@ -187,7 +229,7 @@ def test_redblue_workflow_returns_200(client):
     """Valid request should return 200."""
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": "FastAPI endpoint authentication design"},
+        json={"feature_description": "REST endpoint for user authentication with JWT tokens"},
         headers=auth_headers(),
     )
     assert resp.status_code == 200
@@ -202,7 +244,7 @@ def test_redblue_workflow_response_fields(client):
     """Response must contain workflow_id, name, task_ids, scratchpad_prefix."""
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": "API rate limiting design"},
+        json={"feature_description": "API rate limiting endpoint"},
         headers=auth_headers(),
     )
     assert resp.status_code == 200
@@ -213,37 +255,26 @@ def test_redblue_workflow_response_fields(client):
     assert "scratchpad_prefix" in data
 
 
-def test_redblue_workflow_name_format(client):
-    """Workflow name should be 'redblue/<topic>'."""
+def test_redblue_workflow_phase_names(client):
+    """Workflow must create exactly 3 phases: implement, attack, assess."""
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": "API rate limiting design"},
-        headers=auth_headers(),
-    )
-    data = resp.json()
-    assert data["name"] == "redblue/API rate limiting design"
-
-
-def test_redblue_workflow_task_count(client):
-    """Workflow must create exactly 3 tasks: blue_team, red_team, arbiter."""
-    resp = client.post(
-        "/workflows/redblue",
-        json={"topic": "user authentication"},
+        json={"feature_description": "user authentication"},
         headers=auth_headers(),
     )
     data = resp.json()
     task_ids = data["task_ids"]
     assert len(task_ids) == 3
-    assert "blue_team" in task_ids
-    assert "red_team" in task_ids
-    assert "arbiter" in task_ids
+    assert "implement" in task_ids
+    assert "attack" in task_ids
+    assert "assess" in task_ids
 
 
 def test_redblue_workflow_task_ids_are_strings(client):
     """All task IDs should be non-empty strings."""
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": "input validation design"},
+        json={"feature_description": "input validation middleware"},
         headers=auth_headers(),
     )
     data = resp.json()
@@ -256,7 +287,7 @@ def test_redblue_workflow_task_ids_distinct(client):
     """All 3 task IDs must be distinct."""
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": "caching strategy"},
+        json={"feature_description": "caching strategy"},
         headers=auth_headers(),
     )
     data = resp.json()
@@ -269,13 +300,13 @@ def test_redblue_workflow_task_ids_distinct(client):
 # ---------------------------------------------------------------------------
 
 
-def test_redblue_scratchpad_prefix_format(client):
-    """Scratchpad prefix should match 'redblue_XXXXXXXX' pattern."""
+def test_redblue_scratchpad_prefix_contains_uuid_suffix(client):
+    """Scratchpad prefix should be 'redblue_XXXXXXXX' pattern."""
     import re
 
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": "API design"},
+        json={"feature_description": "API design"},
         headers=auth_headers(),
     )
     data = resp.json()
@@ -285,18 +316,34 @@ def test_redblue_scratchpad_prefix_format(client):
     )
 
 
+def test_redblue_scratchpad_prefix_uses_custom_prefix(client):
+    """Custom scratchpad_prefix should appear in the prefix."""
+    import re
+
+    resp = client.post(
+        "/workflows/redblue",
+        json={"feature_description": "API design", "scratchpad_prefix": "myreview"},
+        headers=auth_headers(),
+    )
+    data = resp.json()
+    prefix = data["scratchpad_prefix"]
+    assert re.match(r"^myreview_[0-9a-f]{8}$", prefix), (
+        f"scratchpad_prefix '{prefix}' does not use custom prefix 'myreview'"
+    )
+
+
 def test_redblue_scratchpad_prefix_unique(client):
     """Two submissions should produce different scratchpad prefixes."""
     app, orch = _make_app()
     with TestClient(app) as c:
         r1 = c.post(
             "/workflows/redblue",
-            json={"topic": "API design"},
+            json={"feature_description": "API design"},
             headers=auth_headers(),
         )
         r2 = c.post(
             "/workflows/redblue",
-            json={"topic": "API design"},
+            json={"feature_description": "API design"},
             headers=auth_headers(),
         )
     assert r1.json()["scratchpad_prefix"] != r2.json()["scratchpad_prefix"]
@@ -308,40 +355,93 @@ def test_redblue_scratchpad_prefix_unique(client):
 
 
 def test_redblue_dag_dependency_chain(client):
-    """red_team must depend on blue_team; arbiter must depend on red_team."""
+    """attack must depend on implement; assess must depend on attack."""
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": "JWT authentication design"},
+        json={"feature_description": "JWT authentication endpoint"},
         headers=auth_headers(),
     )
     data = resp.json()
     task_ids = data["task_ids"]
 
-    blue_id = task_ids["blue_team"]
-    red_id = task_ids["red_team"]
-    arbiter_id = task_ids["arbiter"]
+    implement_id = task_ids["implement"]
+    attack_id = task_ids["attack"]
+    assess_id = task_ids["assess"]
 
-    # Retrieve submitted tasks from the orchestrator via /tasks
     tasks_resp = client.get("/tasks", headers=auth_headers())
     assert tasks_resp.status_code == 200
     tasks = {t["task_id"]: t for t in tasks_resp.json()}
 
-    assert blue_id in tasks, "blue_team task not found in /tasks"
-    assert red_id in tasks, "red_team task not found in /tasks"
-    assert arbiter_id in tasks, "arbiter task not found in /tasks"
+    assert implement_id in tasks, "implement task not found in /tasks"
+    assert attack_id in tasks, "attack task not found in /tasks"
+    assert assess_id in tasks, "assess task not found in /tasks"
 
-    # blue_team: no dependencies
-    assert tasks[blue_id].get("depends_on", []) == [], (
-        "blue_team should have no dependencies"
+    # implement: no dependencies
+    assert tasks[implement_id].get("depends_on", []) == [], (
+        "implement should have no dependencies"
     )
-    # red_team: depends on blue_team
-    assert blue_id in tasks[red_id].get("depends_on", []), (
-        "red_team should depend on blue_team"
+    # attack: depends on implement
+    assert implement_id in tasks[attack_id].get("depends_on", []), (
+        "attack should depend on implement"
     )
-    # arbiter: depends on red_team
-    assert red_id in tasks[arbiter_id].get("depends_on", []), (
-        "arbiter should depend on red_team"
+    # assess: depends on attack
+    assert attack_id in tasks[assess_id].get("depends_on", []), (
+        "assess should depend on attack"
     )
+
+
+# ---------------------------------------------------------------------------
+# Required tags routing
+# ---------------------------------------------------------------------------
+
+
+def test_redblue_default_tags_forwarded(client):
+    """Default tags redblue_blue/red/arbiter should appear in task required_tags."""
+    resp = client.post(
+        "/workflows/redblue",
+        json={"feature_description": "API design"},
+        headers=auth_headers(),
+    )
+    data = resp.json()
+    task_ids = data["task_ids"]
+
+    tasks_resp = client.get("/tasks", headers=auth_headers())
+    tasks = {t["task_id"]: t for t in tasks_resp.json()}
+
+    blue_tags = tasks[task_ids["implement"]].get("required_tags", [])
+    red_tags = tasks[task_ids["attack"]].get("required_tags", [])
+    arbiter_tags = tasks[task_ids["assess"]].get("required_tags", [])
+
+    assert "redblue_blue" in blue_tags, f"redblue_blue not in implement tags: {blue_tags}"
+    assert "redblue_red" in red_tags, f"redblue_red not in attack tags: {red_tags}"
+    assert "redblue_arbiter" in arbiter_tags, f"redblue_arbiter not in assess tags: {arbiter_tags}"
+
+
+def test_redblue_custom_tags_forwarded(client):
+    """Custom blue_tags, red_tags, arbiter_tags should appear in task required_tags."""
+    resp = client.post(
+        "/workflows/redblue",
+        json={
+            "feature_description": "API design",
+            "blue_tags": ["architect"],
+            "red_tags": ["security"],
+            "arbiter_tags": ["senior"],
+        },
+        headers=auth_headers(),
+    )
+    data = resp.json()
+    task_ids = data["task_ids"]
+
+    tasks_resp = client.get("/tasks", headers=auth_headers())
+    tasks = {t["task_id"]: t for t in tasks_resp.json()}
+
+    blue_tags = tasks[task_ids["implement"]].get("required_tags", [])
+    red_tags = tasks[task_ids["attack"]].get("required_tags", [])
+    arbiter_tags = tasks[task_ids["assess"]].get("required_tags", [])
+
+    assert "architect" in blue_tags, f"blue_tags not forwarded: {blue_tags}"
+    assert "security" in red_tags, f"red_tags not forwarded: {red_tags}"
+    assert "senior" in arbiter_tags, f"arbiter_tags not forwarded: {arbiter_tags}"
 
 
 # ---------------------------------------------------------------------------
@@ -349,8 +449,8 @@ def test_redblue_dag_dependency_chain(client):
 # ---------------------------------------------------------------------------
 
 
-def test_redblue_reply_to_propagated_to_arbiter():
-    """reply_to should be forwarded to the arbiter task (captured via mock)."""
+def test_redblue_reply_to_propagated_to_assess():
+    """reply_to should be forwarded to the assess (arbiter) task."""
     app, orch = _make_app()
     reply_tos: list = []
     original_submit = orch.submit_task
@@ -364,25 +464,25 @@ def test_redblue_reply_to_propagated_to_arbiter():
     with TestClient(app) as c:
         c.post(
             "/workflows/redblue",
-            json={"topic": "API design", "reply_to": "director-agent"},
+            json={"feature_description": "API design", "reply_to": "director-agent"},
             headers=auth_headers(),
         )
 
-    # 3 tasks: blue_team, red_team, arbiter
+    # 3 tasks: implement, attack, assess
     assert len(reply_tos) == 3, f"Expected 3 submit_task calls, got {len(reply_tos)}"
-    # Only arbiter (last task) should have reply_to
+    # Only assess (last task) should have reply_to
     assert reply_tos[2] == "director-agent", (
-        f"reply_to not propagated to arbiter: {reply_tos}"
+        f"reply_to not propagated to assess: {reply_tos}"
     )
-    assert reply_tos[0] is None, f"blue_team should not have reply_to: {reply_tos[0]}"
-    assert reply_tos[1] is None, f"red_team should not have reply_to: {reply_tos[1]}"
+    assert reply_tos[0] is None, f"implement should not have reply_to: {reply_tos[0]}"
+    assert reply_tos[1] is None, f"attack should not have reply_to: {reply_tos[1]}"
 
 
 def test_redblue_reply_to_none_by_default(client):
     """reply_to=None should result in no reply_to on any task."""
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": "API design"},
+        json={"feature_description": "API design"},
         headers=auth_headers(),
     )
     data = resp.json()
@@ -397,158 +497,165 @@ def test_redblue_reply_to_none_by_default(client):
 
 
 # ---------------------------------------------------------------------------
-# Tag routing
-# ---------------------------------------------------------------------------
-
-
-def test_redblue_tags_forwarded(client):
-    """blue_tags, red_tags, arbiter_tags should appear in task required_tags."""
-    resp = client.post(
-        "/workflows/redblue",
-        json={
-            "topic": "API design",
-            "blue_tags": ["architect"],
-            "red_tags": ["security"],
-            "arbiter_tags": ["senior"],
-        },
-        headers=auth_headers(),
-    )
-    data = resp.json()
-    task_ids = data["task_ids"]
-
-    tasks_resp = client.get("/tasks", headers=auth_headers())
-    tasks = {t["task_id"]: t for t in tasks_resp.json()}
-
-    blue_tags = tasks[task_ids["blue_team"]].get("required_tags", [])
-    red_tags = tasks[task_ids["red_team"]].get("required_tags", [])
-    arbiter_tags = tasks[task_ids["arbiter"]].get("required_tags", [])
-
-    assert "architect" in blue_tags, f"blue_tags not forwarded: {blue_tags}"
-    assert "security" in red_tags, f"red_tags not forwarded: {red_tags}"
-    assert "senior" in arbiter_tags, f"arbiter_tags not forwarded: {arbiter_tags}"
-
-
-# ---------------------------------------------------------------------------
 # Prompt content checks
 # ---------------------------------------------------------------------------
 
 
-def test_redblue_blue_team_prompt_mentions_topic(client):
-    """Blue-team task prompt should mention the topic."""
-    topic = "OAuth2 token refresh endpoint design"
+def test_redblue_implement_prompt_mentions_feature_description(client):
+    """Implement task prompt should mention the feature_description."""
+    feature = "REST endpoint for user authentication with JWT tokens"
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": topic},
+        json={"feature_description": feature},
         headers=auth_headers(),
     )
     data = resp.json()
-    blue_id = data["task_ids"]["blue_team"]
+    implement_id = data["task_ids"]["implement"]
 
     tasks_resp = client.get("/tasks", headers=auth_headers())
     tasks = {t["task_id"]: t for t in tasks_resp.json()}
 
-    prompt = tasks[blue_id].get("prompt", "")
-    assert topic in prompt, f"topic not found in blue_team prompt: {prompt[:200]}"
+    prompt = tasks[implement_id].get("prompt", "")
+    assert feature in prompt, f"feature_description not found in implement prompt: {prompt[:200]}"
 
 
-def test_redblue_red_team_prompt_mentions_topic(client):
-    """Red-team task prompt should mention the topic."""
-    topic = "input validation middleware design"
+def test_redblue_attack_prompt_mentions_feature_description(client):
+    """Attack task prompt should mention the feature_description."""
+    feature = "input validation middleware"
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": topic},
+        json={"feature_description": feature},
         headers=auth_headers(),
     )
     data = resp.json()
-    red_id = data["task_ids"]["red_team"]
+    attack_id = data["task_ids"]["attack"]
 
     tasks_resp = client.get("/tasks", headers=auth_headers())
     tasks = {t["task_id"]: t for t in tasks_resp.json()}
 
-    prompt = tasks[red_id].get("prompt", "")
-    assert topic in prompt, f"topic not found in red_team prompt: {prompt[:200]}"
+    prompt = tasks[attack_id].get("prompt", "")
+    assert feature in prompt, f"feature_description not found in attack prompt: {prompt[:200]}"
 
 
-def test_redblue_arbiter_prompt_mentions_topic(client):
-    """Arbiter task prompt should mention the topic."""
-    topic = "RBAC permission model design"
+def test_redblue_assess_prompt_mentions_feature_description(client):
+    """Assess task prompt should mention the feature_description."""
+    feature = "RBAC permission model"
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": topic},
+        json={"feature_description": feature},
         headers=auth_headers(),
     )
     data = resp.json()
-    arbiter_id = data["task_ids"]["arbiter"]
+    assess_id = data["task_ids"]["assess"]
 
     tasks_resp = client.get("/tasks", headers=auth_headers())
     tasks = {t["task_id"]: t for t in tasks_resp.json()}
 
-    prompt = tasks[arbiter_id].get("prompt", "")
-    assert topic in prompt, f"topic not found in arbiter prompt: {prompt[:200]}"
+    prompt = tasks[assess_id].get("prompt", "")
+    assert feature in prompt, f"feature_description not found in assess prompt: {prompt[:200]}"
 
 
-def test_redblue_blue_team_prompt_mentions_role(client):
-    """Blue-team prompt should mention BLUE-TEAM role."""
+def test_redblue_implement_prompt_mentions_language(client):
+    """Implement prompt should mention the language."""
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": "API design"},
+        json={"feature_description": "some feature", "language": "go"},
         headers=auth_headers(),
     )
     data = resp.json()
-    blue_id = data["task_ids"]["blue_team"]
+    implement_id = data["task_ids"]["implement"]
 
     tasks_resp = client.get("/tasks", headers=auth_headers())
     tasks = {t["task_id"]: t for t in tasks_resp.json()}
 
-    prompt = tasks[blue_id].get("prompt", "")
+    prompt = tasks[implement_id].get("prompt", "")
+    assert "go" in prompt.lower(), "language 'go' not found in implement prompt"
+
+
+def test_redblue_attack_prompt_mentions_security_focus(client):
+    """Attack prompt should include the security_focus items."""
+    resp = client.post(
+        "/workflows/redblue",
+        json={
+            "feature_description": "API design",
+            "security_focus": ["sql_injection", "xss", "csrf"],
+        },
+        headers=auth_headers(),
+    )
+    data = resp.json()
+    attack_id = data["task_ids"]["attack"]
+
+    tasks_resp = client.get("/tasks", headers=auth_headers())
+    tasks = {t["task_id"]: t for t in tasks_resp.json()}
+
+    prompt = tasks[attack_id].get("prompt", "")
+    assert "sql_injection" in prompt, "sql_injection not found in attack prompt"
+    assert "xss" in prompt, "xss not found in attack prompt"
+    assert "csrf" in prompt, "csrf not found in attack prompt"
+
+
+def test_redblue_implement_prompt_mentions_blue_team_role(client):
+    """Implement prompt should mention BLUE-TEAM role."""
+    resp = client.post(
+        "/workflows/redblue",
+        json={"feature_description": "API design"},
+        headers=auth_headers(),
+    )
+    data = resp.json()
+    implement_id = data["task_ids"]["implement"]
+
+    tasks_resp = client.get("/tasks", headers=auth_headers())
+    tasks = {t["task_id"]: t for t in tasks_resp.json()}
+
+    prompt = tasks[implement_id].get("prompt", "")
     assert "BLUE-TEAM" in prompt or "blue-team" in prompt.lower(), (
-        "blue_team prompt should mention BLUE-TEAM role"
+        "implement prompt should mention BLUE-TEAM role"
     )
 
 
-def test_redblue_red_team_prompt_mentions_role(client):
-    """Red-team prompt should mention RED-TEAM role."""
+def test_redblue_attack_prompt_mentions_red_team_role(client):
+    """Attack prompt should mention RED-TEAM role."""
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": "API design"},
+        json={"feature_description": "API design"},
         headers=auth_headers(),
     )
     data = resp.json()
-    red_id = data["task_ids"]["red_team"]
+    attack_id = data["task_ids"]["attack"]
 
     tasks_resp = client.get("/tasks", headers=auth_headers())
     tasks = {t["task_id"]: t for t in tasks_resp.json()}
 
-    prompt = tasks[red_id].get("prompt", "")
+    prompt = tasks[attack_id].get("prompt", "")
     assert "RED-TEAM" in prompt or "red-team" in prompt.lower(), (
-        "red_team prompt should mention RED-TEAM role"
+        "attack prompt should mention RED-TEAM role"
     )
 
 
-def test_redblue_arbiter_prompt_mentions_role(client):
-    """Arbiter prompt should mention ARBITER role."""
+def test_redblue_assess_prompt_mentions_arbiter_role(client):
+    """Assess prompt should mention ARBITER role."""
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": "API design"},
+        json={"feature_description": "API design"},
         headers=auth_headers(),
     )
     data = resp.json()
-    arbiter_id = data["task_ids"]["arbiter"]
+    assess_id = data["task_ids"]["assess"]
 
     tasks_resp = client.get("/tasks", headers=auth_headers())
     tasks = {t["task_id"]: t for t in tasks_resp.json()}
 
-    prompt = tasks[arbiter_id].get("prompt", "")
+    prompt = tasks[assess_id].get("prompt", "")
     assert "ARBITER" in prompt or "arbiter" in prompt.lower(), (
-        "arbiter prompt should mention ARBITER role"
+        "assess prompt should mention ARBITER role"
     )
 
 
 def test_redblue_scratchpad_keys_in_prompts(client):
-    """Scratchpad keys should appear in the agent prompts."""
+    """Scratchpad keys implementation/vulnerabilities/risk_report should be in prompts."""
     resp = client.post(
         "/workflows/redblue",
-        json={"topic": "API design"},
+        json={"feature_description": "API design"},
         headers=auth_headers(),
     )
     data = resp.json()
@@ -558,25 +665,45 @@ def test_redblue_scratchpad_keys_in_prompts(client):
     tasks_resp = client.get("/tasks", headers=auth_headers())
     tasks = {t["task_id"]: t for t in tasks_resp.json()}
 
-    blue_prompt = tasks[task_ids["blue_team"]].get("prompt", "")
-    red_prompt = tasks[task_ids["red_team"]].get("prompt", "")
-    arbiter_prompt = tasks[task_ids["arbiter"]].get("prompt", "")
+    implement_prompt = tasks[task_ids["implement"]].get("prompt", "")
+    attack_prompt = tasks[task_ids["attack"]].get("prompt", "")
+    assess_prompt = tasks[task_ids["assess"]].get("prompt", "")
 
-    assert f"{prefix}_blue_design" in blue_prompt, (
-        "blue_design key missing from blue_team prompt"
+    assert f"{prefix}_implementation" in implement_prompt, (
+        "implementation key missing from implement prompt"
     )
-    assert f"{prefix}_blue_design" in red_prompt, (
-        "blue_design key missing from red_team prompt (needed for reading)"
+    assert f"{prefix}_implementation" in attack_prompt, (
+        "implementation key missing from attack prompt (needed for reading)"
     )
-    assert f"{prefix}_red_findings" in red_prompt, (
-        "red_findings key missing from red_team prompt"
+    assert f"{prefix}_vulnerabilities" in attack_prompt, (
+        "vulnerabilities key missing from attack prompt"
     )
-    assert f"{prefix}_blue_design" in arbiter_prompt, (
-        "blue_design key missing from arbiter prompt (needed for reading)"
+    assert f"{prefix}_implementation" in assess_prompt, (
+        "implementation key missing from assess prompt (needed for reading)"
     )
-    assert f"{prefix}_red_findings" in arbiter_prompt, (
-        "red_findings key missing from arbiter prompt (needed for reading)"
+    assert f"{prefix}_vulnerabilities" in assess_prompt, (
+        "vulnerabilities key missing from assess prompt (needed for reading)"
     )
-    assert f"{prefix}_risk_report" in arbiter_prompt, (
-        "risk_report key missing from arbiter prompt"
+    assert f"{prefix}_risk_report" in assess_prompt, (
+        "risk_report key missing from assess prompt"
+    )
+
+
+def test_redblue_assess_prompt_mentions_risk_levels(client):
+    """Assess (arbiter) prompt should mention risk level values."""
+    resp = client.post(
+        "/workflows/redblue",
+        json={"feature_description": "API design"},
+        headers=auth_headers(),
+    )
+    data = resp.json()
+    assess_id = data["task_ids"]["assess"]
+
+    tasks_resp = client.get("/tasks", headers=auth_headers())
+    tasks = {t["task_id"]: t for t in tasks_resp.json()}
+
+    prompt = tasks[assess_id].get("prompt", "")
+    # The assess prompt must instruct the arbiter to produce a risk level
+    assert any(level in prompt for level in ["LOW", "MEDIUM", "HIGH", "CRITICAL"]), (
+        "assess prompt should mention risk levels LOW/MEDIUM/HIGH/CRITICAL"
     )

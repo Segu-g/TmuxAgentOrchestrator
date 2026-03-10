@@ -795,42 +795,47 @@ class DelphiWorkflowSubmit(BaseModel):
 
 
 class RedBlueWorkflowSubmit(BaseModel):
-    """Request body for POST /workflows/redblue — Red Team / Blue Team adversarial evaluation.
+    """Request body for POST /workflows/redblue — Red Team / Blue Team security review.
 
-    Submits a 3-agent adversarial evaluation DAG:
+    Submits a 3-agent sequential security review DAG:
 
-      1. ``blue_team``: constructs a design, implementation plan, or proposal for
-         *topic* and stores it in ``{scratchpad_prefix}_blue_design``.
-      2. ``red_team``: reads the blue-team output and attacks it from an adversarial
-         perspective — identifying vulnerabilities, flaws, and risks.  Stores
-         findings in ``{scratchpad_prefix}_red_findings``.
-      3. ``arbiter``: reads both artifacts and produces a balanced risk assessment
-         report with prioritised recommendations.  Stores result in
-         ``{scratchpad_prefix}_risk_report``.
+      1. ``implement`` (blue-team): implements *feature_description* in *language*,
+         stores code in ``{scratchpad_prefix}_implementation``.
+      2. ``attack`` (red-team): reads implementation, identifies vulnerabilities based
+         on *security_focus* list (OWASP categories, severity, line references),
+         stores findings in ``{scratchpad_prefix}_vulnerabilities``.
+      3. ``assess`` (arbiter): reads both artifacts, produces CVSS-style risk assessment
+         with overall risk level (LOW/MEDIUM/HIGH/CRITICAL),
+         stores report in ``{scratchpad_prefix}_risk_report``.
 
     Design references:
-    - Harrasse et al. "Debate, Deliberate, Decide (D3)" arXiv:2410.04663 (2026):
-      adversarial multi-agent evaluation reduces positional/verbosity bias.
+    - arXiv:2601.19138, "AgenticSCR: Autonomous Agentic Secure Code Review" (2025):
+      agentic multi-iteration code review with contextual awareness and adaptability.
     - "Red-Teaming LLM Multi-Agent Systems via Communication Attacks" ACL 2025
       (arXiv:2502.14847): structured adversarial evaluation improves system robustness.
-    - Farzulla, "Autonomous Red Team and Blue Team AI" DISSENSUS DAI-2513 (2025):
-      pairing adversarial + defensive agents produces realistic security assessments.
-    - DESIGN.md §10.23 (v1.0.24)
+    - OWASP Top 10 for LLMs 2025: Prompt Injection, Excessive Agency, System Prompt
+      Leakage — structured security_focus list maps directly to OWASP categories.
+    - DESIGN.md §10.75 (v1.1.43)
     """
 
-    topic: str
+    feature_description: str
+    language: str = "python"
+    security_focus: list[str] = ["input_validation", "authentication", "injection"]
+    scratchpad_prefix: str = "redblue"
+    agent_timeout: int = 300
     # Optional per-role required_tags for agent capability routing
-    blue_tags: list[str] = []
-    red_tags: list[str] = []
-    arbiter_tags: list[str] = []
+    # Defaults route to agents tagged redblue_blue / redblue_red / redblue_arbiter
+    blue_tags: list[str] = ["redblue_blue"]
+    red_tags: list[str] = ["redblue_red"]
+    arbiter_tags: list[str] = ["redblue_arbiter"]
     # When set, the arbiter RESULT is routed to this agent's mailbox
     reply_to: str | None = None
 
-    @field_validator("topic")
+    @field_validator("feature_description")
     @classmethod
-    def topic_must_not_be_empty(cls, v: str) -> str:
+    def feature_description_must_not_be_empty(cls, v: str) -> str:
         if not v.strip():
-            raise ValueError("topic must not be empty")
+            raise ValueError("feature_description must not be empty")
         return v
 
 

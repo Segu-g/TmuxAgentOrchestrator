@@ -5391,3 +5391,77 @@ Recommended Decision: SQLite with WAL mode for current scale.
 - 匿名性確保: 各エージェントは他エージェントの意見をモデレーター要約経由でのみ参照
 
 **次候補**: DECISION.md 標準フォーマット規約 (§11 低優先度)、または追加ワークフロー実証。
+
+## §10.75 — v1.1.43: Red Team / Blue Team セキュリティレビューワークフロー拡張 — `POST /workflows/redblue`
+
+### Step 0 — 選択
+
+**選択**: v1.1.43 — `POST /workflows/redblue` セキュリティレビューワークフロー拡張
+
+**選択理由**:
+1. **§11 中優先度・既存エンドポイント拡張**: §10.74 Step 4「次候補」に `POST /workflows/redblue` 追加デモが記録済み。既存エンドポイント (v1.0.23 §10.23) は汎用 `topic` フィールドを使う設計だったが、セキュリティレビュー専用フィールド (`feature_description`, `language`, `security_focus`) を追加してユースケースを明確化。
+2. **§10.74 (Delphi) の完了後**: 並列ペルソナ→集約パターンを実証済み。次は Sequential Pipeline + 敵対的評価パターンを強化。
+3. **研究的裏付けが強い**: AgenticSCR (arXiv:2601.19138, 2025)、OWASP Top 10 for LLMs 2025、Red-Teaming LLM MAS (ACL 2025) が adversarial code review の有効性を実証。
+
+**選択しなかった候補**:
+- DECISION.md 標準フォーマット規約: 実装価値が低く優先度低。
+- ワークフロー出力フォーマット標準化: 実装コストが高い。
+
+### Step 1 — Research
+
+**Query 1**: "red team blue team security review software development process"
+
+1. **Coursera, "Red Team vs. Blue Team in Cybersecurity"**,
+   https://www.coursera.org/articles/red-team-vs-blue-team —
+   Red team: attacker perspective, finds vulnerabilities, penetration testing.
+   Blue team: defensive group, detects, responds, recovers.
+   Purple team: integrates offensive/defensive tactics for collaboration.
+
+2. **Splunk, "Red Teams vs. Blue Teams: What's The Difference?"**,
+   https://www.splunk.com/en_us/blog/learn/red-team-vs-blue-team.html —
+   Continuous feedback loop: red team exposes gaps, blue team focuses on detection and remediation.
+   Together they advance organizational security resilience.
+
+3. **Terra Security Blog, "Red Team vs Blue Team: A Pen Testing Game of Chess"**,
+   https://www.terra.security/blog/red-team-vs-blue-team —
+   Structured adversarial process with defined roles and escalating attack/defense cycles.
+
+**Query 2**: "multi-agent red team security vulnerability assessment LLM 2025"
+
+4. **arXiv:2502.14847, "Red-Teaming LLM Multi-Agent Systems via Communication Attacks"** (ACL 2025),
+   https://arxiv.org/abs/2502.14847 —
+   Agent-in-the-Middle (AiTM) attack exploits inter-agent communication in LLM-based MAS.
+   Up to 80% attack success rate; demonstrates need for structured adversarial evaluation.
+
+5. **OWASP Top 10 for LLMs 2025**, DeepTeam,
+   https://www.trydeepteam.com/docs/frameworks-owasp-top-10-for-llms —
+   2025 OWASP Top 10: Prompt Injection remains #1. New categories: Excessive Agency,
+   System Prompt Leakage, Vector/Embedding Weaknesses, Misinformation, Unbounded Consumption.
+
+6. **VentureBeat, "Red teaming LLMs exposes harsh truth about AI security"** (2025),
+   https://venturebeat.com/security/red-teaming-llms-harsh-truth-ai-security-arms-race —
+   UK AISI/Gray Swan challenge: 1.8M attacks across 22 models — every model broke.
+
+**Query 3**: "adversarial multi-agent security code review AI workflow 2025"
+
+7. **arXiv:2601.19138, "AgenticSCR: Autonomous Agentic Secure Code Review"** (2025),
+   https://arxiv.org/html/2601.19138v1 —
+   AgenticSCR: autonomous agentic system for secure code review in CLI environment.
+   Addresses contextual awareness and adaptability gaps in monolithic LLM-based tools.
+   Multi-iteration refinement loop between attacker and defender agents.
+
+8. **arXiv:2510.23883, "Agentic AI Security: Threats, Defenses, Evaluation"** (2025),
+   https://arxiv.org/html/2510.23883v1 —
+   Sequential Tool Attack Chaining (STAC): multi-turn attacks orchestrate individually
+   safe tool calls that collectively achieve harmful goals.
+
+9. **arXiv:2505.02077, "Open Challenges in Multi-Agent Security"** (2025),
+   https://arxiv.org/html/2505.02077v1 —
+   Protocol-mediated threats: message tampering, role spoofing, protocol exploitation.
+   Multi-agent ecosystems amplify single-agent vulnerabilities across coordinated workflows.
+
+### Step 2 — 実装
+
+- `src/tmux_orchestrator/web/schemas.py`: `RedBlueWorkflowSubmit` を `feature_description`, `language`, `security_focus`, `agent_timeout` フィールドに更新。`required_tags` デフォルトを `["redblue_blue"]`, `["redblue_red"]`, `["redblue_arbiter"]` に設定。
+- `src/tmux_orchestrator/web/routers/workflows.py`: スクラッチパッドキーを `_implementation`, `_vulnerabilities`, `_risk_report` に変更。セキュリティフォーカスを赤チームプロンプトに注入。
+- `tests/test_workflow_redblue.py`: 新スキーマに対応したテスト群に置き換え。
