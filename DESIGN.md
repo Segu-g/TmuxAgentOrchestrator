@@ -4524,3 +4524,88 @@ v1.1.30 で観点C「メールボックスをプロジェクトスコープに�
 - **Stack Abuse — Python Template Class** (https://stackabuse.com/formatting-strings-with-the-python-template-class/): `string.Template` provides `$placeholder` syntax; safe against injection. `str.format_map()` is safer than `str.format()` because it doesn't raise KeyError on missing keys with a `defaultdict`.
 
 **Key finding**: Use `str.format_map(safe_dict)` with a `collections.defaultdict(str)` fallback so missing placeholders degrade gracefully rather than raising `KeyError`. This matches LangChain's approach for user-defined templates.
+
+### Step 2 — Implementation
+
+**Files changed**:
+- `src/tmux_orchestrator/domain/phase_strategy.py`:
+  - `CompetitiveConfig.judge_prompt_template: str = ""` — new field.
+  - `DebateConfig.early_stop_signal: str = ""` — new field.
+  - `_render_competitive_judge_prompt()` — renders template via `str.replace()` for `{context}`, `{solutions}`, `{criteria}`. Using `str.replace` (not `format_map`) avoids `ValueError` when templates contain Python dict literals with braces (e.g. `{'key': 'val'}`).
+  - `_build_debate_judge_early_stop_instruction()` — builds early-stop paragraph for debate judge prompt.
+  - `CompetitiveStrategy.expand()` — appends inline judge task when `judge_prompt_template` is non-empty.
+  - `DebateStrategy.expand()` — appends early-stop instruction to judge prompt when `early_stop_signal` is non-empty.
+- `src/tmux_orchestrator/web/schemas.py`:
+  - `CompetitiveConfigModel.judge_prompt_template: str = Field(default="", description=...)`
+  - `DebateConfigModel.early_stop_signal: str = Field(default="", description=...)`
+- `src/tmux_orchestrator/web/routers/workflows.py`:
+  - `_to_domain_strategy_config()` for `"competitive"` now passes `judge_prompt_template`.
+  - `_to_domain_strategy_config()` for `"debate"` now passes `early_stop_signal`.
+- `tests/test_strategy_config.py`: 18 new tests (2608 → 2626 total).
+- OpenAPI snapshot regenerated.
+
+**TDD cycle**: Red → Green → Refactor. All 2626 tests PASS.
+
+**Key bug fixed**: `_render_competitive_judge_prompt` initially used `str.format_map(defaultdict(str, ...))`. This raised `ValueError: Invalid format specifier` when the template contained Python dict literals like `{'winner': 'slot-0'}`. Fixed by switching to sequential `str.replace()` calls for the three known placeholders.
+
+**Second bug fixed**: `_to_domain_strategy_config()` in workflows router did not include `judge_prompt_template` and `early_stop_signal` fields, causing the inline judge task to never be generated. Fixed with `getattr(m, 'judge_prompt_template', '')`.
+
+### Step 3 — E2E Demo
+
+**Demo**: `~/Demonstration/v1.1.32-judge-prompt-early-stop/demo.py`
+
+**Pattern**: Competitive + Debate (2 workflows, 6 agents)
+- Workflow 1 (competitive, 3 tasks, timeout=900): solver-a + solver-b write `is_prime()`; `CompetitiveStrategy` auto-appends inline judge task using custom `judge_prompt_template`. Judge selects winner and uploads verdict to scratchpad.
+- Workflow 2 (debate, 3 tasks, timeout=900): advocate + critic debate prime-checking approaches (trial division vs Miller-Rabin); judge prompt includes `early_stop_signal="CONSENSUS_REACHED"` instruction.
+
+**Result**: **36/36 checks PASSED**
+
+| # | Check | Result |
+|---|-------|--------|
+| 1 | CompetitiveConfig.judge_prompt_template default is empty str | PASS |
+| 2 | CompetitiveConfig.judge_prompt_template custom value accepted | PASS |
+| 3 | DebateConfig.early_stop_signal default is empty str | PASS |
+| 4 | DebateConfig.early_stop_signal custom value accepted | PASS |
+| 5 | {context} placeholder substituted | PASS |
+| 6 | {criteria} placeholder substituted | PASS |
+| 7 | {solutions} placeholder substituted (hint text) | PASS |
+| 8 | Unknown placeholder does not raise KeyError | PASS |
+| 9 | Early-stop instruction contains signal keyword | PASS |
+| 10 | Early-stop instruction references scratchpad | PASS |
+| 11 | CompetitiveStrategy generates judge task when template set | PASS |
+| 12 | Judge task depends on both solver tasks | PASS |
+| 13 | Judge prompt contains rendered {criteria} | PASS |
+| 14 | Judge prompt contains rendered {context} | PASS |
+| 15 | CompetitiveStrategy: no judge task when template empty | PASS |
+| 16 | DebateStrategy generates judge task | PASS |
+| 17 | Debate judge prompt contains early-stop signal keyword | PASS |
+| 18 | Debate judge prompt references scratchpad for early-stop | PASS |
+| 19 | Debate judge: no early-stop text when signal empty | PASS |
+| 20 | CompetitiveConfigModel.judge_prompt_template default empty | PASS |
+| 21 | CompetitiveConfigModel.judge_prompt_template custom value | PASS |
+| 22 | DebateConfigModel.early_stop_signal default empty | PASS |
+| 23 | DebateConfigModel.early_stop_signal custom value | PASS |
+| 24 | POST /workflows competitive returns workflow_id | PASS |
+| 25 | POST /workflows returns 3 task IDs (2 solvers + inline judge) | PASS |
+| 26 | Inline judge task present in task map | PASS |
+| 27 | POST /workflows debate returns workflow_id | PASS |
+| 28 | Debate workflow returns 3 task IDs (advocate + critic + judge) | PASS |
+| 29 | Debate judge task present in task map | PASS |
+| 30 | Both competitive solver tasks completed (success) | PASS |
+| 31 | Inline competitive judge task completed (success) | PASS |
+| 32 | Debate advocate task completed (success) | PASS |
+| 33 | Debate critic task completed (success) | PASS |
+| 34 | Debate judge task completed (success) | PASS |
+| 35 | Competitive judge verdict written to scratchpad | PASS |
+| 36 | Scratchpad PUT/GET round-trip works | PASS |
+
+### Step 4 — Feedback
+
+**Debugging notes**:
+1. `ValueError: Invalid format specifier` from `str.format_map`: templates with Python dict literals break format_map. Fixed with `str.replace()`.
+2. HTTP 500 on POST /workflows: `_to_domain_strategy_config()` missing new fields. Fixed with `getattr(m, 'field', default)`.
+3. `{criteria}` KeyError in demo template string: f-string `.format()` at module level consumed `{criteria}` before it could be used as a template placeholder. Fixed by using f-string parts without `.format()` for the template.
+
+**次イテレーション候補**:
+- ワークフローテンプレートのパラメータ継承 (`examples/workflows/*.yaml` の `defaults:` セクション)
+- エージェント設定ファイルの分離 (観点A)
