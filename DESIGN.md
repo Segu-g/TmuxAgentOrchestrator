@@ -5561,6 +5561,7 @@ Recommended Decision: SQLite with WAL mode for current scale.
 
 | 課題 | 概要 |
 |---|---|
+| **ワークフロー内並列タスク記述** | `parallel:` ブロックを `phases:` リストのアイテムとして追加。`loop:` と同様の構造的記法で複数フェーズの並列実行を宣言的に表現できるようにする。現状は `depends_on: []` の省略で暗黙的に並列になるが、意図を明示できる構文が欲しい。`loop:` との組み合わせ (ループ内並列) も考慮。 |
 | **Worktree ↔ branch sync の UI 改善** | `POST /agents/{id}/sync` は実装済み (v1.1.39)。完了後に worktree を自動削除するオプション、merge conflict 時の通知改善。 |
 | **タスク優先度の動的更新** | `PATCH /tasks/{id}/priority` — キューに積まれたタスクの優先度をランタイムに変更。 |
 | **Codified Context + PairCoder デモ** | `.claude/specs/` に規約 YAML を配置、複数セッションにわたり規約違反ゼロを実証。 |
