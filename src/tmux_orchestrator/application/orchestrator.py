@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import heapq
 import logging
+import shutil
 import time
 import uuid
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -583,6 +585,18 @@ class Orchestrator:
             await agent.stop()
         if self._bus_queue:
             await self.bus.unsubscribe("__orchestrator__")
+        # Mailbox auto-cleanup: delete the session-scoped mailbox directory so
+        # successive runs do not see stale messages from previous sessions.
+        # Guarded by mailbox_cleanup_on_stop (default True); uses ignore_errors=True
+        # so a missing or partially-written directory is silently skipped.
+        # Reference: DESIGN.md §10.66 (v1.1.34)
+        if self.config.mailbox_cleanup_on_stop:
+            session_mailbox = Path(self.config.mailbox_dir) / self.config.session_name
+            if session_mailbox.exists():
+                shutil.rmtree(session_mailbox, ignore_errors=True)
+                logger.info(
+                    "Orchestrator: cleaned up session mailbox %s", session_mailbox
+                )
         logger.info("Orchestrator stopped")
 
     # ------------------------------------------------------------------

@@ -278,6 +278,26 @@ class OrchestratorConfig:
     #   DESIGN.md §10.14 (v0.47.0)
     telemetry_enabled: bool = False
     otlp_endpoint: str = ""
+    # --- Mailbox auto-cleanup on stop ---
+    # mailbox_cleanup_on_stop: when True (default), Orchestrator.stop() deletes the
+    #   session-scoped mailbox directory ({mailbox_dir}/{session_name}/) after all
+    #   agents have been stopped.  Set to False to retain mailbox files across
+    #   restarts (useful for debugging or post-mortem inspection of messages).
+    #
+    # Rationale: mailbox directories are session-scoped (transient queues pattern —
+    # RabbitMQ docs 2025); they accumulate stale messages across successive demo runs
+    # and reduce test reproducibility.  Deleting them at stop() mirrors the "transient
+    # queue" lifecycle: created on first message, deleted on consumer disconnect.
+    #
+    # Implementation uses shutil.rmtree(..., ignore_errors=True) so that missing or
+    # partially-written directories are silently skipped (safe for idempotent shutdown).
+    #
+    # References:
+    #   RabbitMQ "Queues" (https://www.rabbitmq.com/docs/queues, 2025) — transient queue pattern
+    #   Python docs "tempfile" — TemporaryDirectory cleanup (https://docs.python.org/3/library/tempfile.html)
+    #   Designing for Graceful Shutdown (https://medium.com/@jusuftopic, 2025)
+    #   DESIGN.md §10.66 (v1.1.34)
+    mailbox_cleanup_on_stop: bool = True
     # --- Worktree root override ---
     # repo_root: when set, the WorktreeManager uses this path (rather than Path.cwd())
     #   as the base for git worktree operations.  Useful when the server is launched
@@ -476,5 +496,6 @@ def load_config(path: str | Path, cwd: Path | str | None = None) -> Orchestrator
         otlp_endpoint=data.get("otlp_endpoint", ""),
         memory_auto_record=data.get("memory_auto_record", True),
         memory_inject_count=data.get("memory_inject_count", 5),
+        mailbox_cleanup_on_stop=data.get("mailbox_cleanup_on_stop", True),
         repo_root=Path(data["repo_root"]).expanduser().resolve() if data.get("repo_root") else None,
     )
