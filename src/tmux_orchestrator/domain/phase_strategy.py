@@ -40,6 +40,7 @@ References:
 from __future__ import annotations
 
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, Union, runtime_checkable
 
@@ -105,12 +106,22 @@ class CompetitiveConfig:
         Per-agent task timeout override (seconds).  When set, each
         competitive task gets this timeout instead of the phase-level
         or global ``task_timeout``.
+    judge_prompt_template:
+        Optional template string for the judge task prompt.  Supports
+        ``{criteria}``, ``{solutions}``, and ``{context}`` placeholders
+        substituted at expand time.  When empty (default), the built-in
+        judge prompt is generated from the phase name and context.
+
+        Design reference: DESIGN.md §10.64 (v1.1.32)
+        Research: Monte Carlo Data "LLM-As-Judge: 7 Best Practices";
+        arXiv 2504.17087 (meta-judge rubric pipeline).
     """
 
     type: Literal["competitive"] = "competitive"
     scorer: str = "llm_judge"
     top_k: int = 1
     timeout_per_agent: int | None = None
+    judge_prompt_template: str = ""
 
     def __post_init__(self) -> None:
         if self.top_k < 1:
@@ -132,12 +143,23 @@ class DebateConfig:
     judge_criteria:
         Free-text criteria injected into the judge task prompt.  Allows
         custom evaluation dimensions (e.g. "correctness, brevity, clarity").
+    early_stop_signal:
+        Keyword string that, when written by the judge agent to the
+        scratchpad, signals early termination of remaining rounds.
+        When non-empty, the judge prompt instructs the agent to emit
+        this signal if consensus is detected before all rounds complete.
+        When empty (default), early-stop behaviour is disabled.
+
+        Design reference: DESIGN.md §10.64 (v1.1.32)
+        Research: arXiv 2510.12697 (Adaptive Stability Detection);
+        ICLR 2025 MAD blog (convergence-based stopping).
     """
 
     type: Literal["debate"] = "debate"
     rounds: int = 1
     require_consensus: bool = False
     judge_criteria: str = ""
+    early_stop_signal: str = ""
 
     def __post_init__(self) -> None:
         if self.rounds < 1:
@@ -409,6 +431,70 @@ def _phase_prompt(
 
 
 # ---------------------------------------------------------------------------
+# Judge prompt helpers (pure functions)
+# ---------------------------------------------------------------------------
+
+
+def _render_competitive_judge_prompt(
+    *,
+    template: str,
+    context: str,
+    scratchpad_prefix: str,
+    phase_name: str,
+    scorer: str,
+) -> str:
+    """Render a competitive judge prompt from a user-supplied template.
+
+    Placeholders supported:
+    - ``{context}``    — the effective phase context string.
+    - ``{solutions}``  — hint pointing to scratchpad prefix where solver
+                         outputs are stored.
+    - ``{criteria}``   — the ``scorer`` field value (e.g. ``"llm_judge"``).
+
+    Unknown placeholders are left as-is by using a ``defaultdict`` fallback
+    in ``str.format_map`` — no ``KeyError`` is raised for missing keys.
+
+    Design reference: DESIGN.md §10.64 (v1.1.32)
+    """
+    solutions_hint = (
+        f"Read solver outputs from scratchpad prefix '{scratchpad_prefix}' "
+        f"(keys: '{scratchpad_prefix}/{phase_name}/0', "
+        f"'{scratchpad_prefix}/{phase_name}/1', …)"
+    )
+
+    # Use defaultdict so that unknown {placeholders} degrade to empty string
+    # rather than raising KeyError (safe against partial templates).
+    substitutions: dict[str, str] = defaultdict(str, {
+        "context": context,
+        "solutions": solutions_hint,
+        "criteria": scorer,
+    })
+    return template.format_map(substitutions)
+
+
+def _build_debate_judge_early_stop_instruction(early_stop_signal: str) -> str:
+    """Return the early-stop instruction paragraph for a debate judge prompt.
+
+    When ``early_stop_signal`` is non-empty, the judge is instructed to
+    write the signal keyword to the scratchpad if consensus is detected,
+    enabling the orchestrator to skip remaining rounds.
+
+    Design reference: DESIGN.md §10.64 (v1.1.32)
+    Research: arXiv 2510.12697 (Adaptive Stability Detection in MAD);
+    ICLR 2025 MAD blog (convergence-based stopping).
+    """
+    return (
+        f"\n## Early-Stop Protocol\n"
+        f"If you detect that the debate has reached consensus and further rounds\n"
+        f"would not improve the outcome, write the following signal keyword\n"
+        f"verbatim as the **last line** of your scratchpad output:\n\n"
+        f"    {early_stop_signal}\n\n"
+        f"The orchestrator monitors the scratchpad for this signal and will\n"
+        f"skip any remaining rounds when it is detected."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Concrete strategies
 # ---------------------------------------------------------------------------
 
@@ -481,6 +567,22 @@ class CompetitiveStrategy:
 
     The distinction from ``parallel`` is semantic: all agents solve the *same*
     problem and a subsequent judge phase selects the best result.
+
+    When ``PhaseSpec.strategy_config`` is a :class:`CompetitiveConfig` with a
+    non-empty ``judge_prompt_template``, an additional judge task is appended
+    that depends on all solver tasks.  The template is rendered with
+    ``str.format_map`` using the following placeholders:
+
+    - ``{context}`` — the phase context string.
+    - ``{solutions}`` — a hint pointing to the scratchpad prefix.
+    - ``{criteria}`` — the ``scorer`` field value from :class:`CompetitiveConfig`.
+
+    Unknown placeholders are left as-is (defaultdict fallback) and do not
+    raise ``KeyError``.
+
+    Design reference: DESIGN.md §10.64 (v1.1.32)
+    Research: Monte Carlo Data "LLM-As-Judge: 7 Best Practices";
+    arXiv 2504.17087 (meta-judge rubric pipeline).
     """
 
     def expand(
@@ -512,6 +614,31 @@ class CompetitiveStrategy:
                 )
             )
             local_ids.append(local_id)
+
+        # When strategy_config carries a judge_prompt_template, append a judge task.
+        if (
+            phase.strategy_config is not None
+            and isinstance(phase.strategy_config, CompetitiveConfig)
+            and phase.strategy_config.judge_prompt_template
+        ):
+            judge_id = f"phase_{phase.name}_judge"
+            judge_prompt = _render_competitive_judge_prompt(
+                template=phase.strategy_config.judge_prompt_template,
+                context=context,
+                scratchpad_prefix=scratchpad_prefix,
+                phase_name=phase.name,
+                scorer=phase.strategy_config.scorer,
+            )
+            tasks.append(
+                _make_task_spec(
+                    judge_id,
+                    judge_prompt,
+                    depends_on=list(local_ids),
+                    required_tags=tags,
+                    timeout=phase.timeout,
+                )
+            )
+            local_ids.append(judge_id)
 
         ps = WorkflowPhaseStatus(name=phase.name, pattern="competitive", task_ids=local_ids)
         return tasks, [ps]
@@ -581,6 +708,17 @@ class DebateStrategy:
         judge_prompt = _phase_prompt(
             phase.name, "debate", context, role="judge", scratchpad_prefix=scratchpad_prefix,
         )
+
+        # Append early-stop instruction when DebateConfig.early_stop_signal is set.
+        if (
+            phase.strategy_config is not None
+            and isinstance(phase.strategy_config, DebateConfig)
+            and phase.strategy_config.early_stop_signal
+        ):
+            judge_prompt += _build_debate_judge_early_stop_instruction(
+                phase.strategy_config.early_stop_signal
+            )
+
         tasks.append(
             _make_task_spec(
                 judge_id, judge_prompt, depends_on=current_deps,

@@ -360,6 +360,14 @@ class CompetitiveConfigModel(BaseModel):
     scorer: str = "llm_judge"
     top_k: int = Field(default=1, ge=1, description="Number of top-scored solutions to preserve.")
     timeout_per_agent: int | None = None
+    judge_prompt_template: str = Field(
+        default="",
+        description=(
+            "Optional template for the judge task prompt. "
+            "Supports {criteria}, {solutions}, {context} placeholders. "
+            "When empty, the built-in judge prompt is generated."
+        ),
+    )
 
 
 class DebateConfigModel(BaseModel):
@@ -369,6 +377,14 @@ class DebateConfigModel(BaseModel):
     rounds: int = Field(default=1, ge=1, description="Number of advocate/critic rounds.")
     require_consensus: bool = False
     judge_criteria: str = ""
+    early_stop_signal: str = Field(
+        default="",
+        description=(
+            "Keyword written by the judge to the scratchpad to signal early termination. "
+            "When non-empty, the judge prompt instructs the agent to emit this keyword "
+            "if consensus is detected. When empty, early-stop behaviour is disabled."
+        ),
+    )
 
 
 # Discriminated union used by PhaseSpecModel.strategy_config.

@@ -354,6 +354,12 @@
       "CompetitiveConfigModel": {
         "description": "Pydantic schema for the ``competitive`` strategy config.",
         "properties": {
+          "judge_prompt_template": {
+            "default": "",
+            "description": "Optional template for the judge task prompt. Supports {criteria}, {solutions}, {context} placeholders. When empty, the built-in judge prompt is generated.",
+            "title": "Judge Prompt Template",
+            "type": "string"
+          },
           "scorer": {
             "default": "llm_judge",
             "title": "Scorer",
@@ -479,6 +485,12 @@
       "DebateConfigModel": {
         "description": "Pydantic schema for the ``debate`` strategy config.",
         "properties": {
+          "early_stop_signal": {
+            "default": "",
+            "description": "Keyword written by the judge to the scratchpad to signal early termination. When non-empty, the judge prompt instructs the agent to emit this keyword if consensus is detected. When empty, early-stop behaviour is disabled.",
+            "title": "Early Stop Signal",
+            "type": "string"
+          },
           "judge_criteria": {
             "default": "",
             "title": "Judge Criteria",
