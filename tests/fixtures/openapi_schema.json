@@ -2,8 +2,26 @@
   "components": {
     "schemas": {
       "AdrWorkflowSubmit": {
-        "description": "Request body for POST /workflows/adr \u2014 Architecture Decision Record auto-generation.\n\nSubmits a Proposer \u2192 Reviewer \u2192 Synthesizer Workflow DAG that produces a\nMADR-format DECISION.md via the shared scratchpad (Blackboard pattern):\n\n  - ``{scratchpad_prefix}_proposal``: proposer's analysis of options\n  - ``{scratchpad_prefix}_review``:   reviewer's technical critique\n  - ``{scratchpad_prefix}_decision``: synthesizer's final MADR DECISION.md\n\nDesign references:\n- AgenticAKM arXiv:2602.04445 (2026): Extractor/Retriever/Generator/Validator\n  multi-agent decomposition improves ADR quality over single-LLM calls.\n- Ochoa et al. arXiv:2507.05981 \"MAD for Requirements Engineering\" (RE 2025):\n  multi-agent debate enhances requirements classification accuracy.\n- MADR 4.0.0 (2024-09-17): Markdown Architectural Decision Records standard format.\n- DESIGN.md \u00a710.14 (v0.40.0)",
+        "description": "Request body for POST /workflows/adr \u2014 Architecture Decision Record auto-generation.\n\nSubmits a Proposer \u2192 Reviewer \u2192 Synthesizer Workflow DAG that produces a\nMADR-format DECISION.md via the shared scratchpad (Blackboard pattern):\n\n  - ``{scratchpad_prefix}_draft``:  proposer's full ADR draft\n  - ``{scratchpad_prefix}_review``: reviewer's structured critique\n  - ``{scratchpad_prefix}_final``:  synthesizer's final MADR DECISION.md\n\nDesign references:\n- Nygard, M. \"Documenting Architecture Decisions\" (2011):\n  https://www.cognitect.com/blog/2011/11/15/documenting-architecture-decisions \u2014\n  canonical 5-section format: title, status, context, decision, consequences.\n- MADR 4.0.0 (2024-09-17): Markdown Architectural Decision Records standard format.\n- AgenticAKM arXiv:2602.04445 (2026): Extractor/Retriever/Generator/Validator\n  multi-agent decomposition improves ADR quality over single-LLM calls.\n- Ochoa et al. arXiv:2507.05981 \"MAD for Requirements Engineering\" (RE 2025):\n  multi-agent debate enhances requirements classification accuracy.\n- DESIGN.md \u00a710.72 (v1.1.40)",
         "properties": {
+          "agent_timeout": {
+            "default": 300,
+            "title": "Agent Timeout",
+            "type": "integer"
+          },
+          "context": {
+            "default": "",
+            "title": "Context",
+            "type": "string"
+          },
+          "criteria": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Criteria",
+            "type": "array"
+          },
           "proposer_tags": {
             "default": [],
             "items": {
@@ -30,6 +48,11 @@
             },
             "title": "Reviewer Tags",
             "type": "array"
+          },
+          "scratchpad_prefix": {
+            "default": "adr",
+            "title": "Scratchpad Prefix",
+            "type": "string"
           },
           "synthesizer_tags": {
             "default": [],

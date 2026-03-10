@@ -727,10 +727,15 @@ def build_workflows_router(
     
         wm = orchestrator.get_workflow_manager()
         wf_name = f"adr/{body.topic}"
-    
+
         pre_run_id = str(uuid.uuid4())
-        scratchpad_prefix = f"adr_{pre_run_id[:8]}"
-    
+        # If caller supplied a custom prefix, use it as-is; otherwise auto-generate
+        # a collision-safe prefix by appending the first 8 hex chars of a UUID.
+        if body.scratchpad_prefix and body.scratchpad_prefix != "adr":
+            scratchpad_prefix = body.scratchpad_prefix
+        else:
+            scratchpad_prefix = f"adr_{pre_run_id[:8]}"
+
         # Shared bash snippets for reading context and API key
         _ctx_snippet = (
             "WEB_BASE_URL=$(python3 -c \""
@@ -739,10 +744,10 @@ def build_workflows_router(
             "   API_KEY=$(cat __orchestrator_api_key__ 2>/dev/null || "
             "echo \"$TMUX_ORCHESTRATOR_API_KEY\")"
         )
-    
+
         def _scratchpad_key(suffix: str) -> str:
             return f"{scratchpad_prefix}_{suffix}"
-    
+
         def _write_snippet(key: str, var: str = "CONTENT") -> str:
             return (
                 f"   curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
@@ -750,25 +755,38 @@ def build_workflows_router(
                 f"     -H 'Content-Type: application/json' \\\n"
                 f"     -d '{{\"value\": \"'${var}'\"}}'  "
             )
-    
+
         def _read_snippet(key: str, varname: str) -> str:
             return (
                 f"   {varname}=$(curl -s -H \"X-API-Key: $API_KEY\" \\\n"
                 f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
                 f"     | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"value\"])')\n"
             )
-    
-        proposal_key = _scratchpad_key("proposal")
+
+        # Scratchpad keys — v1.1.40: use _draft/_review/_final for clarity
+        draft_key = _scratchpad_key("draft")
         review_key = _scratchpad_key("review")
-        decision_key = _scratchpad_key("decision")
-    
+        final_key = _scratchpad_key("final")
+
+        # Build optional context and criteria sections for prompts
+        context_section = (
+            f"\n**Context:** {body.context}\n" if body.context else ""
+        )
+        criteria_section = (
+            f"\n**Evaluation Criteria:** {', '.join(body.criteria)}\n"
+            if body.criteria
+            else ""
+        )
+
         # --- Proposer prompt ---
         proposer_prompt = (
             f"You are the PROPOSER agent in an Architecture Decision Record (ADR) workflow.\n"
             f"\n"
             f"**ADR Topic:** {body.topic}\n"
-            f"\n"
-            f"Your task is to analyse the architectural decision and identify candidate options.\n"
+            + context_section
+            + criteria_section
+            + f"\n"
+            f"Your task is to draft a complete Architecture Decision Record (ADR) for this topic.\n"
             f"\n"
             f"Steps:\n"
             f"1. Identify 2-3 concrete options for addressing '{body.topic}'.\n"
@@ -777,41 +795,51 @@ def build_workflows_router(
             f"   - Pros (technical advantages, performance, maintainability, cost)\n"
             f"   - Cons (drawbacks, risks, operational complexity)\n"
             f"   - When this option is most appropriate\n"
-            f"3. Write your analysis to `proposal.md` in your working directory.\n"
+            f"3. Write your full ADR draft to `draft.md` using the Nygard format:\n"
+            f"   # ADR: {body.topic}\n"
+            f"   ## Status\n"
+            f"   Proposed\n"
+            f"   ## Context\n"
+            f"   ## Decision\n"
+            f"   ## Consequences\n"
             f"4. Store it in the shared scratchpad:\n"
             f"   ```bash\n"
             f"   {_ctx_snippet}\n"
-            f"   CONTENT=$(cat proposal.md)\n"
-            + _write_snippet(proposal_key)
+            f"   CONTENT=$(cat draft.md)\n"
+            + _write_snippet(draft_key)
             + f"\n"
             f"   ```\n"
             f"\n"
-            f"Be technical, specific, and objective. Do not recommend a winner yet — "
-            f"that is the synthesizer's job. Max 500 words."
+            f"Be technical, specific, and objective. Document all options before deciding. "
+            f"The reviewer will critique your draft next."
         )
-    
+
         # --- Reviewer prompt ---
         reviewer_prompt = (
             f"You are the REVIEWER agent in an Architecture Decision Record (ADR) workflow.\n"
             f"\n"
             f"**ADR Topic:** {body.topic}\n"
-            f"\n"
-            f"Your task is to critically review the proposer's analysis.\n"
+            + context_section
+            + criteria_section
+            + f"\n"
+            f"Your task is to critically review the proposer's ADR draft.\n"
             f"\n"
             f"Steps:\n"
-            f"1. Read the proposer's analysis from the scratchpad:\n"
+            f"1. Read the proposer's ADR draft from the scratchpad:\n"
             f"   ```bash\n"
             f"   {_ctx_snippet}\n"
-            + _read_snippet(proposal_key, "PROPOSAL")
-            + f"   echo \"Proposal: $PROPOSAL\"\n"
+            + _read_snippet(draft_key, "DRAFT")
+            + f"   echo \"Draft: $DRAFT\"\n"
             f"   ```\n"
-            f"2. Critically evaluate the proposal:\n"
+            f"2. Critically evaluate the draft:\n"
             f"   - Are any options missing or underrepresented?\n"
             f"   - Are the pros/cons accurate and complete?\n"
             f"   - Are there hidden risks or biases in the analysis?\n"
             f"   - What additional decision drivers should be considered?\n"
             f"     (e.g. team expertise, operational burden, vendor lock-in, scalability)\n"
-            f"3. Write your critique to `review.md` in your working directory.\n"
+            f"   - Is the ADR format correct and complete?\n"
+            f"3. Write your structured critique to `review.md` in your working directory.\n"
+            f"   Include: gaps, risks, recommended additions, verdict on each option.\n"
             f"4. Store it in the shared scratchpad:\n"
             f"   ```bash\n"
             f"   CONTENT=$(cat review.md)\n"
@@ -820,23 +848,25 @@ def build_workflows_router(
             f"   ```\n"
             f"\n"
             f"Be rigorous and independent. Do not simply agree with the proposer — "
-            f"your role is to stress-test the analysis. Max 400 words."
+            f"your role is to stress-test the analysis."
         )
-    
+
         # --- Synthesizer prompt ---
         synthesizer_prompt = (
             f"You are the SYNTHESIZER agent in an Architecture Decision Record (ADR) workflow.\n"
             f"\n"
             f"**ADR Topic:** {body.topic}\n"
-            f"\n"
-            f"Your task is to read the proposal and review, then produce a final "
-            f"MADR-format DECISION.md.\n"
+            + context_section
+            + criteria_section
+            + f"\n"
+            f"Your task is to read the ADR draft and the reviewer's critique, then produce "
+            f"a final polished DECISION.md.\n"
             f"\n"
             f"Steps:\n"
             f"1. Read both artifacts from the scratchpad:\n"
             f"   ```bash\n"
             f"   {_ctx_snippet}\n"
-            + _read_snippet(proposal_key, "PROPOSAL")
+            + _read_snippet(draft_key, "DRAFT")
             + _read_snippet(review_key, "REVIEW")
             + f"   ```\n"
             f"2. Write `DECISION.md` in MADR format with these sections:\n"
@@ -854,44 +884,47 @@ def build_workflows_router(
             f"3. Store DECISION.md in the shared scratchpad:\n"
             f"   ```bash\n"
             f"   CONTENT=$(cat DECISION.md)\n"
-            + _write_snippet(decision_key)
+            + _write_snippet(final_key)
             + f"\n"
             f"   ```\n"
             f"\n"
-            f"Synthesize both the proposal and the reviewer's critique. "
+            f"Synthesize both the draft and the reviewer's critique. "
             f"Choose the best option with clear rationale. "
             f"Acknowledge the reviewer's concerns in the Consequences section."
         )
-    
-        # Submit tasks in pipeline order
+
+        # Submit tasks in pipeline order (propose → review → synthesize)
         proposer_task = await orchestrator.submit_task(
             proposer_prompt,
             required_tags=body.proposer_tags or None,
             depends_on=[],
+            timeout=body.agent_timeout,
         )
-    
+
         reviewer_task = await orchestrator.submit_task(
             reviewer_prompt,
             required_tags=body.reviewer_tags or None,
             depends_on=[proposer_task.id],
+            timeout=body.agent_timeout,
         )
-    
+
         synthesizer_task = await orchestrator.submit_task(
             synthesizer_prompt,
             required_tags=body.synthesizer_tags or None,
             depends_on=[reviewer_task.id],
             reply_to=body.reply_to,
+            timeout=body.agent_timeout,
         )
-    
+
         task_ids_map = {
             "proposer": proposer_task.id,
             "reviewer": reviewer_task.id,
             "synthesizer": synthesizer_task.id,
         }
-    
+
         all_task_ids = list(task_ids_map.values())
         run = wm.submit(name=wf_name, task_ids=all_task_ids)
-    
+
         return {
             "workflow_id": run.id,
             "name": run.name,

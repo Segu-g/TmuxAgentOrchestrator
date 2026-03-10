@@ -667,20 +667,31 @@ class AdrWorkflowSubmit(BaseModel):
     Submits a Proposer → Reviewer → Synthesizer Workflow DAG that produces a
     MADR-format DECISION.md via the shared scratchpad (Blackboard pattern):
 
-      - ``{scratchpad_prefix}_proposal``: proposer's analysis of options
-      - ``{scratchpad_prefix}_review``:   reviewer's technical critique
-      - ``{scratchpad_prefix}_decision``: synthesizer's final MADR DECISION.md
+      - ``{scratchpad_prefix}_draft``:  proposer's full ADR draft
+      - ``{scratchpad_prefix}_review``: reviewer's structured critique
+      - ``{scratchpad_prefix}_final``:  synthesizer's final MADR DECISION.md
 
     Design references:
+    - Nygard, M. "Documenting Architecture Decisions" (2011):
+      https://www.cognitect.com/blog/2011/11/15/documenting-architecture-decisions —
+      canonical 5-section format: title, status, context, decision, consequences.
+    - MADR 4.0.0 (2024-09-17): Markdown Architectural Decision Records standard format.
     - AgenticAKM arXiv:2602.04445 (2026): Extractor/Retriever/Generator/Validator
       multi-agent decomposition improves ADR quality over single-LLM calls.
     - Ochoa et al. arXiv:2507.05981 "MAD for Requirements Engineering" (RE 2025):
       multi-agent debate enhances requirements classification accuracy.
-    - MADR 4.0.0 (2024-09-17): Markdown Architectural Decision Records standard format.
-    - DESIGN.md §10.14 (v0.40.0)
+    - DESIGN.md §10.72 (v1.1.40)
     """
 
     topic: str
+    # Optional architectural context for the decision (problem background)
+    context: str = ""
+    # Evaluation criteria (e.g. ["performance", "operability", "cost"])
+    criteria: list[str] = []
+    # Scratchpad namespace prefix; defaults to "adr" (auto-suffixed with run ID)
+    scratchpad_prefix: str = "adr"
+    # Per-task timeout in seconds; passed to submit_task
+    agent_timeout: int = 300
     # Optional per-role required_tags for agent capability routing
     proposer_tags: list[str] = []
     reviewer_tags: list[str] = []

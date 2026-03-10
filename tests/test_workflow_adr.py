@@ -300,11 +300,12 @@ class TestADRWorkflowPrompts:
         synth_prompt = prompts[2].lower()
         assert "madr" in synth_prompt or "decision outcome" in synth_prompt or "considered options" in synth_prompt
 
-    def test_synthesizer_prompt_reads_both_proposal_and_review(self):
-        """Synthesizer should read both proposer and reviewer artifacts from scratchpad."""
+    def test_synthesizer_prompt_reads_both_draft_and_review(self):
+        """Synthesizer should read both ADR draft and reviewer artifacts from scratchpad."""
         prompts = self._get_prompts()
         synth_prompt = prompts[2].lower()
-        assert "proposal" in synth_prompt or "review" in synth_prompt
+        # v1.1.40: proposer writes _draft key; synthesizer reads draft + review
+        assert "draft" in synth_prompt or "review" in synth_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -450,3 +451,153 @@ class TestADRWorkflowRegistration:
         paths = schema.get("paths", {})
         assert "/workflows/adr" in paths
         assert "post" in paths["/workflows/adr"]
+
+
+# ---------------------------------------------------------------------------
+# v1.1.40: Enhanced fields — context, criteria, scratchpad_prefix, agent_timeout
+# ---------------------------------------------------------------------------
+
+
+class TestADRWorkflowEnhancedFields:
+    def _get_prompts_and_data(self, payload: dict) -> tuple[list[str], dict]:
+        app, orch = _make_app()
+        prompts = []
+        original_submit = orch.submit_task
+
+        async def capture_submit(prompt, *args, **kwargs):
+            prompts.append(prompt)
+            return await original_submit(prompt, *args, **kwargs)
+
+        orch.submit_task = capture_submit
+
+        with TestClient(app) as client:
+            r = client.post("/workflows/adr", json=payload, headers=AUTH)
+
+        return prompts, r.json()
+
+    def test_context_included_in_proposer_prompt(self):
+        """context field should appear in the proposer prompt."""
+        ctx_text = "We have 10k sessions per day and need fast reads."
+        prompts, _ = self._get_prompts_and_data({
+            "topic": "SQLite vs PostgreSQL",
+            "context": ctx_text,
+        })
+        assert ctx_text in prompts[0]
+
+    def test_context_included_in_reviewer_prompt(self):
+        """context field should appear in the reviewer prompt."""
+        ctx_text = "Budget constraint: no managed cloud DB."
+        prompts, _ = self._get_prompts_and_data({
+            "topic": "SQLite vs PostgreSQL",
+            "context": ctx_text,
+        })
+        assert ctx_text in prompts[1]
+
+    def test_context_included_in_synthesizer_prompt(self):
+        """context field should appear in the synthesizer prompt."""
+        ctx_text = "Team has 2 engineers, no DBA."
+        prompts, _ = self._get_prompts_and_data({
+            "topic": "SQLite vs PostgreSQL",
+            "context": ctx_text,
+        })
+        assert ctx_text in prompts[2]
+
+    def test_criteria_included_in_proposer_prompt(self):
+        """criteria list should appear in the proposer prompt."""
+        prompts, _ = self._get_prompts_and_data({
+            "topic": "SQLite vs PostgreSQL",
+            "criteria": ["performance", "operability", "cost"],
+        })
+        assert "performance" in prompts[0]
+        assert "operability" in prompts[0]
+        assert "cost" in prompts[0]
+
+    def test_empty_context_not_spuriously_added(self):
+        """Empty context string should not add noisy empty-context line."""
+        prompts, _ = self._get_prompts_and_data({
+            "topic": "SQLite vs PostgreSQL",
+            "context": "",
+        })
+        # An empty context= should not inject a "Context:" line with blank value
+        assert "**Context:**  " not in prompts[0]
+
+    def test_custom_scratchpad_prefix_used(self):
+        """Custom scratchpad_prefix should appear in the scratchpad key references."""
+        prompts, data = self._get_prompts_and_data({
+            "topic": "SQLite vs PostgreSQL",
+            "scratchpad_prefix": "myproject_adr",
+        })
+        # The response prefix should match our custom prefix
+        assert data["scratchpad_prefix"] == "myproject_adr"
+        # Proposer prompt should reference our prefix
+        assert "myproject_adr_draft" in prompts[0]
+
+    def test_default_scratchpad_prefix_auto_generated(self):
+        """Default scratchpad_prefix (adr) should generate an auto-prefixed key."""
+        prompts, data = self._get_prompts_and_data({
+            "topic": "SQLite vs PostgreSQL",
+        })
+        prefix = data["scratchpad_prefix"]
+        # Should be something like adr_<8hex>
+        assert prefix.startswith("adr_")
+        assert len(prefix) > 4
+
+    def test_draft_key_in_proposer_prompt(self):
+        """Proposer should write to the _draft scratchpad key (not _proposal)."""
+        prompts, data = self._get_prompts_and_data({"topic": "SQLite vs PostgreSQL"})
+        prefix = data["scratchpad_prefix"]
+        assert f"{prefix}_draft" in prompts[0]
+
+    def test_review_key_in_reviewer_prompt(self):
+        """Reviewer should write to the _review scratchpad key."""
+        prompts, data = self._get_prompts_and_data({"topic": "SQLite vs PostgreSQL"})
+        prefix = data["scratchpad_prefix"]
+        assert f"{prefix}_review" in prompts[1]
+
+    def test_final_key_in_synthesizer_prompt(self):
+        """Synthesizer should write to the _final scratchpad key (not _decision)."""
+        prompts, data = self._get_prompts_and_data({"topic": "SQLite vs PostgreSQL"})
+        prefix = data["scratchpad_prefix"]
+        assert f"{prefix}_final" in prompts[2]
+
+    def test_agent_timeout_forwarded_to_tasks(self):
+        """agent_timeout should be passed as timeout= to all submitted tasks."""
+        app, orch = _make_app()
+        timeouts = []
+        original_submit = orch.submit_task
+
+        async def capture_submit(*args, **kwargs):
+            timeouts.append(kwargs.get("timeout"))
+            return await original_submit(*args, **kwargs)
+
+        orch.submit_task = capture_submit
+
+        with TestClient(app) as client:
+            client.post(
+                "/workflows/adr",
+                json={"topic": "SQLite vs PostgreSQL", "agent_timeout": 600},
+                headers=AUTH,
+            )
+
+        assert all(t == 600 for t in timeouts), f"Expected all 600, got {timeouts}"
+
+    def test_default_agent_timeout_is_300(self):
+        """Default agent_timeout (300) should be passed when not specified."""
+        app, orch = _make_app()
+        timeouts = []
+        original_submit = orch.submit_task
+
+        async def capture_submit(*args, **kwargs):
+            timeouts.append(kwargs.get("timeout"))
+            return await original_submit(*args, **kwargs)
+
+        orch.submit_task = capture_submit
+
+        with TestClient(app) as client:
+            client.post(
+                "/workflows/adr",
+                json={"topic": "SQLite vs PostgreSQL"},
+                headers=AUTH,
+            )
+
+        assert all(t == 300 for t in timeouts), f"Expected all 300, got {timeouts}"
