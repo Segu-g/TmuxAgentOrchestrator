@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Strangler Fig: WorkflowRun is canonical in domain/workflow.py.
@@ -50,13 +51,39 @@ class WorkflowManager:
     All methods are synchronous (no async I/O) so they can be called directly
     from the orchestrator's sync-safe callbacks.
 
-    Design reference: DESIGN.md §10.20 (v0.25.0).
+    Phase completion tracking (v1.1.38):
+    When a workflow run has phases (``run.phases`` is non-empty), the manager
+    also tracks per-phase task completion.  When all tasks in a phase are done,
+    the corresponding :class:`~tmux_orchestrator.domain.phase_strategy.WorkflowPhaseStatus`
+    is transitioned to ``"complete"`` or ``"failed"``.  Skipped phases (with no
+    task_ids) are treated as already resolved at submission time and are not
+    tracked here.
+
+    The internal ``_task_to_phase`` dict maps ``task_id → (workflow_id,
+    phase_name)`` for O(1) lookup.  It is populated via :meth:`register_phases`
+    after the caller attaches phases to the WorkflowRun.
+
+    Design references:
+    - DESIGN.md §10.20 (v0.25.0)
+    - DESIGN.md §10.70 (v1.1.38 — phase completion tracking)
+    - Netflix Maestro: per-step completion counters driving phase-level state
+      (https://netflixtechblog.com/100x-faster-how-we-supercharged-netflix-maestros-workflow-engine-028e9637f041)
+    - Argo Workflows DAG task completion tracking
+      (https://argo-workflows.readthedocs.io/en/latest/walk-through/dag/)
+    - Richardson "Microservices Patterns" Ch.4 — Saga Orchestration pattern
     """
 
     def __init__(self) -> None:
         self._runs: dict[str, WorkflowRun] = {}
         # task_id → workflow_id mapping for O(1) lookup on task completion
         self._task_to_workflow: dict[str, str] = {}
+        # Phase completion tracking (v1.1.38):
+        # task_id → (workflow_id, phase_name) for O(1) phase lookup
+        self._task_to_phase: dict[str, tuple[str, str]] = {}
+        # (workflow_id, phase_name) → set of completed task_ids
+        self._phase_completed: dict[tuple[str, str], set[str]] = {}
+        # (workflow_id, phase_name) → set of failed task_ids
+        self._phase_failed: dict[tuple[str, str], set[str]] = {}
 
     # ------------------------------------------------------------------
     # Submission
@@ -89,6 +116,44 @@ class WorkflowManager:
             self._task_to_workflow[tid] = run_id
         return run
 
+    def register_phases(self, workflow_id: str) -> None:
+        """Register phase-task mappings for an existing workflow run.
+
+        Must be called after :meth:`submit` and after the caller has attached
+        ``WorkflowPhaseStatus`` objects to ``run.phases``.  Records the
+        ``task_id → (workflow_id, phase_name)`` mapping for each non-skipped
+        phase task, enabling O(1) phase-status lookups in
+        :meth:`on_task_complete` and :meth:`on_task_failed`.
+
+        Skipped phases (``status == "skipped"``, ``task_ids == []``) are not
+        registered — they are already in their terminal state.
+
+        This method is idempotent: calling it twice on the same workflow_id
+        overwrites the existing mappings (safe for checkpoint-restore paths).
+
+        Parameters
+        ----------
+        workflow_id:
+            The :attr:`WorkflowRun.id` returned by :meth:`submit`.
+
+        Design reference: DESIGN.md §10.70 (v1.1.38)
+        """
+        run = self._runs.get(workflow_id)
+        if run is None:
+            return
+        for phase in run.phases:
+            phase_key = (workflow_id, phase.name)
+            if phase.status == "skipped" or not phase.task_ids:
+                # Already terminal; no tracking needed.
+                continue
+            # Initialise tracking sets (preserve existing if idempotent call)
+            if phase_key not in self._phase_completed:
+                self._phase_completed[phase_key] = set()
+            if phase_key not in self._phase_failed:
+                self._phase_failed[phase_key] = set()
+            for tid in phase.task_ids:
+                self._task_to_phase[tid] = (workflow_id, phase.name)
+
     # ------------------------------------------------------------------
     # Completion tracking
     # ------------------------------------------------------------------
@@ -97,10 +162,14 @@ class WorkflowManager:
         """Record a successful task completion.
 
         Marks the task as done and transitions the workflow to ``"complete"``
-        if all tasks have now finished successfully.
+        if all tasks have now finished successfully.  Also updates the
+        per-phase :class:`~tmux_orchestrator.domain.phase_strategy.WorkflowPhaseStatus`
+        when all tasks in the phase are resolved.
 
         No-op when *task_id* is not associated with any tracked workflow, or
         when the workflow has already been cancelled.
+
+        Design reference: DESIGN.md §10.70 (v1.1.38)
         """
         run = self._get_run_for_task(task_id)
         if run is None:
@@ -109,16 +178,21 @@ class WorkflowManager:
             return
         run._completed.add(task_id)
         run._failed.discard(task_id)  # idempotent: remove any prior failure
+        self._update_phase_status(task_id, run, completed=True)
         self._update_status(run)
 
     def on_task_failed(self, task_id: str) -> None:
         """Record a failed task.
 
         Marks the task as failed and immediately transitions the workflow to
-        ``"failed"`` status.
+        ``"failed"`` status.  Also updates the per-phase
+        :class:`~tmux_orchestrator.domain.phase_strategy.WorkflowPhaseStatus`
+        when all tasks in the phase are resolved (complete or failed).
 
         No-op when *task_id* is not associated with any tracked workflow, or
         when the workflow has already been cancelled.
+
+        Design reference: DESIGN.md §10.70 (v1.1.38)
         """
         run = self._get_run_for_task(task_id)
         if run is None:
@@ -127,6 +201,7 @@ class WorkflowManager:
             return
         run._failed.add(task_id)
         run._completed.discard(task_id)
+        self._update_phase_status(task_id, run, completed=False)
         self._update_status(run)
 
     def cancel(self, workflow_id: str) -> list[str]:
@@ -158,7 +233,8 @@ class WorkflowManager:
         If *task_id* belongs to a tracked workflow that was transitioning to
         ``"failed"`` due to this task, reset the status to ``"running"`` so
         that the workflow is not prematurely marked as failed while retries are
-        still outstanding.
+        still outstanding.  Also reverts any phase-level failure marking for
+        this task's phase.
 
         No-op when *task_id* is not associated with any tracked workflow.
 
@@ -173,6 +249,16 @@ class WorkflowManager:
         # Remove from failed set — this task is still in-flight (retrying).
         run._failed.discard(task_id)
         run._completed.discard(task_id)
+        # Revert phase-level failure tracking for this task.
+        phase_key = self._task_to_phase.get(task_id)
+        if phase_key is not None:
+            self._phase_failed.get(phase_key, set()).discard(task_id)
+            self._phase_completed.get(phase_key, set()).discard(task_id)
+            # Revert phase to running if it had been marked failed.
+            wf_id, phase_name = phase_key
+            phase = self._get_phase(wf_id, phase_name)
+            if phase is not None and phase.status == "failed":
+                phase.mark_running()
         self._update_status(run)
 
     # ------------------------------------------------------------------
@@ -223,6 +309,80 @@ class WorkflowManager:
         if wf_id is None:
             return None
         return self._runs.get(wf_id)
+
+    def _get_phase(self, workflow_id: str, phase_name: str) -> "Any | None":
+        """Return the WorkflowPhaseStatus for the given workflow/phase pair, or None.
+
+        Searches ``run.phases`` by name.  O(N_phases) but N_phases is small.
+
+        Design reference: DESIGN.md §10.70 (v1.1.38)
+        """
+        run = self._runs.get(workflow_id)
+        if run is None:
+            return None
+        for phase in run.phases:
+            if phase.name == phase_name:
+                return phase
+        return None
+
+    def _update_phase_status(self, task_id: str, run: WorkflowRun, *, completed: bool) -> None:
+        """Update phase-level status when a task completes or fails.
+
+        Looks up which phase *task_id* belongs to via ``_task_to_phase``.  If
+        found, updates the per-phase tracking sets and — when all tasks in the
+        phase are resolved — transitions the
+        :class:`~tmux_orchestrator.domain.phase_strategy.WorkflowPhaseStatus`
+        to ``"complete"`` or ``"failed"``.
+
+        Also transitions the phase from ``"pending"`` to ``"running"`` on first
+        task resolution (to reflect that work started).
+
+        Parameters
+        ----------
+        task_id:
+            The task that just completed or failed.
+        run:
+            The WorkflowRun that owns the phase.
+        completed:
+            ``True`` for a successful completion, ``False`` for a failure.
+
+        Design reference: DESIGN.md §10.70 (v1.1.38)
+        Research:
+        - Netflix Maestro per-step completion counters
+          (https://netflixtechblog.com/100x-faster-how-we-supercharged-netflix-maestros-workflow-engine-028e9637f041)
+        - Richardson "Microservices Patterns" Ch.4 — Saga Orchestration
+          (https://microservices.io/patterns/data/saga.html)
+        """
+        phase_key = self._task_to_phase.get(task_id)
+        if phase_key is None:
+            # Not a phases-mode workflow, or task not in any tracked phase.
+            return
+        wf_id, phase_name = phase_key
+        phase = self._get_phase(wf_id, phase_name)
+        if phase is None:
+            return
+
+        # Transition to running on first resolution (if still pending).
+        if phase.status == "pending":
+            phase.mark_running()
+
+        # Update per-phase tracking sets.
+        if completed:
+            self._phase_completed.setdefault(phase_key, set()).add(task_id)
+            self._phase_failed.setdefault(phase_key, set()).discard(task_id)
+        else:
+            self._phase_failed.setdefault(phase_key, set()).add(task_id)
+            self._phase_completed.setdefault(phase_key, set()).discard(task_id)
+
+        done = self._phase_completed.get(phase_key, set()) | self._phase_failed.get(phase_key, set())
+        all_ids = set(phase.task_ids)
+
+        # When all tasks are resolved, transition the phase to terminal state.
+        if done >= all_ids:
+            if self._phase_failed.get(phase_key):
+                phase.mark_failed()
+            else:
+                phase.mark_complete()
 
     def _update_status(self, run: WorkflowRun) -> None:
         """Recompute and update the run's status field."""

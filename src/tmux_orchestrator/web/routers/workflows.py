@@ -230,6 +230,10 @@ def build_workflows_router(
             for ps in phase_statuses:
                 ps.task_ids = [local_to_global[lid] for lid in ps.task_ids]
             run.phases = phase_statuses
+            # Register phase-task mappings for phase completion tracking (v1.1.38).
+            # Must be called AFTER run.phases is assigned so register_phases() can
+            # iterate over the phases with their remapped global task_ids.
+            wm.register_phases(run.id)
     
         response: dict = {
             "workflow_id": run.id,
