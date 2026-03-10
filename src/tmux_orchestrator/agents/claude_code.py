@@ -120,6 +120,26 @@ class ClaudeCodeAgent(Agent):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    def _agent_work_dir(self, cwd: Path) -> Path:
+        """Return the per-agent working directory for file writes and claude launch.
+
+        When ``isolate=True`` the agent already has its own worktree, so cwd
+        itself is used unchanged.
+
+        When ``isolate=False`` multiple agents share the same cwd.  To prevent
+        file collisions (especially ``.claude/settings.local.json`` for Stop
+        hooks), each agent uses its own subdir ``.agent/{agent_id}/`` under
+        the shared cwd.  This subdir becomes the cwd that claude is launched
+        from, giving each agent an independent Claude Code project directory.
+
+        Reference: DESIGN.md §10.67 (v1.1.35 — per-agent subdir isolation)
+        """
+        if self._isolate:
+            return cwd
+        subdir = cwd / ".agent" / self.id
+        subdir.mkdir(parents=True, exist_ok=True)
+        return subdir
+
     async def start(self) -> None:
         self._record_start_time()
         loop = asyncio.get_running_loop()
@@ -151,39 +171,50 @@ class ClaudeCodeAgent(Agent):
         cwd = await self._setup_worktree()
         self._cwd = cwd
         if cwd is not None:
-            await loop.run_in_executor(None, self._write_context_file, cwd)
+            # Determine the effective working directory for this agent.
+            # When isolate=False, agents share cwd — each gets its own subdir
+            # .agent/{agent_id}/ to avoid file collisions (especially Stop hook
+            # settings.local.json).  When isolate=True, cwd is already exclusive.
+            # Reference: DESIGN.md §10.67 (v1.1.35)
+            agent_dir = await loop.run_in_executor(None, self._agent_work_dir, cwd)
+            self._cwd = agent_dir
+            await loop.run_in_executor(None, self._write_context_file, agent_dir)
             if self._api_key:
-                await loop.run_in_executor(None, self._write_api_key_file, cwd)
-            # Only write agent-specific CLAUDE.md in isolated worktrees.
-            # Non-isolated agents share an existing directory that may already have
-            # a project-level CLAUDE.md — overwriting it would destroy project context.
-            if self._isolate:
-                await loop.run_in_executor(None, self._write_agent_claude_md, cwd)
-            await loop.run_in_executor(None, self._write_notes_template, cwd)
+                await loop.run_in_executor(None, self._write_api_key_file, agent_dir)
+            # Write agent-specific CLAUDE.md:
+            # - isolate=True (own worktree): always write
+            # - isolate=False (shared cwd): write inside agent_dir (.agent/{id}/)
+            #   so the parent cwd CLAUDE.md is never touched
+            await loop.run_in_executor(None, self._write_agent_claude_md, agent_dir)
+            await loop.run_in_executor(None, self._write_notes_template, agent_dir)
+            # Context files are shared project resources — copy to shared cwd,
+            # not to the per-agent subdir (so all agents can read them).
             await loop.run_in_executor(None, self._copy_context_files, cwd)
             await loop.run_in_executor(None, self._copy_context_spec_files, cwd)
             # Copy slash commands so agents can use /task-complete etc. without
             # the namespace prefix (plain /task-complete instead of
             # /tmux-orchestrator:task-complete).  Does not overwrite existing files.
-            await loop.run_in_executor(None, self._copy_commands, cwd)
-            await loop.run_in_executor(None, self._completion.on_start, cwd)
-            # Pre-trust the worktree directory so Claude Code does not show the
-            # interactive "Do you trust the files in this folder?" prompt.
+            await loop.run_in_executor(None, self._copy_commands, agent_dir)
+            await loop.run_in_executor(None, self._completion.on_start, agent_dir)
+            # Pre-trust the agent's working directory so Claude Code does not show
+            # the interactive "Do you trust the files in this folder?" prompt.
             # That prompt blocks _wait_for_ready() (SessionStart hook) causing
             # a 60-second timeout.  Writing hasTrustDialogAccepted=true to
             # ~/.claude.json before launching claude prevents the dialog.
             # Reference: trust.py module, GitHub Issue #23109, #2147.
-            await loop.run_in_executor(None, pre_trust_worktree, cwd)
+            await loop.run_in_executor(None, pre_trust_worktree, agent_dir)
             if self._web_base_url:
                 self._startup_ready = asyncio.Event()
                 # SessionStart hook is in the agent plugin (loaded via --plugin-dir).
+        else:
+            agent_dir = None
         plugin_dir = Path(__file__).parent.parent / "agent_plugin"
         command = self._command
         if plugin_dir.is_dir():
             command = f"{command} --plugin-dir {shlex.quote(str(plugin_dir))}"
         launch = (
-            f"cd {shlex.quote(str(cwd))} && {command}"
-            if cwd
+            f"cd {shlex.quote(str(agent_dir))} && {command}"
+            if agent_dir
             else command
         )
         self.process.send_keys(launch)
@@ -633,8 +664,12 @@ use the plain form without a namespace prefix.
         # Delegate completion-strategy cleanup (e.g. remove Stop hook settings file).
         # For non-isolated agents the worktree is NOT deleted by _teardown_worktree(),
         # so the strategy must remove any files it wrote to avoid stale hooks.
-        if self.worktree_path is not None:
-            self._completion.on_stop(self.worktree_path)
+        # Use self._cwd (the effective agent working directory) rather than
+        # self.worktree_path: for isolate=False agents, self._cwd is the
+        # .agent/{agent_id}/ subdir where settings.local.json was written.
+        cleanup_dir = self._cwd or self.worktree_path
+        if cleanup_dir is not None:
+            self._completion.on_stop(cleanup_dir)
         await self._teardown_worktree()
         logger.info("ClaudeCodeAgent %s stopped", self.id)
 

@@ -312,7 +312,10 @@ async def test_non_isolated_agent_also_gets_commands(tmp_path: Path) -> None:
                 await agent.start()
 
     assert len(copy_commands_called) == 1, "_copy_commands called for non-isolated agent"
-    assert copy_commands_called[0] == tmp_path
+    # isolate=False: commands are copied to the per-agent subdir .agent/{agent_id}/
+    # (not to the shared cwd root) to avoid file collisions between concurrent agents.
+    expected_agent_dir = tmp_path / ".agent" / "non-isolated"
+    assert copy_commands_called[0] == expected_agent_dir
 
     await agent.stop()
 
