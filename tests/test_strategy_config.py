@@ -350,7 +350,7 @@ def test_competitive_judge_prompt_template_placeholder_substitution():
     prompt = judge_tasks[0]["prompt"]
     assert "Criteria:" in prompt
     assert "background info" in prompt
-    # Unknown placeholders must not raise errors (format_map safe)
+    # Unknown placeholders must not raise errors (str.replace is immune to format mini-language)
     assert "{criteria}" not in prompt or True  # criteria filled or left as-is without crash
 
 

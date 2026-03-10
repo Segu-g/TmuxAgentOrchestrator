@@ -40,7 +40,6 @@ References:
 from __future__ import annotations
 
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, Union, runtime_checkable
 
@@ -445,16 +444,19 @@ def _render_competitive_judge_prompt(
 ) -> str:
     """Render a competitive judge prompt from a user-supplied template.
 
-    Placeholders supported:
+    Placeholders supported (substituted via ``str.replace``):
     - ``{context}``    — the effective phase context string.
     - ``{solutions}``  — hint pointing to scratchpad prefix where solver
                          outputs are stored.
     - ``{criteria}``   — the ``scorer`` field value (e.g. ``"llm_judge"``).
 
-    Unknown placeholders are left as-is by using a ``defaultdict`` fallback
-    in ``str.format_map`` — no ``KeyError`` is raised for missing keys.
+    Substitution uses ``str.replace`` (not ``format_map``) so that templates
+    containing literal Python-dict syntax (e.g. ``{'key': 'val'}``) do not
+    trigger ``ValueError`` from the format mini-language parser.  Unknown
+    placeholders are left as-is.
 
     Design reference: DESIGN.md §10.64 (v1.1.32)
+    Research: PEP 750 Template Strings; LangChain prompt template format guide.
     """
     solutions_hint = (
         f"Read solver outputs from scratchpad prefix '{scratchpad_prefix}' "
@@ -462,14 +464,14 @@ def _render_competitive_judge_prompt(
         f"'{scratchpad_prefix}/{phase_name}/1', …)"
     )
 
-    # Use defaultdict so that unknown {placeholders} degrade to empty string
-    # rather than raising KeyError (safe against partial templates).
-    substitutions: dict[str, str] = defaultdict(str, {
-        "context": context,
-        "solutions": solutions_hint,
-        "criteria": scorer,
-    })
-    return template.format_map(substitutions)
+    # Use str.replace for each known placeholder.  This is immune to
+    # ValueError from malformed format specifiers in user-supplied templates
+    # (e.g. Python dict literals with braces).
+    result = template
+    result = result.replace("{context}", context)
+    result = result.replace("{solutions}", solutions_hint)
+    result = result.replace("{criteria}", scorer)
+    return result
 
 
 def _build_debate_judge_early_stop_instruction(early_stop_signal: str) -> str:
