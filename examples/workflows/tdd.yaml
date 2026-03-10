@@ -15,6 +15,19 @@
 workflow:
   endpoint: /workflows/tdd
 
+# --- Defaults (parameter inheritance) ---
+# Values in this section apply when the corresponding field is absent from the
+# request body.  Override any field by setting it explicitly below or in the
+# POST body.  The 'defaults' key itself is stripped before schema validation.
+# Use apply_workflow_defaults() / load_workflow_template() from
+# tmux_orchestrator.workflow_defaults to load this template programmatically.
+defaults:
+  language: python
+  test_writer_tags: []
+  implementer_tags: []
+  refactorer_tags: []
+  reply_to: null
+
 # --- Required fields ---
 
 # Feature description (e.g. "a stack data structure with push/pop/peek")

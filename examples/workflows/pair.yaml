@@ -15,6 +15,16 @@
 workflow:
   endpoint: /workflows/pair
 
+# --- Defaults (parameter inheritance) ---
+# Values in this section apply when the corresponding field is absent from the
+# request body.  Override any field by setting it explicitly below or in the
+# POST body.  Use apply_workflow_defaults() / load_workflow_template() from
+# tmux_orchestrator.workflow_defaults to load this template programmatically.
+defaults:
+  navigator_tags: []
+  driver_tags: []
+  reply_to: null
+
 # --- Required fields ---
 
 # Task description (e.g. "implement a binary search function with full tests")

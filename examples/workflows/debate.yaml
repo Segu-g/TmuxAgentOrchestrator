@@ -18,6 +18,18 @@
 workflow:
   endpoint: /workflows/debate
 
+# --- Defaults (parameter inheritance) ---
+# Values in this section apply when the corresponding field is absent from the
+# request body.  Override any field by setting it explicitly below or in the
+# POST body.  Use apply_workflow_defaults() / load_workflow_template() from
+# tmux_orchestrator.workflow_defaults to load this template programmatically.
+defaults:
+  max_rounds: 2
+  advocate_tags: []
+  critic_tags: []
+  judge_tags: []
+  reply_to: null
+
 # --- Required fields ---
 
 # Topic or design question to debate (e.g. "REST vs GraphQL for this API")
