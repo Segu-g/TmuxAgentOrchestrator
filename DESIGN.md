@@ -727,6 +727,47 @@ AI エージェントにとって TDD は「ガードレール」として機能
 
 ---
 
+### 新規観点 A：isolation: false の改善とエージェント間ファイル分離
+
+> **背景**: 現状 `isolate: false` のエージェントは全員が同一の作業ディレクトリを共有するため、コンテキストファイル (`__orchestrator_context__.json`、`__orchestrator_api_key__` 等) の競合が発生しやすい。v1.0.19 でエージェントIDによるファイル名名前空間化 (`__orchestrator_context__{agent_id}__.json`) を導入したが、根本的な解決策ではない。
+
+| 優先度 | 課題 | 解決アプローチ |
+|--------|------|----------------|
+| **高** | **エージェント設定ファイルの分離** — `isolate: false` 時でも各エージェントが独立した設定ファイルを持てるよう、エージェントごとのサブディレクトリ (`{cwd}/.agent/{agent_id}/`) を作成し、コンテキストファイル・API キーファイル・フック設定を格納する。既存のエージェントIDによる名前空間化を一歩進めた構造的分離 | `ClaudeCodeAgent.start()` でエージェントサブディレクトリを事前作成。`_copy_commands(cwd)` を各エージェントサブディレクトリにコピーする形に変更。`settings.local.json` もサブディレクトリ内に配置 |
+| **高** | **エージェント × worktree 対応付けによる同期** — `isolate: false` の代替として、エージェントを軽量 worktree に紐づけつつ `main` ブランチとの `git pull --rebase` / `git push` を明示的に実行できる仕組みを追加する。エージェントが変更を `main` にマージしたいタイミングで `/sync-to-main` スラッシュコマンドを呼び、オーケストレーターが `git merge --squash` を実行する | `POST /agents/{id}/sync` エンドポイントを追加。`WorktreeManager.sync_to_main(agent_id)` が `git fetch` → `git rebase origin/main` → `git push` を順に実行。競合時は `sync_failed` STATUS イベントを発行 |
+| **中** | **worktree 間ファイル共有チャネル** — `isolate: true` 環境で複数エージェントが共有ファイルを読み書きする必要がある場合の標準パターンを提供する。現状はスクラッチパッド (key-value) か P2P メッセージしかないが、ファイルパスベースの共有 (`GET /worktrees/{agent_id}/files/{path}`、`PUT /worktrees/{agent_id}/files/{path}`) を追加してバイナリ成果物の受け渡しを可能にする | `web/routers/agents.py` に worktree ファイル操作エンドポイントを追加。読み取りは任意エージェントから可能、書き込みは自身のworktreeのみ |
+| **低** | **isolation 設計ガイド** — `isolate: true` / `isolate: false` / worktree 同期の3方式を比較したベストプラクティスガイドを CLAUDE.md に追記する。各方式の用途・制約・設定例を表形式で整理する | CLAUDE.md の "Worktree Isolation" セクションを拡充 |
+
+---
+
+### 新規観点 B：ワークフロー・ストラテジーの細粒度パラメータ化
+
+> **背景**: 現状の `PhaseSpec` は `pattern` (single/parallel/competitive/debate) と `agent_count`、`debate_rounds` しかパラメータを持たない。実際のワークフローでは各ストラテジーに固有の詳細設定（タイムアウト・評価基準・フィードバック方式など）を指定したいケースが多い。`domain/phase_strategy.py` にストラテジーが整理された今、パラメータ体系を充実させる好機。
+
+| 優先度 | 課題 | 詳細 |
+|--------|------|------|
+| **高** | **StrategyConfig 値オブジェクト** — 各ストラテジーが受け取れるパラメータを型安全な dataclass として定義する。`SingleConfig`・`ParallelConfig`・`CompetitiveConfig`・`DebateConfig` を `domain/phase_strategy.py` に追加し、`PhaseSpec` の `strategy_config: StrategyConfig \| None` フィールドで受け取る | `CompetitiveConfig(scorer: str, top_k: int, timeout_per_agent: int)`、`DebateConfig(rounds: int, require_consensus: bool, judge_criteria: str)` など。`POST /workflows` の `phases[].strategy_config` フィールドで受け渡し |
+| **高** | **フェーズごとのタイムアウト設定** — `PhaseSpec` に `timeout: int \| None` フィールドを追加し、フェーズ単位でタスクタイムアウトを上書きできるようにする。現状は全タスクが同一タイムアウトを使用しており、長い調査フェーズと短い実装フェーズが同じ上限を持つ非効率がある | `PhaseSpec.timeout` が設定されている場合、`expand_phases()` が生成する各 `TaskSpec` の `timeout` フィールドに反映。`OrchestratorConfig.task_timeout` のデフォルトは維持 |
+| **中** | **Competitive ストラテジーの評価基準カスタマイズ** — judge エージェントへのプロンプトに評価基準 (`criteria`) と出力形式 (`output_format`) を注入できるようにする。現状は judge プロンプトが固定文字列で、「コードの正確性」「パフォーマンス」「可読性」等を重み付け評価できない | `CompetitiveConfig.judge_prompt_template: str` フィールド。`{criteria}`, `{solutions}`, `{context}` プレースホルダーを置換してジャッジタスクプロンプトを生成 |
+| **中** | **Debate ストラテジーの動的終了条件** — 固定ラウンド数ではなく、合意形成条件（例: judge が "CONSENSUS_REACHED" を含む出力をした場合）で討論を早期終了できる仕組みを追加する | `DebateConfig.early_stop_signal: str \| None`。各ラウンド後に judge の scratchpad エントリを検査し、シグナルが見つかれば残りラウンドをスキップ |
+| **中** | **ワークフローテンプレートのパラメータ継承** — `examples/workflows/*.yaml` に `defaults:` セクションを追加し、全フェーズ共通のデフォルト設定（timeout, required_tags パターン等）を一箇所で指定できるようにする | YAML スキーマ拡張。`POST /workflows` が `defaults` を各フェーズに merge する前処理を追加 |
+| **低** | **PhaseSpec の条件分岐** — `condition: "scratchpad_key_exists('result')"` のような条件式でフェーズをスキップできる仕組みを追加する。決定論的なパイプラインに留まらず、前フェーズの結果に応じてフェーズを動的にスキップできる | `PhaseSpec.skip_condition: str \| None`。DAG 展開時に条件を評価し、`True` の場合はフェーズを `skipped` 状態にして依存タスクを即座に解放 |
+
+---
+
+### 新規観点 C：メッセージ格納フォルダの移動
+
+> **背景**: 現状のメールボックスディレクトリはデフォルトが `~/.tmux_orchestrator/` (ホームディレクトリ下のグローバル領域) で、複数プロジェクトを同一マシンで実行した場合にメッセージが混在する。また `isolate: true` のエージェントはそれぞれ独立した worktree を持つため、メッセージもプロジェクト・セッションスコープで管理すべきである。
+
+| 優先度 | 課題 | 解決アプローチ |
+|--------|------|----------------|
+| **高** | **メールボックスをプロジェクトスコープに移動** — デフォルトの `mailbox_dir` を `~/.tmux_orchestrator/` からデモディレクトリ（サーバーの `cwd`）配下の `.orchestrator/mailbox/` に変更する。`OrchestratorConfig.mailbox_dir` のデフォルト値を変更し、既存の `~` 展開ロジックを `cwd` 相対パス展開に対応させる | `config.py` の `mailbox_dir` デフォルトを `".orchestrator/mailbox"` に変更。`OrchestratorConfig` のコンストラクタで `cwd` を受け取り、相対パスの場合は `cwd / mailbox_dir` に展開する |
+| **高** | **メールボックスをセッション単位で分離** — 同一プロジェクト内で複数のオーケストレーターセッションが並行動作する場合に備え、`{mailbox_dir}/{session_name}/{agent_id}/inbox/` の階層構造を維持しつつ、`session_name` をユニークな値（UUID または設定値）にする。現状は固定文字列 `"orchestrator"` がデフォルトで複数セッション間でメッセージが混在する可能性がある | `OrchestratorConfig.session_name` が未設定の場合、`f"session_{uuid4().hex[:8]}"` を自動生成する。設定ファイルに `session_name:` を明示することで再現性のある名前も使える |
+| **中** | **メールボックスの自動クリーンアップ** — セッション終了時 (`Orchestrator.stop()`) にメールボックスディレクトリを自動削除するオプションを追加する。現状は明示的にディレクトリを削除しないため、長期間運用すると未読メッセージが蓄積する | `OrchestratorConfig.mailbox_cleanup_on_stop: bool = True`。`Orchestrator.stop()` で `shutil.rmtree(mailbox_dir / session_name)` を実行 |
+| **低** | **メールボックスパスを CLAUDE.md エージェントガイドに明記** — エージェントが自分のメールボックスパスを確認できるよう、`__orchestrator_context__{agent_id}__.json` の `mailbox_dir` フィールドの説明と、実際のパス構成例 (`{mailbox_dir}/{session_name}/{agent_id}/inbox/`) を CLAUDE.md の "Receiving Messages" セクションに追記する | CLAUDE.md 更新のみ |
+
+---
+
 ## 10. 調査記録
 
 ### 10.38 v1.1.13 — `__COMPRESS_CONTEXT__` UserPromptSubmit フック + `__COMPRESS_CONTEXT__` ファイル消費パターン
