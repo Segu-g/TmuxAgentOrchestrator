@@ -4266,3 +4266,69 @@ References:
 - Lippens, Stefaan, "Yet another solution to dig you out of a circular import hole in Python", https://www.stefaanlippens.net/circular-imports-type-hints-python.html
 - DataCamp, "Python Circular Import: Causes, Fixes, and Best Practices", https://www.datacamp.com/tutorial/python-circular-import (2025)
 - Scientific Python, "SPEC 1 — Lazy Loading of Submodules and Functions", https://scientific-python.org/specs/spec-0001/
+
+## §10.62 — v1.1.30: Project-Scoped Mailbox Directory (観点C)
+
+### Step 0 — 選択理由
+
+**選択**: メールボックスをプロジェクトスコープに移動 (観点C — 高優先度)
+
+**何を選択したか・理由:**
+
+v1.1.29 で Clean Architecture が 100% 完成し、次の最優先候補として観点C「メールボックスをプロジェクトスコープに移動」を選択した。
+
+現状の問題:
+- デフォルトの `mailbox_dir` は `~/.tmux_orchestrator/` (ホームディレクトリ下グローバル領域)
+- 同一マシンで複数プロジェクト (A・B・C) を並行実行すると、メッセージが混在する
+- デモディレクトリを分けても、メッセージは共通の `~/.tmux_orchestrator/<session_name>/` に書き込まれる
+
+解決策:
+1. `OrchestratorConfig.mailbox_dir` のデフォルトを `".orchestrator/mailbox"` (相対パス) に変更
+2. `load_config(path, cwd=None)` に `cwd` パラメータを追加
+3. `mailbox_dir` が相対パスの場合は `cwd / mailbox_dir` に展開 (絶対パスの場合は変更なし)
+4. 後方互換性: `~` で始まる従来の絶対パスは `expanduser()` で正常動作を維持
+
+**価値/実装コスト:**
+- **スコープ明確**: `config.py` と `load_config()` のみの変更。factory.py での Mailbox 初期化には影響なし
+- **後方互換性保持**: 既存テストは `mailbox_dir=str(tmp_path)` (絶対パス) を使用しており変更不要
+- **多プロジェクト分離**: デモごとに独立した `.orchestrator/mailbox/` が生成され、混在しない
+- **XDG 準拠**: プロジェクトローカルデータは `.` prefix ディレクトリに格納するのが慣例
+
+**何を選ばなかったか・理由:**
+- **StrategyConfig 値オブジェクト** (観点B): 実装コストは低いが、ユーザー向け価値が mailbox 分離より低い
+- **フェーズごとのタイムアウト設定** (観点B): PhaseSpec への `timeout` 追加は有用だが、現状は全タスクが `task_timeout` を使えば足りる
+- **エージェント設定ファイルの分離** (観点A): `isolate: false` のユースケースが限定的
+
+### Step 1 — Research (WebSearch 4クエリ)
+
+**調査内容**: XDG Base Directory Specification、プロジェクトローカル設定ディレクトリ慣例、Python pathlib での相対パス解決、マルチテナント分離パターン。
+
+**調査結果**:
+
+1. **XDG Base Directory Specification** (Freedesktop.org, https://specifications.freedesktop.org/basedir-latest/, ArchWiki https://wiki.archlinux.org/title/XDG_Base_Directory):
+   - ユーザースコープのデータは `$XDG_DATA_HOME` (`~/.local/share/<app>/`) に格納するのが仕様
+   - しかし **プロジェクトローカルデータ** (特定ディレクトリに紐付く作業物) はプロジェクトディレクトリ配下の隠しフォルダ (`.git/`, `.claude/`, `.orchestrator/`) が業界慣例
+   - SourceReference: "XDG Base Directory Specification", Freedesktop.org, https://specifications.freedesktop.org/basedir/latest/
+
+2. **プロジェクトローカルディレクトリ慣例** (GitHub "Folder-Structure-Conventions", https://github.com/kriasoft/Folder-Structure-Conventions; Docker Compose isolation, https://www.kubeblogs.com/how-to-avoid-issues-with-docker-compose-due-to-same-folder-names-project-isolation-best-practices/):
+   - Git (`.git/`)、npm (`.npmrc`)、Claude Code (`.claude/`) がプロジェクトローカルにデータを格納する先例
+   - Docker Compose はプロジェクト名にフォルダ名を使い、複数プロジェクト並行動作時のリソース分離を実現
+   - 隠しフォルダ (dot-prefixed) はツール・エディタによる自動検出と `ls` 出力の整理に有効
+
+3. **Python pathlib 相対パス解決** (Python docs, https://docs.python.org/3/library/pathlib.html; Real Python, https://realpython.com/python-pathlib/):
+   - `Path.cwd() / relative_path` で相対パスを現在ディレクトリ基準に解決できる
+   - `path.is_absolute()` で絶対パスを判定し、相対パスのみを `cwd` 基準で展開するパターンが推奨
+   - `path.expanduser()` は `~` プレフィックスを `Path.home()` に置換する — 従来の `~/.tmux_orchestrator` もこれで正常動作
+
+4. **マルチテナント分離** (Medium "Data Isolation and Sharding Architectures for Multi-Tenant Systems", https://medium.com/@justhamade/data-isolation-and-sharding-architectures-for-multi-tenant-systems-20584ae2bc31; redis.io "Data Isolation in Multi-Tenant SaaS", https://redis.io/blog/data-isolation-multi-tenant-saas/):
+   - マルチテナント SaaS の分離パターン: 共有スキーマ (低分離) → スキーマ per テナント (中分離) → DB per テナント (高分離)
+   - TmuxAgentOrchestrator の「プロジェクト」= テナント。プロジェクトごとにメールボックスディレクトリを分離することが「スキーマ per テナント」に相当
+   - 原則: "namespace everything, enforce tenant context at every layer"
+
+**実装方針**:
+1. `OrchestratorConfig.mailbox_dir: str = ".orchestrator/mailbox"` (デフォルト変更)
+2. `load_config(path, cwd=None)` に `cwd: Path | str | None = None` パラメータを追加
+3. `_resolve_dir(raw, cwd)` ヘルパー: `raw` が `~` で始まる → `expanduser()`、絶対パス → そのまま、相対パス → `cwd / raw`
+4. `mailbox_dir`、`result_store_dir`、`checkpoint_db` の3フィールドに `_resolve_dir` を適用
+5. テスト: `test_config_mailbox_scope.py` に 15 テスト追加
+

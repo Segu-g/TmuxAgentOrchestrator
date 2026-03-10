@@ -433,7 +433,7 @@ def create_app(
     # Reference: DESIGN.md §10.28 (v1.0.28); DESIGN.md §10.29 (v1.0.29)
     _orch_config = getattr(orchestrator, "config", None)
     _episode_store = EpisodeStore(
-        root_dir=getattr(_orch_config, "mailbox_dir", "~/.tmux_orchestrator"),
+        root_dir=getattr(_orch_config, "mailbox_dir", ".orchestrator/mailbox"),
         session_name=getattr(_orch_config, "session_name", "orchestrator"),
     )
     # Share with orchestrator dispatch loop for episode auto-inject

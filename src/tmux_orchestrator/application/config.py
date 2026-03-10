@@ -97,7 +97,12 @@ class OrchestratorConfig:
     # Each entry is a pair [agent_id_a, agent_id_b] — bidirectional permission
     p2p_permissions: list[tuple[str, str]] = field(default_factory=list)
     task_timeout: int = 120
-    mailbox_dir: str = "~/.tmux_orchestrator"
+    # mailbox_dir: base directory for agent mailboxes.
+    # Default is a project-relative path ".orchestrator/mailbox", resolved at
+    # load_config() time against the server cwd (or Path.cwd() when omitted).
+    # Absolute paths (including ~ expansions) are used as-is.
+    # Reference: DESIGN.md §10.62 (v1.1.30 — project-scoped mailbox directory)
+    mailbox_dir: str = ".orchestrator/mailbox"
     web_base_url: str = "http://localhost:8000"
     circuit_breaker_threshold: int = 3
     circuit_breaker_recovery: float = 60.0
@@ -327,9 +332,44 @@ class OrchestratorConfig:
                 )
 
 
-def load_config(path: str | Path) -> OrchestratorConfig:
-    """Load and validate an orchestrator config from a YAML file."""
+def _resolve_dir(raw: str, cwd: Path) -> str:
+    """Resolve a path string to an absolute string.
+
+    Resolution rules (applied in order):
+    1. If *raw* starts with ``~``, apply ``Path.expanduser()`` — the home-relative
+       path is used as-is (unchanged by *cwd*).
+    2. If *raw* is already absolute, return it unchanged.
+    3. Otherwise, join *cwd* and *raw* and return the absolute string.
+
+    This allows legacy ``~/.tmux_orchestrator`` values to keep working while
+    new relative defaults (``.orchestrator/mailbox``) are resolved against the
+    server's working directory, isolating mailbox data per project.
+
+    Reference: DESIGN.md §10.62 (v1.1.30 — project-scoped mailbox directory)
+    """
+    p = Path(raw)
+    if str(raw).startswith("~"):
+        return str(p.expanduser())
+    if p.is_absolute():
+        return str(p)
+    return str(cwd / p)
+
+
+def load_config(path: str | Path, cwd: Path | str | None = None) -> OrchestratorConfig:
+    """Load and validate an orchestrator config from a YAML file.
+
+    Parameters
+    ----------
+    path:
+        Path to the YAML config file.
+    cwd:
+        Base directory used to resolve relative path values (``mailbox_dir``,
+        ``result_store_dir``, ``checkpoint_db``).  When *None*, defaults to
+        ``Path.cwd()`` at call time — matching the server's working directory.
+
+    """
     import os  # noqa: PLC0415
+    effective_cwd = Path(cwd) if cwd is not None else Path.cwd()
 
     data = yaml.safe_load(Path(path).read_text())
 
@@ -375,7 +415,9 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         agents=agents,
         p2p_permissions=p2p,  # type: ignore[arg-type]
         task_timeout=data.get("task_timeout", 120),
-        mailbox_dir=data.get("mailbox_dir", "~/.tmux_orchestrator"),
+        mailbox_dir=_resolve_dir(
+            data.get("mailbox_dir", ".orchestrator/mailbox"), effective_cwd
+        ),
         web_base_url=data.get("web_base_url", "http://localhost:8000"),
         circuit_breaker_threshold=data.get("circuit_breaker_threshold", 3),
         circuit_breaker_recovery=data.get("circuit_breaker_recovery", 60.0),
@@ -412,7 +454,9 @@ def load_config(path: str | Path) -> OrchestratorConfig:
         autoscale_agent_tags=data.get("autoscale_agent_tags", []),
         autoscale_system_prompt=data.get("autoscale_system_prompt"),
         result_store_enabled=data.get("result_store_enabled", False),
-        result_store_dir=data.get("result_store_dir", "~/.tmux_orchestrator/results"),
+        result_store_dir=_resolve_dir(
+            data.get("result_store_dir", "~/.tmux_orchestrator/results"), effective_cwd
+        ),
         groups=data.get("groups", []),
         webhook_timeout=data.get("webhook_timeout", 5.0),
         webhooks=webhooks,
@@ -425,7 +469,9 @@ def load_config(path: str | Path) -> OrchestratorConfig:
             "http://127.0.0.1:8000",
         ]),
         checkpoint_enabled=data.get("checkpoint_enabled", False),
-        checkpoint_db=data.get("checkpoint_db", "~/.tmux_orchestrator/checkpoint.db"),
+        checkpoint_db=_resolve_dir(
+            data.get("checkpoint_db", "~/.tmux_orchestrator/checkpoint.db"), effective_cwd
+        ),
         telemetry_enabled=data.get("telemetry_enabled", False),
         otlp_endpoint=data.get("otlp_endpoint", ""),
         memory_auto_record=data.get("memory_auto_record", True),
