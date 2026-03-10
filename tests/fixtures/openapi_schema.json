@@ -2062,6 +2062,31 @@
         ],
         "title": "WorkflowTaskSpec",
         "type": "object"
+      },
+      "WorktreeSyncRequest": {
+        "description": "Request body for POST /agents/{agent_id}/sync.\n\nAttributes\n----------\nstrategy:\n    Git integration strategy \u2014 ``\"merge\"`` (default), ``\"cherry-pick\"``,\n    or ``\"rebase\"``.\ntarget_branch:\n    Branch to sync into.  Defaults to ``\"master\"``.\nmessage:\n    Optional commit message override for the merge commit (merge strategy\n    only).  Ignored for cherry-pick and rebase.",
+        "properties": {
+          "message": {
+            "default": "",
+            "description": "Optional commit message (merge strategy only).",
+            "title": "Message",
+            "type": "string"
+          },
+          "strategy": {
+            "default": "merge",
+            "description": "Integration strategy: \"merge\", \"cherry-pick\", or \"rebase\".",
+            "title": "Strategy",
+            "type": "string"
+          },
+          "target_branch": {
+            "default": "master",
+            "description": "Target branch to integrate the worktree branch into.",
+            "title": "Target Branch",
+            "type": "string"
+          }
+        },
+        "title": "WorktreeSyncRequest",
+        "type": "object"
       }
     }
   },
@@ -3019,6 +3044,58 @@
           }
         },
         "summary": "Per-agent context usage stats"
+      }
+    },
+    "/agents/{agent_id}/sync": {
+      "post": {
+        "description": "Merge, cherry-pick, or rebase an isolated agent's worktree branch into a target branch.\n\nThis endpoint integrates work from a ``isolate: true`` agent's dedicated\n``worktree/{agent_id}`` branch into a target branch (default ``\"master\"``).\n\nStrategies\n----------\n- **merge** (default): ``git merge --no-ff`` \u2014 preserves full commit history.\n- **cherry-pick**: apply commits individually; useful for selective integration.\n- **rebase**: replay commits on top of target; produces linear history.\n\nReturns\n-------\ndict with:\n- ``agent_id``: agent identifier\n- ``strategy``: strategy used\n- ``source_branch``: ``worktree/{agent_id}``\n- ``target_branch``: branch that was updated\n- ``commits_synced``: number of commits applied\n- ``merge_commit``: SHA of the resulting commit (or last cherry-picked commit)\n\nHTTP error codes\n----------------\n- 400: agent uses ``isolate: false`` (no worktree branch to sync)\n- 404: agent not found\n- 409: merge conflict or git operation failure\n- 422: unknown strategy\n\nDesign references:\n- git-merge(1): https://git-scm.com/docs/git-merge\n- git-cherry-pick(1): https://git-scm.com/docs/git-cherry-pick\n- Python cherry-picker: https://github.com/python/cherry-picker\n- Multi-agent worktree sync: https://dev.to/getpochi/how-we-built-true-parallel-agents-with-git-worktrees-2580\n- DESIGN.md \u00a710.71 (v1.1.39)",
+        "operationId": "sync_agent_worktree_agents__agent_id__sync_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorktreeSyncRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Sync Agent Worktree Agents  Agent Id  Sync Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Sync agent worktree branch into a target branch"
       }
     },
     "/agents/{agent_id}/task-complete": {

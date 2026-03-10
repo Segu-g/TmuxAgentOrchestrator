@@ -196,6 +196,303 @@ class WorktreeManager:
         with self._lock:
             return self._owned.get(agent_id)
 
+    def is_isolated(self, agent_id: str) -> bool:
+        """Return ``True`` if *agent_id* uses an isolated worktree (``isolate=True``).
+
+        Returns ``False`` for shared-worktree agents (``isolate=False``).
+        Returns ``False`` for agents that are not registered.
+        """
+        with self._lock:
+            return agent_id in self._owned
+
+    def sync_to_branch(
+        self,
+        agent_id: str,
+        *,
+        strategy: str = "merge",
+        target_branch: str = "master",
+        message: str = "",
+    ) -> dict:
+        """Sync the agent's worktree branch into *target_branch*.
+
+        Supports three strategies:
+
+        - **merge**: ``git merge --no-ff worktree/{agent_id}`` into *target_branch*.
+          Preserves the full commit history of the agent branch as a merge commit.
+        - **cherry-pick**: Find commits on ``worktree/{agent_id}`` not present in
+          *target_branch* and apply them one-by-one with ``git cherry-pick``.
+        - **rebase**: Rebase ``worktree/{agent_id}`` onto *target_branch*,
+          producing a linear history.
+
+        Parameters
+        ----------
+        agent_id:
+            The agent whose worktree branch should be synced.
+        strategy:
+            One of ``"merge"``, ``"cherry-pick"``, or ``"rebase"``.
+        target_branch:
+            The branch to merge/cherry-pick/rebase into.  Defaults to
+            ``"master"``.
+        message:
+            Optional commit message override for merge strategy.  When empty,
+            a default message is used.
+
+        Returns
+        -------
+        dict with keys:
+            - ``agent_id``: str
+            - ``strategy``: str
+            - ``source_branch``: str (``worktree/{agent_id}``)
+            - ``target_branch``: str
+            - ``commits_synced``: int (number of commits applied)
+            - ``merge_commit``: str | None (SHA of resulting merge/final commit)
+
+        Raises
+        ------
+        ValueError
+            When *agent_id* is not an isolated agent (no worktree branch).
+        RuntimeError
+            When the git operation fails due to merge conflicts or other errors.
+
+        References:
+            - git-merge(1): https://git-scm.com/docs/git-merge
+            - git-cherry-pick(1): https://git-scm.com/docs/git-cherry-pick
+            - git-rebase(1): https://git-scm.com/docs/git-rebase
+            - Python cherry-picker (CPython): https://github.com/python/cherry-picker
+            - DESIGN.md §10.71 (v1.1.39 — Worktree ↔ Branch Sync)
+        """
+        with self._lock:
+            if agent_id not in self._owned:
+                raise ValueError(
+                    f"Agent {agent_id!r} does not have an isolated worktree. "
+                    "sync_to_branch() is only supported for isolate=True agents."
+                )
+
+        source_branch = f"worktree/{agent_id}"
+
+        # Validate strategy
+        valid_strategies = ("merge", "cherry-pick", "rebase")
+        if strategy not in valid_strategies:
+            raise ValueError(
+                f"Unknown strategy {strategy!r}. Valid strategies: {valid_strategies}"
+            )
+
+        # Discover commits on source_branch not in target_branch
+        log_result = subprocess.run(
+            ["git", "log", f"{target_branch}..{source_branch}", "--format=%H"],
+            cwd=self._repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if log_result.returncode != 0:
+            raise RuntimeError(
+                f"git log failed: {log_result.stderr.strip()}"
+            )
+        commit_shas = [s for s in log_result.stdout.strip().splitlines() if s]
+        commits_synced = len(commit_shas)
+
+        if commits_synced == 0:
+            # Nothing to sync — return early with zero commits
+            head_sha = self._resolve_head(target_branch)
+            return {
+                "agent_id": agent_id,
+                "strategy": strategy,
+                "source_branch": source_branch,
+                "target_branch": target_branch,
+                "commits_synced": 0,
+                "merge_commit": head_sha,
+            }
+
+        # Worktree path is needed for rebase (which must run inside the worktree)
+        worktree_dir = self._worktrees_dir / agent_id
+
+        if strategy == "merge":
+            merge_commit = self._sync_merge(
+                source_branch, target_branch, message=message
+            )
+        elif strategy == "cherry-pick":
+            # cherry-pick expects oldest first; log returns newest first
+            merge_commit = self._sync_cherry_pick(
+                list(reversed(commit_shas)), target_branch
+            )
+        else:  # rebase
+            merge_commit = self._sync_rebase(source_branch, target_branch, worktree_dir=worktree_dir)
+
+        return {
+            "agent_id": agent_id,
+            "strategy": strategy,
+            "source_branch": source_branch,
+            "target_branch": target_branch,
+            "commits_synced": commits_synced,
+            "merge_commit": merge_commit,
+        }
+
+    # ------------------------------------------------------------------
+    # sync_to_branch helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_head(self, branch: str) -> str | None:
+        """Return the current HEAD SHA of *branch*, or ``None`` on failure."""
+        result = subprocess.run(
+            ["git", "rev-parse", branch],
+            cwd=self._repo_root,
+            capture_output=True,
+            text=True,
+        )
+        return result.stdout.strip() or None
+
+    def _checkout_branch(self, branch: str) -> str | None:
+        """Checkout *branch* in the main repo; return the branch we were on before."""
+        orig = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=self._repo_root,
+            capture_output=True,
+            text=True,
+        )
+        original_branch = orig.stdout.strip() if orig.returncode == 0 else None
+
+        if original_branch == branch:
+            return branch
+
+        checkout = subprocess.run(
+            ["git", "checkout", branch],
+            cwd=self._repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if checkout.returncode != 0:
+            raise RuntimeError(
+                f"Cannot checkout {branch!r}: {checkout.stderr.strip()}"
+            )
+        return original_branch
+
+    def _restore_branch(self, original_branch: str | None, current_branch: str) -> None:
+        """Switch back to *original_branch* if we changed branches."""
+        if original_branch and original_branch != current_branch:
+            subprocess.run(
+                ["git", "checkout", original_branch],
+                cwd=self._repo_root,
+                capture_output=True,
+            )
+
+    def _sync_merge(
+        self, source_branch: str, target_branch: str, *, message: str = ""
+    ) -> str | None:
+        """Merge *source_branch* into *target_branch* with ``--no-ff``."""
+        original = self._checkout_branch(target_branch)
+        try:
+            commit_msg = (
+                message
+                or f"sync: merge {source_branch} into {target_branch} [worktree-sync]"
+            )
+            result = subprocess.run(
+                ["git", "merge", "--no-ff", "-m", commit_msg, source_branch],
+                cwd=self._repo_root,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                # Abort merge on failure
+                subprocess.run(
+                    ["git", "merge", "--abort"],
+                    cwd=self._repo_root,
+                    capture_output=True,
+                )
+                raise RuntimeError(
+                    f"Merge conflict or error merging {source_branch} into "
+                    f"{target_branch}: {result.stderr.strip()}"
+                )
+            return self._resolve_head(target_branch)
+        finally:
+            self._restore_branch(original, target_branch)
+
+    def _sync_cherry_pick(
+        self, commit_shas: list[str], target_branch: str
+    ) -> str | None:
+        """Cherry-pick *commit_shas* (oldest first) onto *target_branch*."""
+        original = self._checkout_branch(target_branch)
+        try:
+            result = subprocess.run(
+                ["git", "cherry-pick", "--allow-empty", "--keep-redundant-commits", *commit_shas],
+                cwd=self._repo_root,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                # Abort cherry-pick on failure
+                subprocess.run(
+                    ["git", "cherry-pick", "--abort"],
+                    cwd=self._repo_root,
+                    capture_output=True,
+                )
+                raise RuntimeError(
+                    f"Cherry-pick failed on {target_branch}: {result.stderr.strip()}"
+                )
+            return self._resolve_head(target_branch)
+        finally:
+            self._restore_branch(original, target_branch)
+
+    def _sync_rebase(
+        self, source_branch: str, target_branch: str, *, worktree_dir: Path
+    ) -> str | None:
+        """Rebase *source_branch* onto *target_branch*.
+
+        Since ``git rebase <target> <source-branch>`` fails when
+        *source_branch* is currently checked out by a worktree (git refuses
+        to operate on a branch that is active in another worktree), we run
+        ``git rebase <target_branch>`` from *inside* the worktree directory
+        instead.  This replays the worktree commits on top of *target_branch*
+        and updates the worktree's HEAD in place.
+
+        After a successful rebase the worktree branch (*source_branch*) is
+        the new tip.  We then fast-forward *target_branch* to match it.
+
+        Parameters
+        ----------
+        source_branch:
+            The worktree branch to rebase (``worktree/{agent_id}``).
+        target_branch:
+            The branch to rebase onto.
+        worktree_dir:
+            Filesystem path of the agent's worktree directory.  git operations
+            are run from this directory so that the locked branch is handled
+            correctly.
+        """
+        # Run rebase inside the worktree (avoids "already used by worktree" error)
+        result = subprocess.run(
+            ["git", "rebase", target_branch],
+            cwd=worktree_dir,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            subprocess.run(
+                ["git", "rebase", "--abort"],
+                cwd=worktree_dir,
+                capture_output=True,
+            )
+            raise RuntimeError(
+                f"Rebase of {source_branch} onto {target_branch} failed: "
+                f"{result.stderr.strip()}"
+            )
+        # Fast-forward target_branch to the rebased worktree tip
+        original = self._checkout_branch(target_branch)
+        try:
+            ff = subprocess.run(
+                ["git", "merge", "--ff-only", source_branch],
+                cwd=self._repo_root,
+                capture_output=True,
+                text=True,
+            )
+            if ff.returncode != 0:
+                raise RuntimeError(
+                    f"Fast-forward of {target_branch} to rebased {source_branch} failed: "
+                    f"{ff.stderr.strip()}"
+                )
+            return self._resolve_head(target_branch)
+        finally:
+            self._restore_branch(original, target_branch)
+
     def prune_stale(self) -> None:
         """Remove stale git worktree administrative files.
 

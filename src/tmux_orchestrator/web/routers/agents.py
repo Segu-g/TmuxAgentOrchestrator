@@ -44,6 +44,35 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+class WorktreeSyncRequest(BaseModel):
+    """Request body for POST /agents/{agent_id}/sync.
+
+    Attributes
+    ----------
+    strategy:
+        Git integration strategy — ``"merge"`` (default), ``"cherry-pick"``,
+        or ``"rebase"``.
+    target_branch:
+        Branch to sync into.  Defaults to ``"master"``.
+    message:
+        Optional commit message override for the merge commit (merge strategy
+        only).  Ignored for cherry-pick and rebase.
+    """
+
+    strategy: str = Field(
+        default="merge",
+        description='Integration strategy: "merge", "cherry-pick", or "rebase".',
+    )
+    target_branch: str = Field(
+        default="master",
+        description="Target branch to integrate the worktree branch into.",
+    )
+    message: str = Field(
+        default="",
+        description="Optional commit message (merge strategy only).",
+    )
+
+
 class CompressContextRequest(BaseModel):
     """Request body for POST /agents/{agent_id}/compress-context."""
 
@@ -974,6 +1003,102 @@ def build_agents_router(
             "query": body.task_query,
             "compressed_text": result.compressed_text,
         }
+
+    @router.post(
+        "/agents/{agent_id}/sync",
+        summary="Sync agent worktree branch into a target branch",
+        dependencies=[Depends(auth)],
+    )
+    async def sync_agent_worktree(agent_id: str, body: "WorktreeSyncRequest") -> dict:
+        """Merge, cherry-pick, or rebase an isolated agent's worktree branch into a target branch.
+
+        This endpoint integrates work from a ``isolate: true`` agent's dedicated
+        ``worktree/{agent_id}`` branch into a target branch (default ``"master"``).
+
+        Strategies
+        ----------
+        - **merge** (default): ``git merge --no-ff`` — preserves full commit history.
+        - **cherry-pick**: apply commits individually; useful for selective integration.
+        - **rebase**: replay commits on top of target; produces linear history.
+
+        Returns
+        -------
+        dict with:
+        - ``agent_id``: agent identifier
+        - ``strategy``: strategy used
+        - ``source_branch``: ``worktree/{agent_id}``
+        - ``target_branch``: branch that was updated
+        - ``commits_synced``: number of commits applied
+        - ``merge_commit``: SHA of the resulting commit (or last cherry-picked commit)
+
+        HTTP error codes
+        ----------------
+        - 400: agent uses ``isolate: false`` (no worktree branch to sync)
+        - 404: agent not found
+        - 409: merge conflict or git operation failure
+        - 422: unknown strategy
+
+        Design references:
+        - git-merge(1): https://git-scm.com/docs/git-merge
+        - git-cherry-pick(1): https://git-scm.com/docs/git-cherry-pick
+        - Python cherry-picker: https://github.com/python/cherry-picker
+        - Multi-agent worktree sync: https://dev.to/getpochi/how-we-built-true-parallel-agents-with-git-worktrees-2580
+        - DESIGN.md §10.71 (v1.1.39)
+        """
+        agent = orchestrator.get_agent(agent_id)
+        if agent is None:
+            raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
+
+        wm = getattr(orchestrator, "_worktree_manager", None)
+        if wm is None:
+            raise HTTPException(
+                status_code=400,
+                detail="No WorktreeManager configured — worktree sync not available.",
+            )
+
+        # Validate strategy early
+        valid_strategies = ("merge", "cherry-pick", "rebase")
+        if body.strategy not in valid_strategies:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unknown strategy {body.strategy!r}. Valid: {valid_strategies}",
+            )
+
+        # Check agent is isolated
+        if not wm.is_isolated(agent_id):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Agent {agent_id!r} uses isolate=false and has no worktree branch. "
+                    "sync is only available for isolate=true agents."
+                ),
+            )
+
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: wm.sync_to_branch(
+                    agent_id,
+                    strategy=body.strategy,
+                    target_branch=body.target_branch,
+                    message=body.message,
+                ),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+        logger.info(
+            "Agent %s: synced %d commit(s) into %s via %s (merge_commit=%s)",
+            agent_id,
+            result["commits_synced"],
+            result["target_branch"],
+            result["strategy"],
+            result.get("merge_commit", "n/a"),
+        )
+        return result
 
     @router.get(
         "/agents/{agent_id}/compression-stats",
