@@ -529,6 +529,147 @@ class PhaseSpecModel(BaseModel):
         return v
 
 
+class LoopSpecModel(BaseModel):
+    """Pydantic schema for loop iteration parameters.
+
+    Controls how many times a :class:`LoopBlockModel` body is executed and
+    when it may terminate early.
+
+    Attributes
+    ----------
+    max:
+        Maximum number of iterations.  The loop always stops after *max*
+        iterations even if the *until* condition is never satisfied (default 5).
+    until:
+        Optional :class:`SkipConditionModel` evaluated against the scratchpad
+        after each iteration completes.  When the condition is met, the loop
+        terminates early.  ``None`` (default) means run exactly *max* times.
+
+    Design reference: DESIGN.md §10.76 (v1.1.44)
+    Research: Argo Workflows withSequence; AiiDA while_() convergence loop.
+    """
+
+    max: int = Field(default=5, ge=1, description="Maximum iterations (>= 1).")
+    until: SkipConditionModel | None = Field(
+        default=None,
+        description=(
+            "Early-termination condition evaluated against the scratchpad after "
+            "each iteration's phases complete.  Omit to always run max iterations."
+        ),
+    )
+
+
+class LoopBlockModel(BaseModel):
+    """Pydantic schema for a named iterable phase block.
+
+    A ``LoopBlockModel`` groups inner phases that are executed repeatedly
+    (``loop.max`` times, or until ``loop.until`` is satisfied).  Each inner
+    phase may use ``{iter}`` in its ``name`` and ``context`` fields; the
+    framework substitutes the current iteration number (1-based) before
+    dispatching tasks.
+
+    Attributes
+    ----------
+    name:
+        Human-readable identifier.  Other phases may list this name in their
+        ``depends_on`` to wait for the entire loop to finish.
+    loop:
+        Iteration parameters (:class:`LoopSpecModel`).
+    phases:
+        Ordered list of inner phase items (each may be a
+        :class:`PhaseSpecModel` or a nested :class:`LoopBlockModel`).
+
+    Design reference: DESIGN.md §10.76 (v1.1.44)
+    Research:
+    - Argo Workflows nested template loops (argoproj/argo-workflows #1491)
+    - AiiDA ``while_()`` convergence loop for scientific workflows
+    """
+
+    name: str = Field(description="Unique name for this loop block.")
+    loop: LoopSpecModel = Field(default_factory=LoopSpecModel)
+    phases: list[Any] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of inner PhaseSpecModel or nested LoopBlockModel items "
+            "forming the loop body."
+        ),
+    )
+
+
+# PhaseItemModel: discriminated union resolved at runtime.
+# JSON discrimination: objects with a 'loop' key are LoopBlockModel;
+# objects with a 'pattern' key are PhaseSpecModel.
+# Pydantic v2 Union with smart union mode handles this automatically.
+PhaseItemModel = Union[LoopBlockModel, PhaseSpecModel]
+
+
+class PdcaWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/pdca — PDCA cycle workflow.
+
+    Submits a Plan-Do-Check-Act iterative workflow that loops until a quality
+    condition is met or the maximum number of cycles is exhausted.
+
+    The workflow uses a loop block with four phases:
+    1. **plan** — produce a plan for this iteration.
+    2. **do** — implement based on the plan.
+    3. **check** — review the result; write ``quality_approved=yes`` to the
+       scratchpad when quality is acceptable.
+    4. **act** — refine or finalise based on the check findings.
+
+    Agents communicate via the shared scratchpad (Blackboard pattern).
+    Scratchpad keys use the format ``{scratchpad_prefix}_{phase}_iter{N}``.
+
+    Attributes
+    ----------
+    objective:
+        The goal to achieve through iterative improvement.
+    max_cycles:
+        Maximum number of Plan-Do-Check-Act cycles (default 3).
+    success_condition:
+        Scratchpad condition checked after each cycle's ``check`` phase.
+        When met, the loop terminates.  Defaults to checking for
+        ``quality_approved`` == ``"yes"``.
+    scratchpad_prefix:
+        Prefix for all scratchpad keys written by agents (default ``"pdca"``).
+    agent_timeout:
+        Per-task timeout in seconds (default 300).
+    planner_tags:
+        ``required_tags`` for the PLAN agent.
+    doer_tags:
+        ``required_tags`` for the DO agent.
+    checker_tags:
+        ``required_tags`` for the CHECK agent.
+    actor_tags:
+        ``required_tags`` for the ACT agent.
+    reply_to:
+        Agent ID that receives the RESULT in its mailbox when the workflow
+        completes.
+
+    Design reference: DESIGN.md §10.76 (v1.1.44)
+    Research:
+    - Deming, "Out of the Crisis" (1986) — PDCA cycle
+    - Moxo, "Continuous improvement with the PDSA & PDCA cycle" (2025)
+    - AiiDA ``while_()`` convergence loop for iterative scientific workflows
+    """
+
+    objective: str
+    max_cycles: int = Field(default=3, ge=1)
+    success_condition: SkipConditionModel | None = Field(
+        default=None,
+        description=(
+            "Scratchpad condition that terminates the loop early. "
+            "Defaults to quality_approved == 'yes'."
+        ),
+    )
+    scratchpad_prefix: str = Field(default="pdca")
+    agent_timeout: int = Field(default=300, ge=1)
+    planner_tags: list[str] = Field(default_factory=list)
+    doer_tags: list[str] = Field(default_factory=list)
+    checker_tags: list[str] = Field(default_factory=list)
+    actor_tags: list[str] = Field(default_factory=list)
+    reply_to: str | None = None
+
+
 class WorkflowSubmit(BaseModel):
     """Request body for POST /workflows.
 
@@ -537,9 +678,10 @@ class WorkflowSubmit(BaseModel):
     1. **tasks= (legacy)**: Submit a raw DAG of :class:`WorkflowTaskSpec` nodes.
        Backward-compatible with the original ``POST /workflows`` API.
 
-    2. **phases= (new)**: Submit a declarative list of :class:`PhaseSpecModel`
-       objects.  The server expands each phase into task specs and builds a
-       DAG automatically.
+    2. **phases= (new)**: Submit a declarative list of :class:`PhaseItemModel`
+       objects (each item may be a :class:`PhaseSpecModel` or a
+       :class:`LoopBlockModel`).  The server expands phases into a task DAG
+       automatically.
 
     Exactly one of ``tasks`` or ``phases`` must be provided.  Providing neither
     raises HTTP 422.
@@ -548,11 +690,12 @@ class WorkflowSubmit(BaseModel):
     - arXiv:2512.19769 (PayPal DSL 2025): declarative pattern reduces dev time 60%
     - §12「ワークフロー設計の層構造」層1 宣言的モード
     - DESIGN.md §10.15 (v0.48.0)
+    - DESIGN.md §10.76 (v1.1.44 — LoopBlock support)
     """
 
     name: str = "workflow"
     tasks: list[WorkflowTaskSpec] | None = None
-    phases: list[PhaseSpecModel] | None = None
+    phases: list[Any] | None = None  # list[PhaseItemModel] — Any for forward-compat
     context: str = ""
     task_timeout: int | None = None
 

@@ -854,6 +854,93 @@ def get_strategy(pattern: str) -> PhaseStrategy:
 
 
 # ---------------------------------------------------------------------------
+# LoopSpec / LoopBlock — loop construct for iterative workflow phases
+#
+# Design:
+# - ``LoopSpec`` holds loop parameters: max iterations and optional until condition.
+# - ``LoopBlock`` is a named container of phases to be executed iteratively.
+# - ``PhaseItem`` is the discriminated union ``PhaseSpec | LoopBlock``.
+#
+# Runtime behaviour (handled by expand_loop_phases in phase_executor):
+# 1. On first dispatch: phases in LoopBlock are expanded with iter=1.
+# 2. On loop-body completion: the ``until`` condition is evaluated against the
+#    scratchpad. If met (or max reached), the loop is complete; otherwise iter+1
+#    is dispatched.
+# 3. Loop-block names can be used in ``depends_on`` of outer phases.
+#
+# Design references:
+# - Argo Workflows ``withSequence`` / ``withParam`` loop constructs (2024)
+# - AiiDA ``while_()`` convergence loop for scientific workflows (2020)
+# - DESIGN.md §10.76 (v1.1.44)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LoopSpec:
+    """Parameters controlling a loop block's iteration behaviour.
+
+    Attributes
+    ----------
+    max:
+        Maximum number of iterations to run.  The loop always terminates
+        after *max* iterations even if the *until* condition is never met.
+        Must be >= 1 (default 5).
+    until:
+        Optional :class:`SkipCondition` evaluated against the shared
+        scratchpad after each iteration's phases complete.  When the condition
+        is met, the loop terminates early (before reaching *max*).  When
+        ``None`` (default), the loop always runs exactly *max* iterations.
+
+    Design reference: DESIGN.md §10.76 (v1.1.44)
+    """
+
+    max: int = 5
+    until: "SkipCondition | None" = None
+
+    def __post_init__(self) -> None:
+        if self.max < 1:
+            raise ValueError("LoopSpec.max must be >= 1")
+
+
+@dataclass
+class LoopBlock:
+    """A named, iterable block of phases within a workflow.
+
+    A ``LoopBlock`` groups a sequence of :class:`PhaseSpec` (or nested
+    :class:`LoopBlock`) objects that are executed repeatedly until either
+    the ``loop.until`` condition is met or ``loop.max`` iterations are
+    exhausted.
+
+    Attributes
+    ----------
+    name:
+        Human-readable identifier.  Other phases may declare
+        ``depends_on: [<name>]`` to wait for the entire loop to complete.
+    loop:
+        Iteration parameters (:class:`LoopSpec`).
+    phases:
+        Ordered list of :data:`PhaseItem` objects forming the loop body.
+        Executed once per iteration; each iteration uses the same phase names
+        but with ``{iter}`` placeholders substituted to the current iteration
+        number (1-based).
+
+    Design reference:
+    - DESIGN.md §10.76 (v1.1.44)
+    - Argo Workflows nested template loops (argoproj/argo-workflows #1491)
+    - AiiDA ``while_()`` convergence loop
+    """
+
+    name: str
+    loop: LoopSpec
+    phases: list  # list[PhaseItem] — type annotation uses forward ref
+
+
+# Type alias for the discriminated union of a phase item.
+# PhaseItem = PhaseSpec | LoopBlock
+PhaseItem = object  # Runtime alias; use isinstance checks for dispatch.
+
+
+# ---------------------------------------------------------------------------
 # Canonical expand_phases helpers (domain layer)
 # ---------------------------------------------------------------------------
 

@@ -21,9 +21,12 @@ from tmux_orchestrator.web.schemas import (
     DelphiWorkflowSubmit,
     FulldevWorkflowSubmit,
     IterativeReviewWorkflowSubmit,
+    LoopBlockModel,
     MobReviewWorkflowSubmit,
     PairWorkflowSubmit,
+    PdcaWorkflowSubmit,
     RedBlueWorkflowSubmit,
+    SkipConditionModel,
     SpecFirstTddWorkflowSubmit,
     SpecFirstWorkflowSubmit,
     SocraticWorkflowSubmit,
@@ -101,6 +104,8 @@ def build_workflows_router(
             from tmux_orchestrator.domain.phase_strategy import (  # noqa: PLC0415
                 CompetitiveConfig,
                 DebateConfig,
+                LoopBlock,
+                LoopSpec,
                 ParallelConfig,
                 SingleConfig,
             )
@@ -108,6 +113,7 @@ def build_workflows_router(
                 AgentSelector,
                 PhaseSpec,
                 SkipCondition,
+                expand_phase_items_with_status,
                 expand_phases_with_status,
             )
 
@@ -146,48 +152,109 @@ def build_workflows_router(
                     )
                 return None
 
-            run_id_prefix = uuid.uuid4().hex[:8]
-            phase_specs: list[PhaseSpec] = []
-            for p in body.phases:
-                phase_specs.append(
-                    PhaseSpec(
-                        name=p.name,
-                        pattern=p.pattern,  # type: ignore[arg-type]
-                        agents=AgentSelector(
-                            tags=p.agents.tags,
-                            count=p.agents.count,
-                            target_agent=p.agents.target_agent,
-                            target_group=p.agents.target_group,
-                        ),
-                        critic_agents=AgentSelector(
-                            tags=p.critic_agents.tags,
-                            count=p.critic_agents.count,
-                            target_agent=p.critic_agents.target_agent,
-                            target_group=p.critic_agents.target_group,
-                        ),
-                        judge_agents=AgentSelector(
-                            tags=p.judge_agents.tags,
-                            count=p.judge_agents.count,
-                            target_agent=p.judge_agents.target_agent,
-                            target_group=p.judge_agents.target_group,
-                        ),
-                        debate_rounds=p.debate_rounds,
-                        context=p.context,
-                        required_tags=p.required_tags,
-                        timeout=p.timeout,
-                        strategy_config=_to_domain_strategy_config(p.strategy_config),
-                        skip_condition=_to_domain_skip_condition(
-                            getattr(p, "skip_condition", None)
-                        ),
-                    )
+            def _to_domain_phase_spec(p: Any) -> PhaseSpec:
+                """Convert a PhaseSpecModel → domain PhaseSpec dataclass."""
+                return PhaseSpec(
+                    name=p.name,
+                    pattern=p.pattern,  # type: ignore[arg-type]
+                    agents=AgentSelector(
+                        tags=p.agents.tags,
+                        count=p.agents.count,
+                        target_agent=p.agents.target_agent,
+                        target_group=p.agents.target_group,
+                    ),
+                    critic_agents=AgentSelector(
+                        tags=p.critic_agents.tags,
+                        count=p.critic_agents.count,
+                        target_agent=p.critic_agents.target_agent,
+                        target_group=p.critic_agents.target_group,
+                    ),
+                    judge_agents=AgentSelector(
+                        tags=p.judge_agents.tags,
+                        count=p.judge_agents.count,
+                        target_agent=p.judge_agents.target_agent,
+                        target_group=p.judge_agents.target_group,
+                    ),
+                    debate_rounds=p.debate_rounds,
+                    context=p.context,
+                    required_tags=p.required_tags,
+                    timeout=p.timeout,
+                    strategy_config=_to_domain_strategy_config(p.strategy_config),
+                    skip_condition=_to_domain_skip_condition(
+                        getattr(p, "skip_condition", None)
+                    ),
                 )
 
-            task_specs, phase_statuses = expand_phases_with_status(
-                phase_specs,
-                context=body.context,
-                scratchpad_prefix=f"wf/{run_id_prefix}",
-                scratchpad=scratchpad,
+            def _to_domain_phase_item(item: Any) -> Any:
+                """Convert a PhaseItemModel → domain PhaseSpec or LoopBlock."""
+                # Detect LoopBlockModel by presence of 'loop' attribute.
+                if isinstance(item, LoopBlockModel):
+                    loop_model = item.loop
+                    until = _to_domain_skip_condition(loop_model.until)
+                    inner_phases = [_to_domain_phase_item(p) for p in item.phases]
+                    return LoopBlock(
+                        name=item.name,
+                        loop=LoopSpec(max=loop_model.max, until=until),
+                        phases=inner_phases,
+                    )
+                # Otherwise treat as PhaseSpecModel.
+                # If it arrived as a dict (e.g. from list[Any]), parse it first.
+                if isinstance(item, dict):
+                    if "loop" in item:
+                        from tmux_orchestrator.web.schemas import LoopBlockModel as LBM  # noqa: PLC0415
+                        return _to_domain_phase_item(LBM.model_validate(item))
+                    from tmux_orchestrator.web.schemas import PhaseSpecModel as PSM  # noqa: PLC0415
+                    return _to_domain_phase_spec(PSM.model_validate(item))
+                return _to_domain_phase_spec(item)
+
+            run_id_prefix = uuid.uuid4().hex[:8]
+            phase_sp = f"wf/{run_id_prefix}"
+
+            # Check whether any item is a LoopBlock (mixed-item list).
+            has_loop = any(
+                isinstance(p, LoopBlockModel) or (isinstance(p, dict) and "loop" in p)
+                for p in body.phases
             )
+
+            # Convert all phase items to domain objects (handles both dicts and
+            # Pydantic models, plus LoopBlockModel detection).
+            try:
+                domain_items = [_to_domain_phase_item(p) for p in body.phases]
+            except Exception as exc:
+                raise HTTPException(status_code=422, detail=str(exc))
+
+            if has_loop:
+                # Use the loop-aware expander.
+                task_specs, phase_statuses, _loop_terminals = expand_phase_items_with_status(
+                    domain_items,
+                    context=body.context,
+                    scratchpad_prefix=phase_sp,
+                    scratchpad=scratchpad,
+                )
+
+                # Resolve depends_on references to loop block names in phase tasks.
+                # When a PhaseSpec (outer) declares depends_on: [loop_block_name],
+                # that local_id will not exist in task_specs — we need to wire it
+                # to the loop's terminal task IDs.
+                loop_names = set(_loop_terminals.keys())
+                if loop_names:
+                    for spec in task_specs:
+                        new_deps = []
+                        for dep in spec.get("depends_on", []):
+                            if dep in loop_names:
+                                new_deps.extend(_loop_terminals[dep])
+                            else:
+                                new_deps.append(dep)
+                        spec["depends_on"] = new_deps
+            else:
+                # Fast path: no loop blocks — use original expand_phases_with_status.
+                phase_specs: list[PhaseSpec] = domain_items  # type: ignore[assignment]
+                task_specs, phase_statuses = expand_phases_with_status(
+                    phase_specs,
+                    context=body.context,
+                    scratchpad_prefix=phase_sp,
+                    scratchpad=scratchpad,
+                )
         else:
             # Legacy tasks= path
             task_specs = [t.model_dump() for t in body.tasks]  # type: ignore[union-attr]
@@ -4293,6 +4360,307 @@ def build_workflows_router(
             "name": run.name,
             "task_ids": task_ids_map,
             "scratchpad_prefix": scratchpad_prefix,
+        }
+
+    @router.post(
+        "/workflows/pdca",
+        summary="Submit a PDCA (Plan-Do-Check-Act) iterative improvement workflow",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_pdca_workflow(body: PdcaWorkflowSubmit) -> dict:
+        """Submit a PDCA iterative improvement workflow.
+
+        Builds and submits a loop-based workflow that executes Plan → Do → Check
+        → Act phases iteratively until a quality condition is met or the maximum
+        number of cycles is reached.
+
+        Each cycle:
+        1. **plan** (``required_tags: planner_tags``): Produces a plan for this
+           iteration.  Writes plan to scratchpad key
+           ``{prefix}_plan_iter{N}``.
+        2. **do** (``required_tags: doer_tags``): Implements the plan.  Reads
+           ``{prefix}_plan_iter{N}``, writes output to ``{prefix}_do_iter{N}``.
+        3. **check** (``required_tags: checker_tags``): Evaluates the result.
+           Reads ``{prefix}_do_iter{N}``.  Writes quality assessment to
+           ``{prefix}_check_iter{N}``.  When quality is acceptable, writes
+           ``quality_approved=yes`` to the scratchpad to trigger early
+           termination.
+        4. **act** (``required_tags: actor_tags``): Acts on the findings.
+           Reads ``{prefix}_check_iter{N}``, writes action summary to
+           ``{prefix}_act_iter{N}``.
+
+        Loop termination:
+        - Terminates early when ``scratchpad['quality_approved'] == 'yes'``
+          (or the custom ``success_condition``).
+        - Always terminates after ``max_cycles`` iterations.
+
+        Returns:
+        - ``workflow_id``: workflow run UUID for status polling.
+        - ``name``: ``pdca/{objective_slug}``.
+        - ``task_ids``: ``local_id → global_task_id`` mapping.
+        - ``scratchpad_prefix``: scratchpad key namespace.
+        - ``loop_block_name``: name of the loop block (``"pdca_cycle"``).
+
+        Design references:
+        - Deming, "Out of the Crisis" (1986) — PDCA cycle
+        - Moxo, "Continuous improvement with the PDSA & PDCA cycle" (2025)
+        - AiiDA ``while_()`` convergence loop for iterative scientific workflows
+        - DESIGN.md §10.76 (v1.1.44)
+        """
+        from tmux_orchestrator.domain.phase_strategy import (  # noqa: PLC0415
+            LoopBlock,
+            LoopSpec,
+            SkipCondition,
+        )
+        from tmux_orchestrator.phase_executor import (  # noqa: PLC0415
+            AgentSelector,
+            PhaseSpec,
+            expand_phase_items_with_status,
+        )
+        from tmux_orchestrator.workflow_manager import validate_dag  # noqa: PLC0415
+
+        wm = orchestrator.get_workflow_manager()
+        objective_slug = body.objective[:40].replace(" ", "_").replace("/", "_")
+        wf_name = f"pdca/{objective_slug}"
+        pre_run_id = uuid.uuid4().hex[:8]
+        sp = f"{body.scratchpad_prefix}_{pre_run_id}"  # unique prefix for this run
+
+        # Resolve success condition (default: quality_approved == yes)
+        if body.success_condition is not None:
+            until = SkipCondition(
+                key=body.success_condition.key,
+                value=body.success_condition.value,
+                negate=body.success_condition.negate,
+            )
+        else:
+            until = SkipCondition(key="quality_approved", value="yes")
+
+        # Scratchpad helper snippet
+        _ctx_snippet = (
+            "WEB_BASE_URL=$(python3 -c \""
+            "import json; d=json.load(open('__orchestrator_context__.json')); "
+            "print(d['web_base_url'])\")\n"
+            "   API_KEY=$(cat __orchestrator_api_key__ 2>/dev/null || "
+            "echo \"$TMUX_ORCHESTRATOR_API_KEY\")"
+        )
+
+        def _write_snippet(key: str) -> str:
+            return (
+                f"   VALUE=$(cat your_output_file_or_echo_result_here)\n"
+                f"   curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     -H 'Content-Type: application/json' \\\n"
+                f"     -d '{{\"value\": \"'$VALUE'\"}}'"
+            )
+
+        def _read_snippet(key: str, varname: str) -> str:
+            return (
+                f"   {varname}=$(curl -s -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"value\"])')\n"
+            )
+
+        def _approve_snippet() -> str:
+            """Snippet for checker to write quality_approved=yes."""
+            return (
+                f"   # Write quality approval signal when quality is acceptable:\n"
+                f"   curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/quality_approved\" \\\n"
+                f"     -H 'Content-Type: application/json' \\\n"
+                f"     -d '{{\"value\": \"yes\"}}'"
+            )
+
+        plan_key = f"{sp}_plan_iter{{iter}}"
+        do_key = f"{sp}_do_iter{{iter}}"
+        check_key = f"{sp}_check_iter{{iter}}"
+        act_key = f"{sp}_act_iter{{iter}}"
+
+        plan_prompt = (
+            f"You are the PLAN agent in a PDCA (Plan-Do-Check-Act) iterative improvement workflow.\n"
+            f"\n"
+            f"**Objective:** {body.objective}\n"
+            f"**Iteration:** {{iter}} of {body.max_cycles}\n"
+            f"\n"
+            f"Your task:\n"
+            f"1. Analyse the current state (read previous iteration outputs from the scratchpad if available).\n"
+            f"2. Produce a concrete, actionable plan to advance the objective.\n"
+            f"3. Write your plan to the shared scratchpad.\n"
+            f"\n"
+            f"To read previous iteration outputs and write your plan:\n"
+            f"```bash\n"
+            f"{_ctx_snippet}\n"
+            f"# Write your plan:\n"
+            f"PLAN='<your detailed plan here>'\n"
+            f"curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
+            f"  \"$WEB_BASE_URL/scratchpad/{plan_key}\" \\\n"
+            f"  -H 'Content-Type: application/json' \\\n"
+            f"  -d '{{\"value\": \"'$PLAN'\"}}'\n"
+            f"```\n"
+        )
+
+        do_prompt = (
+            f"You are the DO agent in a PDCA iterative improvement workflow.\n"
+            f"\n"
+            f"**Objective:** {body.objective}\n"
+            f"**Iteration:** {{iter}} of {body.max_cycles}\n"
+            f"\n"
+            f"Your task:\n"
+            f"1. Read the plan for this iteration from the scratchpad.\n"
+            f"2. Execute the plan — implement the improvements described.\n"
+            f"3. Write the result/output to the shared scratchpad.\n"
+            f"\n"
+            f"To read the plan and write your output:\n"
+            f"```bash\n"
+            f"{_ctx_snippet}\n"
+            f"# Read this iteration's plan:\n"
+            f"{_read_snippet(plan_key, 'PLAN')}"
+            f"echo \"Plan: $PLAN\"\n"
+            f"# Implement the plan, then write your output:\n"
+            f"OUTPUT='<your implementation result here>'\n"
+            f"curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
+            f"  \"$WEB_BASE_URL/scratchpad/{do_key}\" \\\n"
+            f"  -H 'Content-Type: application/json' \\\n"
+            f"  -d '{{\"value\": \"'$OUTPUT'\"}}'\n"
+            f"```\n"
+        )
+
+        check_prompt = (
+            f"You are the CHECK agent in a PDCA iterative improvement workflow.\n"
+            f"\n"
+            f"**Objective:** {body.objective}\n"
+            f"**Iteration:** {{iter}} of {body.max_cycles}\n"
+            f"\n"
+            f"Your task:\n"
+            f"1. Read the DO agent's output from the scratchpad.\n"
+            f"2. Evaluate the quality of the output against the objective.\n"
+            f"3. Write your assessment to the scratchpad.\n"
+            f"4. If quality is acceptable, write quality_approved=yes to signal loop termination.\n"
+            f"\n"
+            f"To read the output, write your assessment, and optionally approve:\n"
+            f"```bash\n"
+            f"{_ctx_snippet}\n"
+            f"# Read the DO agent's output:\n"
+            f"{_read_snippet(do_key, 'OUTPUT')}"
+            f"echo \"Output: $OUTPUT\"\n"
+            f"# Write your quality assessment:\n"
+            f"ASSESSMENT='<your quality assessment here>'\n"
+            f"curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
+            f"  \"$WEB_BASE_URL/scratchpad/{check_key}\" \\\n"
+            f"  -H 'Content-Type: application/json' \\\n"
+            f"  -d '{{\"value\": \"'$ASSESSMENT'\"}}'\n"
+            f"# If quality is acceptable, signal loop termination:\n"
+            f"{_approve_snippet()}\n"
+            f"```\n"
+            f"\n"
+            f"Only write quality_approved=yes when the objective is fully met.\n"
+        )
+
+        act_prompt = (
+            f"You are the ACT agent in a PDCA iterative improvement workflow.\n"
+            f"\n"
+            f"**Objective:** {body.objective}\n"
+            f"**Iteration:** {{iter}} of {body.max_cycles}\n"
+            f"\n"
+            f"Your task:\n"
+            f"1. Read the CHECK agent's assessment from the scratchpad.\n"
+            f"2. Standardise improvements or prepare adjustments for the next cycle.\n"
+            f"3. Write your action summary to the scratchpad.\n"
+            f"\n"
+            f"To read the assessment and write your action summary:\n"
+            f"```bash\n"
+            f"{_ctx_snippet}\n"
+            f"# Read the CHECK agent's assessment:\n"
+            f"{_read_snippet(check_key, 'ASSESSMENT')}"
+            f"echo \"Assessment: $ASSESSMENT\"\n"
+            f"# Write your action summary:\n"
+            f"ACTION='<your action summary and lessons learned>'\n"
+            f"curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
+            f"  \"$WEB_BASE_URL/scratchpad/{act_key}\" \\\n"
+            f"  -H 'Content-Type: application/json' \\\n"
+            f"  -d '{{\"value\": \"'$ACTION'\"}}'\n"
+            f"```\n"
+        )
+
+        plan_phase = PhaseSpec(
+            name="plan",
+            pattern="single",
+            agents=AgentSelector(tags=list(body.planner_tags)),
+            required_tags=list(body.planner_tags),
+            timeout=body.agent_timeout,
+            context=plan_prompt,
+        )
+        do_phase = PhaseSpec(
+            name="do",
+            pattern="single",
+            agents=AgentSelector(tags=list(body.doer_tags)),
+            required_tags=list(body.doer_tags),
+            timeout=body.agent_timeout,
+            context=do_prompt,
+        )
+        check_phase = PhaseSpec(
+            name="check",
+            pattern="single",
+            agents=AgentSelector(tags=list(body.checker_tags)),
+            required_tags=list(body.checker_tags),
+            timeout=body.agent_timeout,
+            context=check_prompt,
+        )
+        act_phase = PhaseSpec(
+            name="act",
+            pattern="single",
+            agents=AgentSelector(tags=list(body.actor_tags)),
+            required_tags=list(body.actor_tags),
+            timeout=body.agent_timeout,
+            context=act_prompt,
+        )
+
+        loop_block = LoopBlock(
+            name="pdca_cycle",
+            loop=LoopSpec(max=body.max_cycles, until=until),
+            phases=[plan_phase, do_phase, check_phase, act_phase],
+        )
+
+        task_specs, phase_statuses, _loop_terminals = expand_phase_items_with_status(
+            [loop_block],
+            context=body.objective,
+            scratchpad_prefix=sp,
+        )
+
+        try:
+            ordered = validate_dag(task_specs, local_id_key="local_id", deps_key="depends_on")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        local_to_global: dict[str, str] = {}
+        global_task_ids: list[str] = []
+
+        for spec in ordered:
+            global_deps = [local_to_global[lid] for lid in spec.get("depends_on", [])]
+            task = await orchestrator.submit_task(
+                spec["prompt"],
+                priority=0,
+                depends_on=global_deps or None,
+                required_tags=spec.get("required_tags") or None,
+                timeout=spec.get("timeout"),
+            )
+            local_to_global[spec["local_id"]] = task.id
+            global_task_ids.append(task.id)
+
+        run = wm.submit(name=wf_name, task_ids=global_task_ids)
+
+        if phase_statuses:
+            for ps in phase_statuses:
+                ps.task_ids = [local_to_global[lid] for lid in ps.task_ids if lid in local_to_global]
+            run.phases = phase_statuses
+            wm.register_phases(run.id)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": local_to_global,
+            "scratchpad_prefix": sp,
+            "loop_block_name": "pdca_cycle",
+            "max_cycles": body.max_cycles,
         }
 
     return router

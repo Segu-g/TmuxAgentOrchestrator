@@ -116,48 +116,6 @@
         "title": "AgentKillResponse",
         "type": "object"
       },
-      "AgentSelectorModel": {
-        "description": "Agent selector for a workflow phase.\n\nAttributes\n----------\ntags:\n    ``required_tags`` constraint applied to task dispatch.\ncount:\n    Number of parallel agent slots (used by ``parallel`` and ``competitive``\n    patterns, and for the advocate/critic role in ``debate``).\ntarget_agent:\n    Force-dispatch to a specific agent ID.\ntarget_group:\n    Restrict to agents in the named group.\n\nDesign reference: DESIGN.md \u00a710.15 (v0.48.0)",
-        "properties": {
-          "count": {
-            "default": 1,
-            "title": "Count",
-            "type": "integer"
-          },
-          "tags": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Tags",
-            "type": "array"
-          },
-          "target_agent": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Target Agent"
-          },
-          "target_group": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Target Group"
-          }
-        },
-        "title": "AgentSelectorModel",
-        "type": "object"
-      },
       "AgentmeshWorkflowSubmit": {
         "description": "Request body for POST /workflows/agentmesh \u2014 AgentMesh 4-role dev pipeline.\n\nSubmits a Planner \u2192 Coder \u2192 Debugger \u2192 Reviewer sequential Workflow DAG\nthat transforms a feature request into a fully reviewed implementation via\nthe shared scratchpad (Blackboard pattern):\n\n  - **planner**: reads ``feature_request``, writes a detailed implementation\n    plan (data structures, algorithm, test cases, edge cases) to the scratchpad.\n  - **coder**: reads the plan from the scratchpad, writes the implementation\n    in ``language`` to the scratchpad.\n  - **debugger**: reads the implementation, identifies bugs and edge-case failures,\n    writes a corrected/improved version to the scratchpad.\n  - **reviewer**: reads all previous scratchpad outputs, writes a structured code\n    review with a star rating (1-5) and actionable recommendations.\n\nWorkflow topology (strictly sequential via depends_on)::\n\n    planner -> coder -> debugger -> reviewer\n\nScratchpad keys (Blackboard pattern):\n\n- ``{scratchpad_prefix}_plan``      : planner's implementation plan\n- ``{scratchpad_prefix}_code``      : coder's implementation\n- ``{scratchpad_prefix}_debugged``  : debugger's corrected implementation\n- ``{scratchpad_prefix}_review``    : reviewer's structured code review\n\nAgent routing: each phase uses ``required_tags`` to target a specialised agent:\n\n- planner   -> ``agentmesh_planner``\n- coder     -> ``agentmesh_coder``\n- debugger  -> ``agentmesh_debugger``\n- reviewer  -> ``agentmesh_reviewer``\n\nDesign references:\n- Elias, \"AgentMesh: A Cooperative Multi-Agent Generative AI Framework\n  for Software Development Automation\", arXiv:2507.19902 (2025):\n  Planner/Coder/Debugger/Reviewer 4-role pipeline automates software development.\n- ACM TOSEM, \"LLM-Based Multi-Agent Systems for Software Engineering\" (2025),\n  https://dl.acm.org/doi/10.1145/3712003: Pipeline pattern with deterministic\n  handoff between specialised roles.\n- DESIGN.md \u00a710.73 (v1.1.41)",
         "properties": {
@@ -414,48 +372,6 @@
         "title": "CompetitionWorkflowSubmit",
         "type": "object"
       },
-      "CompetitiveConfigModel": {
-        "description": "Pydantic schema for the ``competitive`` strategy config.",
-        "properties": {
-          "judge_prompt_template": {
-            "default": "",
-            "description": "Optional template for the judge task prompt. Supports {criteria}, {solutions}, {context} placeholders. When empty, the built-in judge prompt is generated.",
-            "title": "Judge Prompt Template",
-            "type": "string"
-          },
-          "scorer": {
-            "default": "llm_judge",
-            "title": "Scorer",
-            "type": "string"
-          },
-          "timeout_per_agent": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Timeout Per Agent"
-          },
-          "top_k": {
-            "default": 1,
-            "description": "Number of top-scored solutions to preserve.",
-            "minimum": 1.0,
-            "title": "Top K",
-            "type": "integer"
-          },
-          "type": {
-            "const": "competitive",
-            "default": "competitive",
-            "title": "Type",
-            "type": "string"
-          }
-        },
-        "title": "CompetitiveConfigModel",
-        "type": "object"
-      },
       "CompressContextRequest": {
         "description": "Request body for POST /agents/{agent_id}/compress-context.",
         "properties": {
@@ -543,42 +459,6 @@
           "topic"
         ],
         "title": "DDDWorkflowSubmit",
-        "type": "object"
-      },
-      "DebateConfigModel": {
-        "description": "Pydantic schema for the ``debate`` strategy config.",
-        "properties": {
-          "early_stop_signal": {
-            "default": "",
-            "description": "Keyword written by the judge to the scratchpad to signal early termination. When non-empty, the judge prompt instructs the agent to emit this keyword if consensus is detected. When empty, early-stop behaviour is disabled.",
-            "title": "Early Stop Signal",
-            "type": "string"
-          },
-          "judge_criteria": {
-            "default": "",
-            "title": "Judge Criteria",
-            "type": "string"
-          },
-          "require_consensus": {
-            "default": false,
-            "title": "Require Consensus",
-            "type": "boolean"
-          },
-          "rounds": {
-            "default": 1,
-            "description": "Number of advocate/critic rounds.",
-            "minimum": 1.0,
-            "title": "Rounds",
-            "type": "integer"
-          },
-          "type": {
-            "const": "debate",
-            "default": "debate",
-            "title": "Type",
-            "type": "string"
-          }
-        },
-        "title": "DebateConfigModel",
         "type": "object"
       },
       "DebateWorkflowSubmit": {
@@ -1181,39 +1061,54 @@
         "title": "PairWorkflowSubmit",
         "type": "object"
       },
-      "ParallelConfigModel": {
-        "description": "Pydantic schema for the ``parallel`` strategy config.",
+      "PdcaWorkflowSubmit": {
+        "description": "Request body for POST /workflows/pdca \u2014 PDCA cycle workflow.\n\nSubmits a Plan-Do-Check-Act iterative workflow that loops until a quality\ncondition is met or the maximum number of cycles is exhausted.\n\nThe workflow uses a loop block with four phases:\n1. **plan** \u2014 produce a plan for this iteration.\n2. **do** \u2014 implement based on the plan.\n3. **check** \u2014 review the result; write ``quality_approved=yes`` to the\n   scratchpad when quality is acceptable.\n4. **act** \u2014 refine or finalise based on the check findings.\n\nAgents communicate via the shared scratchpad (Blackboard pattern).\nScratchpad keys use the format ``{scratchpad_prefix}_{phase}_iter{N}``.\n\nAttributes\n----------\nobjective:\n    The goal to achieve through iterative improvement.\nmax_cycles:\n    Maximum number of Plan-Do-Check-Act cycles (default 3).\nsuccess_condition:\n    Scratchpad condition checked after each cycle's ``check`` phase.\n    When met, the loop terminates.  Defaults to checking for\n    ``quality_approved`` == ``\"yes\"``.\nscratchpad_prefix:\n    Prefix for all scratchpad keys written by agents (default ``\"pdca\"``).\nagent_timeout:\n    Per-task timeout in seconds (default 300).\nplanner_tags:\n    ``required_tags`` for the PLAN agent.\ndoer_tags:\n    ``required_tags`` for the DO agent.\nchecker_tags:\n    ``required_tags`` for the CHECK agent.\nactor_tags:\n    ``required_tags`` for the ACT agent.\nreply_to:\n    Agent ID that receives the RESULT in its mailbox when the workflow\n    completes.\n\nDesign reference: DESIGN.md \u00a710.76 (v1.1.44)\nResearch:\n- Deming, \"Out of the Crisis\" (1986) \u2014 PDCA cycle\n- Moxo, \"Continuous improvement with the PDSA & PDCA cycle\" (2025)\n- AiiDA ``while_()`` convergence loop for iterative scientific workflows",
         "properties": {
-          "merge_strategy": {
-            "default": "collect",
-            "enum": [
-              "collect",
-              "first_wins"
-            ],
-            "title": "Merge Strategy",
+          "actor_tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Actor Tags",
+            "type": "array"
+          },
+          "agent_timeout": {
+            "default": 300,
+            "minimum": 1.0,
+            "title": "Agent Timeout",
+            "type": "integer"
+          },
+          "checker_tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Checker Tags",
+            "type": "array"
+          },
+          "doer_tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Doer Tags",
+            "type": "array"
+          },
+          "max_cycles": {
+            "default": 3,
+            "minimum": 1.0,
+            "title": "Max Cycles",
+            "type": "integer"
+          },
+          "objective": {
+            "title": "Objective",
             "type": "string"
           },
-          "type": {
-            "const": "parallel",
-            "default": "parallel",
-            "title": "Type",
-            "type": "string"
-          }
-        },
-        "title": "ParallelConfigModel",
-        "type": "object"
-      },
-      "PhaseSpecModel": {
-        "description": "A single phase in a declarative workflow submission.\n\nAttributes\n----------\nname:\n    Human-readable phase label.\npattern:\n    Execution strategy: ``single`` | ``parallel`` | ``competitive`` | ``debate``.\nagents:\n    Agent selector for the primary role.\ncritic_agents:\n    Agent selector for the critic role (debate only).\njudge_agents:\n    Agent selector for the judge role (debate only).\ndebate_rounds:\n    Number of advocate/critic rounds (debate only, default 1).\ncontext:\n    Optional per-phase context override.\n\nDesign references:\n- arXiv:2512.19769 (PayPal DSL 2025): declarative phase \u2192 task expansion\n- \u00a712\u300c\u30ef\u30fc\u30af\u30d5\u30ed\u30fc\u8a2d\u8a08\u306e\u5c64\u69cb\u9020\u300d\u5c641\u30fb2\u30fb3\n- DESIGN.md \u00a710.15 (v0.48.0)",
-        "properties": {
-          "agents": {
-            "$ref": "#/components/schemas/AgentSelectorModel",
-            "default": {
-              "count": 1,
-              "tags": []
-            }
+          "planner_tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Planner Tags",
+            "type": "array"
           },
-          "context": {
+          "reply_to": {
             "anyOf": [
               {
                 "type": "string"
@@ -1222,44 +1117,14 @@
                 "type": "null"
               }
             ],
-            "title": "Context"
+            "title": "Reply To"
           },
-          "critic_agents": {
-            "$ref": "#/components/schemas/AgentSelectorModel",
-            "default": {
-              "count": 1,
-              "tags": []
-            }
-          },
-          "debate_rounds": {
-            "default": 1,
-            "title": "Debate Rounds",
-            "type": "integer"
-          },
-          "judge_agents": {
-            "$ref": "#/components/schemas/AgentSelectorModel",
-            "default": {
-              "count": 1,
-              "tags": []
-            }
-          },
-          "name": {
-            "title": "Name",
+          "scratchpad_prefix": {
+            "default": "pdca",
+            "title": "Scratchpad Prefix",
             "type": "string"
           },
-          "pattern": {
-            "title": "Pattern",
-            "type": "string"
-          },
-          "required_tags": {
-            "default": [],
-            "items": {
-              "type": "string"
-            },
-            "title": "Required Tags",
-            "type": "array"
-          },
-          "skip_condition": {
+          "success_condition": {
             "anyOf": [
               {
                 "$ref": "#/components/schemas/SkipConditionModel"
@@ -1268,60 +1133,13 @@
                 "type": "null"
               }
             ],
-            "description": "When set, the orchestrator evaluates this condition against the scratchpad at dispatch time. If met, no task is created and the phase is marked SKIPPED (dependent phases still run normally). Design reference: DESIGN.md \u00a710.68 (v1.1.36)."
-          },
-          "strategy_config": {
-            "anyOf": [
-              {
-                "discriminator": {
-                  "mapping": {
-                    "competitive": "#/components/schemas/CompetitiveConfigModel",
-                    "debate": "#/components/schemas/DebateConfigModel",
-                    "parallel": "#/components/schemas/ParallelConfigModel",
-                    "single": "#/components/schemas/SingleConfigModel"
-                  },
-                  "propertyName": "type"
-                },
-                "oneOf": [
-                  {
-                    "$ref": "#/components/schemas/SingleConfigModel"
-                  },
-                  {
-                    "$ref": "#/components/schemas/ParallelConfigModel"
-                  },
-                  {
-                    "$ref": "#/components/schemas/CompetitiveConfigModel"
-                  },
-                  {
-                    "$ref": "#/components/schemas/DebateConfigModel"
-                  }
-                ]
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Typed strategy parameters for this phase. Discriminated by 'type'.",
-            "title": "Strategy Config"
-          },
-          "timeout": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Per-phase task timeout override in seconds. Overrides the global task_timeout.",
-            "title": "Timeout"
+            "description": "Scratchpad condition that terminates the loop early. Defaults to quality_approved == 'yes'."
           }
         },
         "required": [
-          "name",
-          "pattern"
+          "objective"
         ],
-        "title": "PhaseSpecModel",
+        "title": "PdcaWorkflowSubmit",
         "type": "object"
       },
       "RateLimitUpdate": {
@@ -1453,19 +1271,6 @@
           }
         },
         "title": "SendMessage",
-        "type": "object"
-      },
-      "SingleConfigModel": {
-        "description": "Pydantic schema for the ``single`` strategy config.",
-        "properties": {
-          "type": {
-            "const": "single",
-            "default": "single",
-            "title": "Type",
-            "type": "string"
-          }
-        },
-        "title": "SingleConfigModel",
         "type": "object"
       },
       "SkipConditionModel": {
@@ -2021,7 +1826,7 @@
         "type": "object"
       },
       "WorkflowSubmit": {
-        "description": "Request body for POST /workflows.\n\nSupports two mutually exclusive submission modes:\n\n1. **tasks= (legacy)**: Submit a raw DAG of :class:`WorkflowTaskSpec` nodes.\n   Backward-compatible with the original ``POST /workflows`` API.\n\n2. **phases= (new)**: Submit a declarative list of :class:`PhaseSpecModel`\n   objects.  The server expands each phase into task specs and builds a\n   DAG automatically.\n\nExactly one of ``tasks`` or ``phases`` must be provided.  Providing neither\nraises HTTP 422.\n\nDesign references:\n- arXiv:2512.19769 (PayPal DSL 2025): declarative pattern reduces dev time 60%\n- \u00a712\u300c\u30ef\u30fc\u30af\u30d5\u30ed\u30fc\u8a2d\u8a08\u306e\u5c64\u69cb\u9020\u300d\u5c641 \u5ba3\u8a00\u7684\u30e2\u30fc\u30c9\n- DESIGN.md \u00a710.15 (v0.48.0)",
+        "description": "Request body for POST /workflows.\n\nSupports two mutually exclusive submission modes:\n\n1. **tasks= (legacy)**: Submit a raw DAG of :class:`WorkflowTaskSpec` nodes.\n   Backward-compatible with the original ``POST /workflows`` API.\n\n2. **phases= (new)**: Submit a declarative list of :class:`PhaseItemModel`\n   objects (each item may be a :class:`PhaseSpecModel` or a\n   :class:`LoopBlockModel`).  The server expands phases into a task DAG\n   automatically.\n\nExactly one of ``tasks`` or ``phases`` must be provided.  Providing neither\nraises HTTP 422.\n\nDesign references:\n- arXiv:2512.19769 (PayPal DSL 2025): declarative pattern reduces dev time 60%\n- \u00a712\u300c\u30ef\u30fc\u30af\u30d5\u30ed\u30fc\u8a2d\u8a08\u306e\u5c64\u69cb\u9020\u300d\u5c641 \u5ba3\u8a00\u7684\u30e2\u30fc\u30c9\n- DESIGN.md \u00a710.15 (v0.48.0)\n- DESIGN.md \u00a710.76 (v1.1.44 \u2014 LoopBlock support)",
         "properties": {
           "context": {
             "default": "",
@@ -2036,9 +1841,7 @@
           "phases": {
             "anyOf": [
               {
-                "items": {
-                  "$ref": "#/components/schemas/PhaseSpecModel"
-                },
+                "items": {},
                 "type": "array"
               },
               {
@@ -5268,6 +5071,47 @@
           }
         },
         "summary": "Submit a 2-agent PairCoder (Navigator + Driver) workflow"
+      }
+    },
+    "/workflows/pdca": {
+      "post": {
+        "description": "Submit a PDCA iterative improvement workflow.\n\nBuilds and submits a loop-based workflow that executes Plan \u2192 Do \u2192 Check\n\u2192 Act phases iteratively until a quality condition is met or the maximum\nnumber of cycles is reached.\n\nEach cycle:\n1. **plan** (``required_tags: planner_tags``): Produces a plan for this\n   iteration.  Writes plan to scratchpad key\n   ``{prefix}_plan_iter{N}``.\n2. **do** (``required_tags: doer_tags``): Implements the plan.  Reads\n   ``{prefix}_plan_iter{N}``, writes output to ``{prefix}_do_iter{N}``.\n3. **check** (``required_tags: checker_tags``): Evaluates the result.\n   Reads ``{prefix}_do_iter{N}``.  Writes quality assessment to\n   ``{prefix}_check_iter{N}``.  When quality is acceptable, writes\n   ``quality_approved=yes`` to the scratchpad to trigger early\n   termination.\n4. **act** (``required_tags: actor_tags``): Acts on the findings.\n   Reads ``{prefix}_check_iter{N}``, writes action summary to\n   ``{prefix}_act_iter{N}``.\n\nLoop termination:\n- Terminates early when ``scratchpad['quality_approved'] == 'yes'``\n  (or the custom ``success_condition``).\n- Always terminates after ``max_cycles`` iterations.\n\nReturns:\n- ``workflow_id``: workflow run UUID for status polling.\n- ``name``: ``pdca/{objective_slug}``.\n- ``task_ids``: ``local_id \u2192 global_task_id`` mapping.\n- ``scratchpad_prefix``: scratchpad key namespace.\n- ``loop_block_name``: name of the loop block (``\"pdca_cycle\"``).\n\nDesign references:\n- Deming, \"Out of the Crisis\" (1986) \u2014 PDCA cycle\n- Moxo, \"Continuous improvement with the PDSA & PDCA cycle\" (2025)\n- AiiDA ``while_()`` convergence loop for iterative scientific workflows\n- DESIGN.md \u00a710.76 (v1.1.44)",
+        "operationId": "submit_pdca_workflow_workflows_pdca_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PdcaWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Pdca Workflow Workflows Pdca Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a PDCA (Plan-Do-Check-Act) iterative improvement workflow"
       }
     },
     "/workflows/redblue": {
