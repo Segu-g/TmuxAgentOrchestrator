@@ -41,7 +41,111 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, runtime_checkable
+from typing import Literal, Protocol, Union, runtime_checkable
+
+
+# ---------------------------------------------------------------------------
+# StrategyConfig value objects — typed parameters per strategy (stdlib only)
+#
+# Design: stdlib dataclasses with a ``type`` discriminator field for each
+# strategy pattern.  The domain layer is kept free of third-party dependencies
+# (no Pydantic) — Pydantic wrapper models live in the web/schemas layer.
+#
+# References:
+# - Gamma et al., "Design Patterns" (GoF 1994) — Strategy pattern
+# - ezyang, "Idiomatic ADTs in Python with dataclasses and Union" (2020)
+# - DESIGN.md §10.63 (v1.1.31)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SingleConfig:
+    """Typed configuration for the ``single`` strategy.
+
+    Currently has no extra parameters beyond the discriminator, but provides
+    a typed placeholder for future extension (e.g. retry policy).
+    """
+
+    type: Literal["single"] = "single"
+
+
+@dataclass
+class ParallelConfig:
+    """Typed configuration for the ``parallel`` strategy.
+
+    Attributes
+    ----------
+    merge_strategy:
+        How to aggregate outputs from parallel agents.
+        ``"collect"`` (default) — return all outputs as a list.
+        ``"first_wins"`` — return the first completed output.
+    """
+
+    type: Literal["parallel"] = "parallel"
+    merge_strategy: str = "collect"
+
+    def __post_init__(self) -> None:
+        valid = {"collect", "first_wins"}
+        if self.merge_strategy not in valid:
+            raise ValueError(f"merge_strategy must be one of {sorted(valid)!r}")
+
+
+@dataclass
+class CompetitiveConfig:
+    """Typed configuration for the ``competitive`` strategy.
+
+    Attributes
+    ----------
+    scorer:
+        Scoring function identifier.  ``"llm_judge"`` (default) delegates
+        evaluation to a subsequent judge agent.
+    top_k:
+        Number of top-scored solutions to preserve.  Must be >= 1.
+    timeout_per_agent:
+        Per-agent task timeout override (seconds).  When set, each
+        competitive task gets this timeout instead of the phase-level
+        or global ``task_timeout``.
+    """
+
+    type: Literal["competitive"] = "competitive"
+    scorer: str = "llm_judge"
+    top_k: int = 1
+    timeout_per_agent: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.top_k < 1:
+            raise ValueError("top_k must be >= 1")
+
+
+@dataclass
+class DebateConfig:
+    """Typed configuration for the ``debate`` strategy.
+
+    Attributes
+    ----------
+    rounds:
+        Number of advocate/critic rounds before the judge phase.
+        Must be >= 1.
+    require_consensus:
+        When ``True``, the judge must include "CONSENSUS_REACHED" in its
+        output to mark the debate as successful.  (Future: early-stop signal.)
+    judge_criteria:
+        Free-text criteria injected into the judge task prompt.  Allows
+        custom evaluation dimensions (e.g. "correctness, brevity, clarity").
+    """
+
+    type: Literal["debate"] = "debate"
+    rounds: int = 1
+    require_consensus: bool = False
+    judge_criteria: str = ""
+
+    def __post_init__(self) -> None:
+        if self.rounds < 1:
+            raise ValueError("rounds must be >= 1")
+
+
+# Type alias for the discriminated union of all strategy configs.
+StrategyConfig = Union[SingleConfig, ParallelConfig, CompetitiveConfig, DebateConfig]
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +215,8 @@ class PhaseSpec:
     debate_rounds: int = 1
     context: str | None = None
     required_tags: list[str] = field(default_factory=list)
+    timeout: int | None = None
+    strategy_config: StrategyConfig | None = None  # type: ignore[type-arg]
 
     def __post_init__(self) -> None:
         if self.pattern not in _VALID_PATTERNS:
@@ -240,6 +346,7 @@ def _make_task_spec(
     required_tags: list[str],
     target_agent: str | None = None,
     target_group: str | None = None,
+    timeout: int | None = None,
 ) -> dict:
     """Build a task spec dict compatible with ``WorkflowTaskSpec``."""
     spec: dict = {
@@ -247,6 +354,7 @@ def _make_task_spec(
         "prompt": prompt,
         "depends_on": list(depends_on),
         "required_tags": list(required_tags),
+        "timeout": timeout,
     }
     if target_agent is not None:
         spec["target_agent"] = target_agent
@@ -325,6 +433,7 @@ class SingleStrategy:
             required_tags=tags,
             target_agent=phase.agents.target_agent,
             target_group=phase.agents.target_group,
+            timeout=phase.timeout,
         )
         ps = WorkflowPhaseStatus(name=phase.name, pattern="single", task_ids=[local_id])
         return [task], [ps]
@@ -358,6 +467,7 @@ class ParallelStrategy:
                     required_tags=tags,
                     target_agent=phase.agents.target_agent,
                     target_group=phase.agents.target_group,
+                    timeout=phase.timeout,
                 )
             )
             local_ids.append(local_id)
@@ -398,6 +508,7 @@ class CompetitiveStrategy:
                     required_tags=tags,
                     target_agent=phase.agents.target_agent,
                     target_group=phase.agents.target_group,
+                    timeout=phase.timeout,
                 )
             )
             local_ids.append(local_id)
@@ -444,7 +555,10 @@ class DebateStrategy:
                 scratchpad_prefix=scratchpad_prefix,
             )
             tasks.append(
-                _make_task_spec(adv_id, adv_prompt, depends_on=current_deps, required_tags=advocate_tags)
+                _make_task_spec(
+                    adv_id, adv_prompt, depends_on=current_deps,
+                    required_tags=advocate_tags, timeout=phase.timeout,
+                )
             )
             all_local_ids.append(adv_id)
 
@@ -454,7 +568,10 @@ class DebateStrategy:
                 scratchpad_prefix=scratchpad_prefix,
             )
             tasks.append(
-                _make_task_spec(crit_id, crit_prompt, depends_on=[adv_id], required_tags=critic_tags)
+                _make_task_spec(
+                    crit_id, crit_prompt, depends_on=[adv_id],
+                    required_tags=critic_tags, timeout=phase.timeout,
+                )
             )
             all_local_ids.append(crit_id)
 
@@ -465,7 +582,10 @@ class DebateStrategy:
             phase.name, "debate", context, role="judge", scratchpad_prefix=scratchpad_prefix,
         )
         tasks.append(
-            _make_task_spec(judge_id, judge_prompt, depends_on=current_deps, required_tags=judge_tags)
+            _make_task_spec(
+                judge_id, judge_prompt, depends_on=current_deps,
+                required_tags=judge_tags, timeout=phase.timeout,
+            )
         )
         all_local_ids.append(judge_id)
 
@@ -497,3 +617,56 @@ def get_strategy(pattern: str) -> PhaseStrategy:
             f"Unknown phase pattern {pattern!r}. "
             f"Must be one of: {sorted(_STRATEGY_REGISTRY)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Canonical expand_phases helpers (domain layer)
+# ---------------------------------------------------------------------------
+
+
+def _terminal_ids_domain(phase: PhaseSpec, tasks: list[dict]) -> list[str]:
+    """Return the IDs of tasks that have no dependents within this phase.
+
+    For single / parallel / competitive: all tasks are terminal.
+    For debate: only the judge task is terminal.
+    """
+    if phase.pattern == "debate":
+        return [tasks[-1]["local_id"]]
+    return [t["local_id"] for t in tasks]
+
+
+def expand_phases_from_specs(
+    phases: list[PhaseSpec],
+    *,
+    context: str,
+    scratchpad_prefix: str = "",
+) -> list[dict]:
+    """Canonical domain-layer phase expansion.
+
+    Translates a list of :class:`PhaseSpec` objects into task spec dicts.
+    Each phase's ``timeout`` is propagated to every generated task spec.
+
+    This function mirrors :func:`~tmux_orchestrator.phase_executor.expand_phases`
+    but lives in the domain layer (no infrastructure imports).
+
+    Parameters
+    ----------
+    phases:
+        Ordered list of phase specifications.
+    context:
+        Global workflow context string embedded in every task prompt.
+        Overridden per-phase by ``PhaseSpec.context``.
+    scratchpad_prefix:
+        Prefix for scratchpad keys embedded in prompts.
+    """
+    all_tasks: list[dict] = []
+    prior_terminal_ids: list[str] = []
+
+    for phase in phases:
+        effective_context = phase.context if phase.context is not None else context
+        strategy = get_strategy(phase.pattern)
+        new_tasks, _ = strategy.expand(phase, prior_terminal_ids, effective_context, scratchpad_prefix)
+        all_tasks.extend(new_tasks)
+        prior_terminal_ids = _terminal_ids_domain(phase, new_tasks)
+
+    return all_tasks

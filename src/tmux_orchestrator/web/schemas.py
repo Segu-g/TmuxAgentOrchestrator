@@ -9,9 +9,9 @@ Design reference: DESIGN.md §10.41 (v1.1.5).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class TaskSubmit(BaseModel):
@@ -328,6 +328,56 @@ class WorkflowTaskSpec(BaseModel):
     ttl: float | None = None
 
 
+# ---------------------------------------------------------------------------
+# StrategyConfig Pydantic models (web/schemas layer)
+#
+# These are the Pydantic counterparts of the stdlib dataclasses defined in
+# ``domain/phase_strategy.py``.  The domain layer must remain Pydantic-free
+# (domain purity rule), so validation for HTTP input lives here.
+#
+# Design: discriminated union via ``type`` literal field.
+# Reference: DESIGN.md §10.63 (v1.1.31)
+# ---------------------------------------------------------------------------
+
+
+class SingleConfigModel(BaseModel):
+    """Pydantic schema for the ``single`` strategy config."""
+
+    type: Literal["single"] = "single"
+
+
+class ParallelConfigModel(BaseModel):
+    """Pydantic schema for the ``parallel`` strategy config."""
+
+    type: Literal["parallel"] = "parallel"
+    merge_strategy: Literal["collect", "first_wins"] = "collect"
+
+
+class CompetitiveConfigModel(BaseModel):
+    """Pydantic schema for the ``competitive`` strategy config."""
+
+    type: Literal["competitive"] = "competitive"
+    scorer: str = "llm_judge"
+    top_k: int = Field(default=1, ge=1, description="Number of top-scored solutions to preserve.")
+    timeout_per_agent: int | None = None
+
+
+class DebateConfigModel(BaseModel):
+    """Pydantic schema for the ``debate`` strategy config."""
+
+    type: Literal["debate"] = "debate"
+    rounds: int = Field(default=1, ge=1, description="Number of advocate/critic rounds.")
+    require_consensus: bool = False
+    judge_criteria: str = ""
+
+
+# Discriminated union used by PhaseSpecModel.strategy_config.
+StrategyConfigModel = Annotated[
+    Union[SingleConfigModel, ParallelConfigModel, CompetitiveConfigModel, DebateConfigModel],
+    Field(discriminator="type"),
+]
+
+
 class AgentSelectorModel(BaseModel):
     """Agent selector for a workflow phase.
 
@@ -386,6 +436,14 @@ class PhaseSpecModel(BaseModel):
     debate_rounds: int = 1
     context: str | None = None
     required_tags: list[str] = []
+    timeout: int | None = Field(
+        default=None,
+        description="Per-phase task timeout override in seconds. Overrides the global task_timeout.",
+    )
+    strategy_config: StrategyConfigModel | None = Field(
+        default=None,
+        description="Typed strategy parameters for this phase. Discriminated by 'type'.",
+    )
 
     @field_validator("pattern")
     @classmethod

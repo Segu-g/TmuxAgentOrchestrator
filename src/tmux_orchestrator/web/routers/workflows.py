@@ -96,12 +96,41 @@ def build_workflows_router(
         # ------------------------------------------------------------------
         phase_statuses = None
         if body.phases is not None:
+            from tmux_orchestrator.domain.phase_strategy import (  # noqa: PLC0415
+                CompetitiveConfig,
+                DebateConfig,
+                ParallelConfig,
+                SingleConfig,
+            )
             from tmux_orchestrator.phase_executor import (  # noqa: PLC0415
                 AgentSelector,
                 PhaseSpec,
                 expand_phases_with_status,
             )
-    
+
+            def _to_domain_strategy_config(m: Any) -> Any:
+                """Convert a StrategyConfigModel → domain StrategyConfig dataclass."""
+                if m is None:
+                    return None
+                t = getattr(m, "type", None)
+                if t == "single":
+                    return SingleConfig()
+                if t == "parallel":
+                    return ParallelConfig(merge_strategy=m.merge_strategy)
+                if t == "competitive":
+                    return CompetitiveConfig(
+                        scorer=m.scorer,
+                        top_k=m.top_k,
+                        timeout_per_agent=m.timeout_per_agent,
+                    )
+                if t == "debate":
+                    return DebateConfig(
+                        rounds=m.rounds,
+                        require_consensus=m.require_consensus,
+                        judge_criteria=m.judge_criteria,
+                    )
+                return None
+
             run_id_prefix = uuid.uuid4().hex[:8]
             phase_specs: list[PhaseSpec] = []
             for p in body.phases:
@@ -130,6 +159,8 @@ def build_workflows_router(
                         debate_rounds=p.debate_rounds,
                         context=p.context,
                         required_tags=p.required_tags,
+                        timeout=p.timeout,
+                        strategy_config=_to_domain_strategy_config(p.strategy_config),
                     )
                 )
     
@@ -166,6 +197,7 @@ def build_workflows_router(
                 max_retries=spec.get("max_retries", 0),
                 inherit_priority=spec.get("inherit_priority", True),
                 ttl=spec.get("ttl"),
+                timeout=spec.get("timeout"),
             )
             local_to_global[spec["local_id"]] = task.id
             global_task_ids.append(task.id)

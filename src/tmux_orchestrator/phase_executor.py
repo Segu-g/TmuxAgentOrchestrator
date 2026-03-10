@@ -23,16 +23,22 @@ from __future__ import annotations
 
 from tmux_orchestrator.domain.phase_strategy import (  # noqa: F401
     AgentSelector,
+    CompetitiveConfig,
     CompetitiveStrategy,
+    DebateConfig,
     DebateStrategy,
+    ParallelConfig,
     ParallelStrategy,
     PhaseSpec,
     PhaseStrategy,
+    SingleConfig,
     SingleStrategy,
+    StrategyConfig,
     WorkflowPhaseStatus,
     _VALID_PATTERNS,
     _make_task_spec,
     _phase_prompt,
+    expand_phases_from_specs,
     get_strategy,
 )
 
@@ -124,18 +130,24 @@ def expand_phases_with_status(
 
 __all__ = [
     "AgentSelector",
+    "CompetitiveConfig",
     "CompetitiveStrategy",
+    "DebateConfig",
     "DebateStrategy",
+    "ParallelConfig",
     "ParallelStrategy",
     "PhaseSpec",
     "PhaseStrategy",
+    "SingleConfig",
     "SingleStrategy",
+    "StrategyConfig",
     "WorkflowPhaseStatus",
     "_VALID_PATTERNS",
     "_make_task_spec",
     "_phase_prompt",
     "_terminal_ids",
     "expand_phases",
+    "expand_phases_from_specs",
     "expand_phases_with_status",
     "get_strategy",
 ]

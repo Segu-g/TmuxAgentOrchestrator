@@ -66,6 +66,13 @@ class Task:
     ttl: float | None = None
     submitted_at: float = field(default_factory=time.time)
     expires_at: float | None = None
+    # Per-task timeout override in seconds.  When set, this task uses this
+    # value instead of the global ``OrchestratorConfig.task_timeout``.
+    # Injected by ``expand_phases()`` when the phase has a ``timeout`` field.
+    # The dispatch loop checks this field and passes it to the agent's run loop.
+    # Reference: Temporal per-activity schedule_to_close_timeout (2025);
+    # DESIGN.md §10.63 (v1.1.31)
+    timeout: int | None = None
 
     def __lt__(self, other: "Task") -> bool:
         return self.priority < other.priority
@@ -88,6 +95,7 @@ class Task:
             "submitted_at": self.submitted_at,
             "ttl": self.ttl,
             "expires_at": self.expires_at,
+            "timeout": self.timeout,
             **({"metadata": self.metadata} if self.metadata else {}),
         }
         return d

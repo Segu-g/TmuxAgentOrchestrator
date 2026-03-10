@@ -838,6 +838,7 @@ class Orchestrator:
         max_retries: int = 0,
         inherit_priority: bool = True,
         ttl: float | None = None,
+        timeout: int | None = None,
         _task_id: str | None = None,
     ) -> Task:
         """Submit a new task to the priority queue.
@@ -920,6 +921,7 @@ class Orchestrator:
             ttl=effective_ttl,
             submitted_at=submitted_at,
             expires_at=expires_at,
+            timeout=timeout,
         )
         # Record this task's priority for use by future dependent tasks.
         self._task_priorities[task.id] = effective_priority

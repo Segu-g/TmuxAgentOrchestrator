@@ -351,6 +351,42 @@
         "title": "CompetitionWorkflowSubmit",
         "type": "object"
       },
+      "CompetitiveConfigModel": {
+        "description": "Pydantic schema for the ``competitive`` strategy config.",
+        "properties": {
+          "scorer": {
+            "default": "llm_judge",
+            "title": "Scorer",
+            "type": "string"
+          },
+          "timeout_per_agent": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeout Per Agent"
+          },
+          "top_k": {
+            "default": 1,
+            "description": "Number of top-scored solutions to preserve.",
+            "minimum": 1.0,
+            "title": "Top K",
+            "type": "integer"
+          },
+          "type": {
+            "const": "competitive",
+            "default": "competitive",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "title": "CompetitiveConfigModel",
+        "type": "object"
+      },
       "CompressContextRequest": {
         "description": "Request body for POST /agents/{agent_id}/compress-context.",
         "properties": {
@@ -438,6 +474,36 @@
           "topic"
         ],
         "title": "DDDWorkflowSubmit",
+        "type": "object"
+      },
+      "DebateConfigModel": {
+        "description": "Pydantic schema for the ``debate`` strategy config.",
+        "properties": {
+          "judge_criteria": {
+            "default": "",
+            "title": "Judge Criteria",
+            "type": "string"
+          },
+          "require_consensus": {
+            "default": false,
+            "title": "Require Consensus",
+            "type": "boolean"
+          },
+          "rounds": {
+            "default": 1,
+            "description": "Number of advocate/critic rounds.",
+            "minimum": 1.0,
+            "title": "Rounds",
+            "type": "integer"
+          },
+          "type": {
+            "const": "debate",
+            "default": "debate",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "title": "DebateConfigModel",
         "type": "object"
       },
       "DebateWorkflowSubmit": {
@@ -1040,6 +1106,28 @@
         "title": "PairWorkflowSubmit",
         "type": "object"
       },
+      "ParallelConfigModel": {
+        "description": "Pydantic schema for the ``parallel`` strategy config.",
+        "properties": {
+          "merge_strategy": {
+            "default": "collect",
+            "enum": [
+              "collect",
+              "first_wins"
+            ],
+            "title": "Merge Strategy",
+            "type": "string"
+          },
+          "type": {
+            "const": "parallel",
+            "default": "parallel",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "title": "ParallelConfigModel",
+        "type": "object"
+      },
       "PhaseSpecModel": {
         "description": "A single phase in a declarative workflow submission.\n\nAttributes\n----------\nname:\n    Human-readable phase label.\npattern:\n    Execution strategy: ``single`` | ``parallel`` | ``competitive`` | ``debate``.\nagents:\n    Agent selector for the primary role.\ncritic_agents:\n    Agent selector for the critic role (debate only).\njudge_agents:\n    Agent selector for the judge role (debate only).\ndebate_rounds:\n    Number of advocate/critic rounds (debate only, default 1).\ncontext:\n    Optional per-phase context override.\n\nDesign references:\n- arXiv:2512.19769 (PayPal DSL 2025): declarative phase \u2192 task expansion\n- \u00a712\u300c\u30ef\u30fc\u30af\u30d5\u30ed\u30fc\u8a2d\u8a08\u306e\u5c64\u69cb\u9020\u300d\u5c641\u30fb2\u30fb3\n- DESIGN.md \u00a710.15 (v0.48.0)",
         "properties": {
@@ -1095,6 +1183,52 @@
             },
             "title": "Required Tags",
             "type": "array"
+          },
+          "strategy_config": {
+            "anyOf": [
+              {
+                "discriminator": {
+                  "mapping": {
+                    "competitive": "#/components/schemas/CompetitiveConfigModel",
+                    "debate": "#/components/schemas/DebateConfigModel",
+                    "parallel": "#/components/schemas/ParallelConfigModel",
+                    "single": "#/components/schemas/SingleConfigModel"
+                  },
+                  "propertyName": "type"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/SingleConfigModel"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ParallelConfigModel"
+                  },
+                  {
+                    "$ref": "#/components/schemas/CompetitiveConfigModel"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DebateConfigModel"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Typed strategy parameters for this phase. Discriminated by 'type'.",
+            "title": "Strategy Config"
+          },
+          "timeout": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Per-phase task timeout override in seconds. Overrides the global task_timeout.",
+            "title": "Timeout"
           }
         },
         "required": [
@@ -1200,6 +1334,19 @@
           }
         },
         "title": "SendMessage",
+        "type": "object"
+      },
+      "SingleConfigModel": {
+        "description": "Pydantic schema for the ``single`` strategy config.",
+        "properties": {
+          "type": {
+            "const": "single",
+            "default": "single",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "title": "SingleConfigModel",
         "type": "object"
       },
       "SocraticWorkflowSubmit": {
