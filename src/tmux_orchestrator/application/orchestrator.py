@@ -157,6 +157,9 @@ class Orchestrator:
         # Tracks when each agent started its current task (for history duration).
         self._task_started_at: dict[str, float] = {}
         self._task_started_prompt: dict[str, str] = {}
+        # Per-task timeout override (seconds), stored for history records.
+        # Populated at dispatch time from Task.timeout; popped in _record_agent_history.
+        self._task_timeout: dict[str, int] = {}
         # Active task lookup: task_id → Task object, so _route_loop can re-enqueue
         # on failure when task.retry_count < task.max_retries.
         # Reference: AWS SQS maxReceiveCount / Redrive policy; Netflix Hystrix retry;
@@ -1041,6 +1044,7 @@ class Orchestrator:
                 "submitted_at": t.submitted_at,
                 "ttl": t.ttl,
                 "expires_at": t.expires_at,
+                "timeout": t.timeout,
                 **({"required_tags": t.required_tags} if t.required_tags else {}),
                 **({"target_agent": t.target_agent} if t.target_agent else {}),
                 **({"target_group": t.target_group} if t.target_group else {}),
@@ -1529,6 +1533,8 @@ class Orchestrator:
             # Record dispatch time for history duration tracking.
             self._task_started_at[task.id] = time.monotonic()
             self._task_started_prompt[task.id] = task.prompt
+            if task.timeout is not None:
+                self._task_timeout[task.id] = task.timeout
             # Track the Task object for potential retry on failure.
             self._active_tasks[task.id] = task
             # --- Episode auto-inject (v1.0.29) ---
@@ -2230,6 +2236,7 @@ class Orchestrator:
         now_iso = datetime.now(tz=timezone.utc).isoformat()
         started_ts = self._task_started_at.pop(task_id, None)
         prompt = self._task_started_prompt.pop(task_id, "")
+        task_timeout_val = self._task_timeout.pop(task_id, None)
 
         if started_ts is not None:
             duration_s = round(now - started_ts, 3)
@@ -2250,6 +2257,7 @@ class Orchestrator:
             "duration_s": duration_s,
             "status": "error" if error else "success",
             "error": error,
+            "timeout": task_timeout_val,
         }
 
         history = self._agent_history.setdefault(agent_id, [])

@@ -232,6 +232,7 @@ def build_tasks_router(
                 "submitted_at": waiting_task.submitted_at,
                 "ttl": waiting_task.ttl,
                 "expires_at": waiting_task.expires_at,
+                "timeout": waiting_task.timeout,
             }
             if blocking:
                 resp["blocking"] = blocking
@@ -258,6 +259,7 @@ def build_tasks_router(
                     "submitted_at": item.get("submitted_at"),
                     "ttl": item.get("ttl"),
                     "expires_at": item.get("expires_at"),
+                    "timeout": active.timeout if active else item.get("timeout"),
                 }
                 if blocking:
                     resp["blocking"] = blocking
@@ -287,6 +289,7 @@ def build_tasks_router(
                         "submitted_at": ct.submitted_at,
                         "ttl": ct.ttl,
                         "expires_at": ct.expires_at,
+                        "timeout": ct.timeout,
                     }
                     if blocking:
                         resp["blocking"] = blocking
@@ -311,6 +314,7 @@ def build_tasks_router(
                         "error": record.get("error"),
                         "max_retries": active.max_retries if active else 0,
                         "retry_count": active.retry_count if active else 0,
+                        "timeout": record.get("timeout"),
                     }
                     if active and active.depends_on:
                         hist_resp["depends_on"] = active.depends_on
