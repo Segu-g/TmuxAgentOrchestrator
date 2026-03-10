@@ -423,9 +423,11 @@ The orchestrator enforces P2P permissions. Your message is silently dropped if t
 | `/change-strategy` | `/change-strategy <strategy>` | Switch the current workflow phase to a different strategy |
 | `/spec` | `/spec <topic>` | Write a structured specification document |
 | `/deliberate` | `/deliberate <question>` | Run a structured deliberation before making a decision |
+| `/scratchpad-write` | `/scratchpad-write <key> <value>` | Write a value to the shared scratchpad (persisted to `.orchestrator/scratchpad/{key}`) |
+| `/scratchpad-read` | `/scratchpad-read <key>` | Read a value from the shared scratchpad; omit key to list all keys |
 
 All commands require `__orchestrator_context__.json` in your cwd.
-Commands that use REST (`/send-message`, `/spawn-subagent`, `/list-agents`, `/progress`, `/delegate`, `/task-complete`, `/sync-to-main`, `/change-strategy`) require the orchestrator to have been started with `tmux-orchestrator web`.
+Commands that use REST (`/send-message`, `/spawn-subagent`, `/list-agents`, `/progress`, `/delegate`, `/task-complete`, `/sync-to-main`, `/change-strategy`, `/scratchpad-write`, `/scratchpad-read`) require the orchestrator to have been started with `tmux-orchestrator web`.
 
 ### Shared Scratchpad
 

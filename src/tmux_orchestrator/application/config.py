@@ -311,6 +311,24 @@ class OrchestratorConfig:
     #   Designing for Graceful Shutdown (https://medium.com/@jusuftopic, 2025)
     #   DESIGN.md §10.66 (v1.1.34)
     mailbox_cleanup_on_stop: bool = True
+    # --- Scratchpad file persistence (write-through cache) ---
+    # scratchpad_dir: directory where scratchpad key files are written.
+    #   Layout: {scratchpad_dir}/{key}  (one file per key, flat directory)
+    #   File format: JSON-serialised value (human-readable via cat).
+    #   Default is a project-relative path ".orchestrator/scratchpad", resolved
+    #   at load_config() time against the server cwd (consistent with mailbox_dir).
+    #   Absolute paths (including ~ expansions) are used as-is.
+    #
+    # Rationale: agents use the scratchpad for pipeline handoffs (one agent writes,
+    #   another reads).  Without persistence these handoffs are lost on server restart,
+    #   breaking resume-after-restart scenarios.  Write-through to files provides a
+    #   human-inspectable view and free persistence with no extra dependencies.
+    #
+    # References:
+    #   ActiveState Recipe 579097 — atomic file write (write + rename pattern)
+    #   simplekv FilesystemStore — one file per key design
+    #   DESIGN.md §10.77 (v1.2.1)
+    scratchpad_dir: str = ".orchestrator/scratchpad"
     # --- Worktree root override ---
     # repo_root: when set, the WorktreeManager uses this path (rather than Path.cwd())
     #   as the base for git worktree operations.  Useful when the server is launched
@@ -511,5 +529,8 @@ def load_config(path: str | Path, cwd: Path | str | None = None) -> Orchestrator
         memory_auto_record=data.get("memory_auto_record", True),
         memory_inject_count=data.get("memory_inject_count", 5),
         mailbox_cleanup_on_stop=data.get("mailbox_cleanup_on_stop", True),
+        scratchpad_dir=_resolve_dir(
+            data.get("scratchpad_dir", ".orchestrator/scratchpad"), effective_cwd
+        ),
         repo_root=Path(data["repo_root"]).expanduser().resolve() if data.get("repo_root") else None,
     )

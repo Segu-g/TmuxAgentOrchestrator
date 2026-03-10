@@ -10,6 +10,7 @@ import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
@@ -90,10 +91,21 @@ _pending_challenge: bytes | None = None
 _SESSION_TTL = 86_400  # 24 h
 
 # ---------------------------------------------------------------------------
-# Shared scratchpad — in-process key/value store (cleared on restart)
+# Shared scratchpad — write-through persistent key/value store (v1.2.1+)
+#
+# Replaced bare dict with ScratchpadStore for file persistence (write-through).
+# The store is module-level so it is shared across all create_app() calls in
+# the same process (matches the original dict semantics for tests).
+#
+# The persist_dir is configured lazily in create_app() via _init_scratchpad().
+# This avoids importing ScratchpadStore at module level (keeps import cost low).
+#
+# Reference: DESIGN.md §10.77 (v1.2.1)
 # ---------------------------------------------------------------------------
 
-_scratchpad: dict[str, Any] = {}  # key → arbitrary JSON-serialisable value
+from tmux_orchestrator.application.scratchpad_store import ScratchpadStore  # noqa: E402
+
+_scratchpad: ScratchpadStore = ScratchpadStore()  # in-memory until create_app() wires persist_dir
 
 
 def _new_session() -> str:
@@ -428,6 +440,20 @@ def create_app(
         build_webhooks_router,
         build_workflows_router,
     )
+
+    # ------------------------------------------------------------------
+    # Scratchpad store — write-through persistent KV store (v1.2.1+)
+    # Reinitialise module-level _scratchpad with persist_dir from config.
+    # When config is absent (e.g. unit tests with a mock orchestrator that
+    # has no config attribute), fall back to in-memory store (no files).
+    # Reference: DESIGN.md §10.77 (v1.2.1)
+    # ------------------------------------------------------------------
+    global _scratchpad
+    _orch_config_pre = getattr(orchestrator, "config", None)
+    _scratchpad_dir_raw: str | None = getattr(_orch_config_pre, "scratchpad_dir", None)
+    if _scratchpad_dir_raw is not None:
+        _scratchpad = ScratchpadStore(persist_dir=Path(_scratchpad_dir_raw))
+    # If no config, leave the existing module-level ScratchpadStore() in place.
 
     # Episodic memory store (shared between agents router and memory router)
     # Reference: DESIGN.md §10.28 (v1.0.28); DESIGN.md §10.29 (v1.0.29)

@@ -5685,4 +5685,73 @@ phases:
 - worktree タイミング問題 → フェーズ開始時生成で常に最新ブランチから分岐
 - `required_tags` ルーティングの複雑さ → フェーズが直接テンプレートを指定
 - 並列エージェント間のファイル共有 → ブランチ経由で自然に解決
+
+---
+
+## §10.77 — v1.2.1: スクラッチパッド永続化 + `/scratchpad-write` / `/scratchpad-read` スラッシュコマンド
+
+### Step 0 — 選択理由
+
+**選択**: §11「高優先度: スクラッチパッド永続化 + スラッシュコマンド」
+
+**理由**:
+- §11 高優先度唯一のアイテム。v1.2.0 分岐後の最初の実装ターゲットとして明確に記録されている。
+- 現状の in-memory スクラッチパッドはサーバー再起動で全データが消失する。パイプラインワークフローで中間結果を保存する用途では致命的。
+- `/scratchpad-write` / `/scratchpad-read` スラッシュコマンドにより、エージェントが curl を書かずにスクラッチパッドを操作できるようになる。
+- 実装スコープが明確（ScratchpadStore クラス + write-through + スラッシュコマンド 2つ）で 1 イテレーションに収まる。
+
+**選択しなかった候補**:
+- ワークフロー構造ブロック: 中優先度。スクラッチパッド永続化より優先度が低い。
+- タスク優先度の動的更新: 中優先度。スクラッチパッドが安定してからの方が demos で使いやすい。
+
+### Step 1 — Research
+
+#### Query 1: "write-through cache file persistence Python atomic write rename os.replace"
+
+**Key findings**:
+- The gold standard for atomic file writes is the Create-Write-Rename pattern: write to a temp file in the same directory, then `os.replace(tmp, target)` (Python 3.3+).
+- `os.replace()` is atomic on POSIX (single filesystem). The temp file must be on the same filesystem as the target — hence using the same directory.
+- Third-party library `python-atomicwrites` wraps this pattern; Python stdlib is sufficient for our use.
+- For durability (survives OS crash), `fsync()` should be called before rename. For agent orchestration purposes (normal restart recovery), fsync is optional overhead.
+
+**Sources**:
+- [Safely and atomically write to a file — ActiveState Code](https://code.activestate.com/recipes/579097-safely-and-atomically-write-to-a-file/)
+- [python-atomicwrites documentation](https://python-atomicwrites.readthedocs.io/)
+- [Stop Silent Data Loss: checksum + atomic writes + temp file patterns](https://tech-champion.com/data-science/stop-silent-data-loss-checksum-atomic-writes-temp-file-patterns/)
+
+#### Query 2: "key-value store file backend Python atomic operations flat file directory"
+
+**Key findings**:
+- Python's built-in `dbm` module is a persistent KV store, but it uses opaque binary files — not human-readable. Fails the design requirement that `cat .orchestrator/scratchpad/my_key` works.
+- `simplekv` has a `FilesystemStore` backend that stores each value as a separate file — directly analogous to our design.
+- `DiskDict` stores one file per key. For human-readable values, plain text files are the best choice.
+- Flat directory (one file per key) is the simplest and most debuggable layout. No indexing overhead for small key counts.
+
+**Sources**:
+- [TIL—Python has a built-in persistent key-value store (dbm)](https://remusao.github.io/posts/python-dbm-module.html)
+- [simplekv — FilesystemStore](https://simplekv.readthedocs.io/)
+- [DiskDict — disk-based KV store](https://github.com/AWNystrom/DiskDict)
+
+#### Query 3: "FastAPI startup event restore state from filesystem lifespan 2025"
+
+**Key findings**:
+- FastAPI's `lifespan` context manager (ASGI Lifespan Protocol) is the canonical way to run startup/shutdown code. `@app.on_startup` is deprecated.
+- Code before `yield` in the lifespan function runs at startup — ideal for restoring scratchpad from disk.
+- However, our `_scratchpad` dict is a module-level global initialized at import time. The `ScratchpadStore.__init__()` already calls `_restore()` in its constructor, so no changes to lifespan are needed — the store self-initializes.
+- `app.state` can hold references to initialized objects, but since `_scratchpad` is passed by reference to routers, the in-place mutation approach works without lifespan changes.
+
+**Sources**:
+- [Lifespan Events — FastAPI official docs](https://fastapi.tiangolo.com/advanced/events/)
+- [FastAPI Lifespan Explained — Medium/AlgoMart (Jan 2026)](https://medium.com/algomart/fastapi-lifespan-explained-the-right-way-to-handle-startup-and-shutdown-logic-f825f38dd304)
+- [FastAPI Application Lifecycle Management 2025](https://craftyourstartup.com/cys-docs/tutorials/fastapi-startup-and-shutdown-events-guide/)
+
+### Design Decision
+
+- `ScratchpadStore` is a stdlib-only class (no new deps). Dict-like interface (`__getitem__`, `__setitem__`, etc.) for drop-in replacement of `_scratchpad: dict`.
+- `persist_dir=None` → pure in-memory (existing behavior, used in tests that don't need persistence).
+- Atomic write: `tmp = dir / f".{key}.tmp"` → `tmp.write_text(json.dumps(value))` → `os.replace(tmp, dir / key)`. JSON serialization preserves type fidelity (dict, list, int, float, str, bool, null).
+- Key validation: reject keys containing `/` or starting with `.` (prevent path traversal and collision with tmp files).
+- Restore: iterate `persist_dir.iterdir()`, skip files starting with `.` (tmp files), load each as JSON.
+- `scratchpad_dir: str = ".orchestrator/scratchpad"` added to `OrchestratorConfig` alongside `mailbox_dir`.
+- `load_config()` applies `_resolve_dir()` to `scratchpad_dir` (same pattern as `mailbox_dir`).
 - main ブランチの汚染 → ワークフロー完了時の一回マージのみ
