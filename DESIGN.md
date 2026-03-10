@@ -5628,3 +5628,61 @@ quality_approved: "yes"
 - `until` 条件のランタイム評価 (WorkflowManager フック): 条件成立時に残イテレーションをキャンセル
 - ワークフローテンプレート YAML に LoopBlock 構文を追加
 - per-iteration フェーズステータスダッシュボード表示
+
+---
+
+## §11 補足 — 動的エージェント生成 + ブランチ連鎖型ワークフロー (v1.2.x 高優先度)
+
+### 設計思想
+
+ワークフローの実行がエージェントのライフサイクルを駆動する。エージェントは YAML で事前定義するのではなく、フェーズ開始時に動的生成・終了時に破棄する。
+
+### ブランチ連鎖モデル
+
+```
+main
+└── workflow-root
+    └── phase-a
+        └── phase-b   (phase-a のブランチから分岐 → A の成果を継承)
+            ├── parallel-x  (phase-b から分岐)
+            └── parallel-y  (phase-b から分岐)
+            └── parallel-merged  (x + y をマージ)
+                └── phase-c  (parallel-merged から分岐)
+                    └── [ワークフロー完了時に main へ一度だけマージ]
+```
+
+- **sequence**: 前フェーズのブランチから分岐 → 成果を継承
+- **parallel**: 共通の分岐点から複数ブランチ → 完了後にマージ
+- **loop**: 前イテレーションのブランチから分岐
+- main へのマージはワークフロー完了時の一回のみ
+
+### strategy と workflow の統合
+
+`PhaseSpec.pattern` (SingleStrategy / ParallelStrategy 等) と workflow 構造 (`sequence:` / `parallel:` / `loop:`) は同じ概念の別表現。ブランチ連鎖モデルの導入により両者を統合できる。
+
+### ワークフロー定義イメージ
+
+```yaml
+phases:
+  - name: plan
+    agent_template: planner    # 動的生成するエージェントのテンプレート
+
+  - parallel:
+      name: review
+      phases:
+        - name: security_review
+          agent_template: security_expert
+        - name: perf_review
+          agent_template: perf_expert
+
+  - name: synthesize
+    agent_template: synthesizer
+    depends_on: [review]
+```
+
+### 解決される問題
+
+- worktree タイミング問題 → フェーズ開始時生成で常に最新ブランチから分岐
+- `required_tags` ルーティングの複雑さ → フェーズが直接テンプレートを指定
+- 並列エージェント間のファイル共有 → ブランチ経由で自然に解決
+- main ブランチの汚染 → ワークフロー完了時の一回マージのみ
