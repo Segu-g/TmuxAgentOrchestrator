@@ -5198,7 +5198,73 @@ Decision Outcome / Consequences / Pros and Cons of the Options
    タイムスタンプによる順序チェックに変更したが精度の差でFAIL。最終的に「スクラッチパッドの内容が
    あること = パイプラインが正しく実行されたこと」の証明に変更。これは正しいアプローチ (blackboard pattern)。
 
-2. **次候補**: `POST /workflows/socratic` (中優先度、§11) — Socratic 対話ワークフロー
-   (questioner → responder → synthesizer)
+2. **次候補**: `POST /workflows/agentmesh` (中優先度、§11) — AgentMesh 4ロール開発パイプライン
+   (Planner → Coder → Debugger → Reviewer)
+
+## §10.73 — v1.1.41: AgentMesh 型4ロール開発パイプライン — `POST /workflows/agentmesh`
+
+### Step 0 — 選択理由
+
+**選択**: `POST /workflows/agentmesh` — AgentMesh Planner→Coder→Debugger→Reviewer 4ロールパイプライン
+
+**選択理由**:
+1. **§11 中優先度・未実装ワークフロー**: §11「AgentMesh 型 4ロール開発パイプラインデモ」として明示的に記録済み。
+2. **arXiv:2507.19902 (2025) の直接実装**: AgentMesh 論文の4ロール構造 (Planner/Coder/Debugger/Reviewer) を `POST /workflows/agentmesh` として具体化する最良の機会。
+3. **ADR (§10.72) の完了**: ADR 3ステップパイプラインが v1.1.40 で完成しており、4ステップシーケンシャルパイプラインへの自然な拡張。
+4. **scratchpad Blackboard パターンの実証**: 各エージェントが前段の出力を scratchpad から読み取り、次段に渡すパターンを 4段階で実証。
+
+**選択しなかった候補**:
+- `POST /workflows/socratic` (§10.72 Step 4 次候補): AgentMesh の方が §11 の優先度が高く、実装研究文献が明確に存在する。
+
+### Step 1 — Research
+
+**Query 1**: "AgentMesh multi-agent development pipeline Planner Coder Reviewer pattern LLM 2025"
+
+1. **Elias, "AgentMesh: A Cooperative Multi-Agent Generative AI Framework for Software Development Automation"**,
+   arXiv:2507.19902 (2025), https://arxiv.org/abs/2507.19902v1 —
+   AgentMesh の原典論文。Planner (要件分解・計画立案), Coder (コード生成), Debugger (テスト・バグ修正),
+   Reviewer (品質検証・最終チェック) の4ロール構造を定義。各エージェントが LLM プロンプトモジュールとして独立し、
+   前段の出力を引き継いでパイプライン処理する。単一 LLM アプローチに比べて分業により高い再現性と品質を達成。
+
+2. **boring_ai_guy, "AgentMesh: The Actual Intelligent Software"**, Medium (Sep 2025),
+   https://medium.com/@boring_ai_guy/agentmesh-the-actual-intelligent-software-c1dfae062c00 —
+   AgentMesh の解説記事。Planner が高レベル要件を具体的なサブタスクに分解し、Coder が各サブタスクを実装、
+   Debugger がテスト実行・エラー修正、Reviewer が最終品質検証という4ステージの役割分担を説明。
+
+**Query 2**: "multi-agent software development pipeline LLM planner implementer reviewer debugger architecture"
+
+3. **ACM TOSEM, "LLM-Based Multi-Agent Systems for Software Engineering: Literature Review"**,
+   https://dl.acm.org/doi/10.1145/3712003 (2025) —
+   ロールベース協調型マルチエージェントシステムの文献調査。Pipeline / Debate / Hierarchical パターンを分類。
+   Pipeline (シーケンシャル) アプローチでは各エージェントの出力が次のエージェントへの入力となる決定論的ハンドオフが特徴。
+
+4. **arXiv:2511.08475, "Designing LLM-based Multi-Agent Systems for Software Engineering Tasks"** (2025),
+   https://arxiv.org/html/2511.08475v1 —
+   ソフトウェアエンジニアリング向けマルチエージェント設計パターンの品質属性・設計判断を網羅。
+   役割特化エージェント (product owner / architect / developer / tester / reviewer) のパイプライン構成が
+   信頼性・保守性・テスト可能性を向上させることを示す。
+
+**Query 3**: "agentic coding workflow plan implement test review stages sequential pipeline 2025"
+
+5. **QuantumBlack AI by McKinsey, "Agentic workflows for software development"**, Medium (Feb 2026),
+   https://medium.com/quantumblack/agentic-workflows-for-software-development-dc8e64f4a79d —
+   実践的エージェント型ソフトウェア開発ワークフロー。INTENT→SPEC→PLAN→IMPLEMENT→VERIFY→REVIEW
+   という段階的パイプラインが最も信頼性の高い開発自動化パターンであることを実証。
+   Planning フェーズの品質が下流の全フェーズの精度を決定するため「最も重要なステップ」。
+
+6. **teamday.ai, "The Complete Guide to Agentic Coding in 2026"**,
+   https://www.teamday.ai/blog/complete-guide-agentic-coding-2026 —
+   2026年のエージェント型コーディングガイド。Sequential pipeline で各ステップが明確な契約を持つ
+   「アセンブリライン型」ワークフローが信頼性が最も高い。
+
+**設計結論**:
+
+- AgentMesh 論文 (arXiv:2507.19902) の4ロール構造を `POST /workflows/agentmesh` として実装。
+- 各フェーズの出力は scratchpad に書き込み、次フェーズが読み込む Blackboard パターン。
+- スクラッチパッドキー: `{prefix}_plan` / `{prefix}_code` / `{prefix}_debugged` / `{prefix}_review`
+- `required_tags` で各フェーズのエージェントをルーティング (agentmesh_planner/coder/debugger/reviewer)。
+- `agent_timeout` で個別タイムアウト設定 (デフォルト 300s)。
+
+### Step 2 — 実装
 
 

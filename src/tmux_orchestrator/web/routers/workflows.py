@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from tmux_orchestrator.web.schemas import (
     AdrWorkflowSubmit,
+    AgentmeshWorkflowSubmit,
     CleanArchWorkflowSubmit,
     CompetitionWorkflowSubmit,
     DDDWorkflowSubmit,
@@ -3978,6 +3979,299 @@ def build_workflows_router(
             "spec_writer": spec_writer_task.id,
             "implementer": implementer_task.id,
             "tester": tester_task.id,
+        }
+        all_task_ids = list(task_ids_map.values())
+        run = wm.submit(name=wf_name, task_ids=all_task_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids_map,
+            "scratchpad_prefix": scratchpad_prefix,
+        }
+
+    @router.post(
+        "/workflows/agentmesh",
+        summary="Submit an AgentMesh 4-role development pipeline (Planner→Coder→Debugger→Reviewer)",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_agentmesh_workflow(body: AgentmeshWorkflowSubmit) -> dict:
+        """Submit a 4-agent sequential AgentMesh development pipeline Workflow DAG.
+
+        Pipeline (strictly sequential):
+
+          1. **planner**: reads the feature request, produces a detailed implementation
+             plan (data structures, algorithm, test cases, edge cases), and stores it
+             in ``{scratchpad_prefix}_plan``.
+          2. **coder**: reads the plan from the scratchpad, writes a complete
+             implementation in ``language``, and stores it in ``{scratchpad_prefix}_code``.
+          3. **debugger**: reads the implementation, identifies bugs and edge-case
+             failures, writes a corrected/improved version, and stores it in
+             ``{scratchpad_prefix}_debugged``.
+          4. **reviewer**: reads all previous scratchpad outputs (plan, code, debugged),
+             writes a structured code review with a star rating (1–5) and actionable
+             recommendations to ``{scratchpad_prefix}_review``.
+
+        Returns:
+        - ``workflow_id``: workflow run UUID for status polling
+        - ``name``: human-readable name (``agentmesh/<feature_request[:40]>``)
+        - ``task_ids``: dict with keys ``planner``, ``coder``, ``debugger``, ``reviewer``
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+
+        Design references:
+        - Elias, "AgentMesh: A Cooperative Multi-Agent Generative AI Framework
+          for Software Development Automation", arXiv:2507.19902 (2025):
+          Planner/Coder/Debugger/Reviewer 4-role pipeline.
+        - ACM TOSEM, "LLM-Based Multi-Agent Systems for Software Engineering" (2025),
+          https://dl.acm.org/doi/10.1145/3712003: Pipeline pattern with deterministic
+          handoff between specialised roles.
+        - DESIGN.md §10.73 (v1.1.41)
+        """
+
+        wm = orchestrator.get_workflow_manager()
+        feature_slug = body.feature_request[:40].replace(" ", "_").replace("/", "_")
+        wf_name = f"agentmesh/{feature_slug}"
+
+        pre_run_id = str(uuid.uuid4())
+        # If caller supplied a custom prefix other than the default, use it as-is;
+        # otherwise auto-generate a collision-safe prefix.
+        if body.scratchpad_prefix and body.scratchpad_prefix != "agentmesh":
+            scratchpad_prefix = body.scratchpad_prefix
+        else:
+            scratchpad_prefix = f"agentmesh_{pre_run_id[:8]}"
+
+        lang = body.language
+
+        # Scratchpad key helpers (no slashes — REST route uses plain {key})
+        plan_key = f"{scratchpad_prefix}_plan"
+        code_key = f"{scratchpad_prefix}_code"
+        debugged_key = f"{scratchpad_prefix}_debugged"
+        review_key = f"{scratchpad_prefix}_review"
+
+        # Shared bash snippet for reading orchestrator context and API key
+        _ctx_snippet = (
+            "WEB_BASE_URL=$(python3 -c \""
+            "import json; d=json.load(open('__orchestrator_context__.json')); "
+            "print(d['web_base_url'])\")\n"
+            "   API_KEY=$(cat __orchestrator_api_key__ 2>/dev/null || "
+            "echo \"$TMUX_ORCHESTRATOR_API_KEY\")"
+        )
+
+        def _write_snippet(key: str, filename: str) -> str:
+            """Python3-based snippet to safely write a file's content to scratchpad."""
+            return (
+                f"   python3 -c \"\n"
+                f"import json, urllib.request, os\n"
+                f"content = open('{filename}', 'r', errors='replace').read()\n"
+                f"payload = json.dumps({{'value': content}}).encode()\n"
+                f"api_key = os.environ.get('TMUX_ORCHESTRATOR_API_KEY', '')\n"
+                f"if not api_key:\n"
+                f"    try: api_key = open('__orchestrator_api_key__').read().strip()\n"
+                f"    except: pass\n"
+                f"ctx = json.load(open('__orchestrator_context__.json'))\n"
+                f"base_url = ctx['web_base_url']\n"
+                f"req = urllib.request.Request(base_url + '/scratchpad/{key}', data=payload, method='PUT')\n"
+                f"req.add_header('Content-Type', 'application/json')\n"
+                f"req.add_header('X-API-Key', api_key)\n"
+                f"urllib.request.urlopen(req, timeout=15)\n"
+                f"print('Stored to scratchpad: {key}')\n"
+                f"\"  "
+            )
+
+        def _read_snippet(key: str, varname: str) -> str:
+            """Bash snippet that reads scratchpad key into $varname."""
+            return (
+                f"   {varname}=$(curl -s -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"value\"])')\n"
+            )
+
+        # ----------------------------------------------------------------
+        # Phase 1: PLANNER
+        # ----------------------------------------------------------------
+        planner_prompt = (
+            f"You are the PLANNER agent in an AgentMesh 4-role software development pipeline.\n"
+            f"\n"
+            f"**Feature Request:** {body.feature_request}\n"
+            f"**Language:** {lang}\n"
+            f"\n"
+            f"Your role (PLAN phase):\n"
+            f"Produce a detailed, structured implementation plan that the Coder agent can\n"
+            f"follow without ambiguity.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Analyse the feature request carefully.\n"
+            f"2. Write a file `plan.md` in your working directory containing:\n"
+            f"   - **Overview**: 2-3 sentence summary of the approach\n"
+            f"   - **Data Structures**: what types/classes/data structures are needed\n"
+            f"   - **Algorithm**: step-by-step description of the algorithm\n"
+            f"   - **Function Signatures**: exact function/method signatures with types\n"
+            f"   - **Test Cases**: at least 5 concrete test cases (input → expected output)\n"
+            f"   - **Edge Cases**: empty input, boundary values, error conditions\n"
+            f"   - **Implementation Notes**: any gotchas or important details\n"
+            f"3. Store the plan in the shared scratchpad:\n"
+            f"   ```python\n"
+            + _write_snippet(plan_key, "plan.md")
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Be specific and complete. The Coder agent will implement EXACTLY what you specify.\n"
+            f"Do NOT write any {lang} code — only the plan."
+        )
+
+        # ----------------------------------------------------------------
+        # Phase 2: CODER
+        # ----------------------------------------------------------------
+        coder_prompt = (
+            f"You are the CODER agent in an AgentMesh 4-role software development pipeline.\n"
+            f"\n"
+            f"**Feature Request:** {body.feature_request}\n"
+            f"**Language:** {lang}\n"
+            f"\n"
+            f"Your role (CODE phase):\n"
+            f"Read the planner's implementation plan from the scratchpad and write the\n"
+            f"complete implementation.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read the implementation plan from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(plan_key, "PLAN")
+            + f"   echo \"Plan retrieved.\"\n"
+            f"   ```\n"
+            f"2. Write the complete {lang} implementation to `implementation.py` in your\n"
+            f"   working directory. Follow the plan EXACTLY:\n"
+            f"   - Implement every function/class specified in the plan\n"
+            f"   - Handle all edge cases from the plan\n"
+            f"   - Add docstrings explaining what each function does\n"
+            f"   - Include type annotations\n"
+            f"3. Verify the implementation compiles/parses: `python3 -m py_compile implementation.py`\n"
+            f"4. Store the implementation in the shared scratchpad:\n"
+            f"   ```python\n"
+            + _write_snippet(code_key, "implementation.py")
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Write clean, working {lang} code. The Debugger will test and fix it next."
+        )
+
+        # ----------------------------------------------------------------
+        # Phase 3: DEBUGGER
+        # ----------------------------------------------------------------
+        debugger_prompt = (
+            f"You are the DEBUGGER agent in an AgentMesh 4-role software development pipeline.\n"
+            f"\n"
+            f"**Feature Request:** {body.feature_request}\n"
+            f"**Language:** {lang}\n"
+            f"\n"
+            f"Your role (DEBUG phase):\n"
+            f"Read the coder's implementation, identify bugs and issues, and produce a\n"
+            f"corrected version.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read the implementation from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(code_key, "CODE")
+            + f"   echo \"$CODE\" > implementation.py\n"
+            f"   ```\n"
+            f"2. Also read the original plan for reference:\n"
+            f"   ```bash\n"
+            + _read_snippet(plan_key, "PLAN")
+            + f"   ```\n"
+            f"3. Analyse the implementation carefully:\n"
+            f"   - Test against the test cases from the plan (write a test script\n"
+            f"     `test_debug.py` and run it with `python3 test_debug.py`)\n"
+            f"   - Check for: off-by-one errors, missing edge cases, type errors,\n"
+            f"     incorrect logic, missing imports\n"
+            f"4. Write the corrected implementation to `implementation_fixed.py`.\n"
+            f"   If no bugs are found, copy `implementation.py` unchanged but add a\n"
+            f"   comment at the top: `# Debugger review: no bugs found`.\n"
+            f"5. Store the fixed implementation in the shared scratchpad:\n"
+            f"   ```python\n"
+            + _write_snippet(debugged_key, "implementation_fixed.py")
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Be thorough. Run actual tests. The Reviewer will read your fixed version."
+        )
+
+        # ----------------------------------------------------------------
+        # Phase 4: REVIEWER
+        # ----------------------------------------------------------------
+        reviewer_prompt = (
+            f"You are the REVIEWER agent in an AgentMesh 4-role software development pipeline.\n"
+            f"\n"
+            f"**Feature Request:** {body.feature_request}\n"
+            f"**Language:** {lang}\n"
+            f"\n"
+            f"Your role (REVIEW phase):\n"
+            f"Read all previous pipeline outputs and write a comprehensive code review.\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read all pipeline artifacts from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx_snippet}\n"
+            + _read_snippet(plan_key, "PLAN")
+            + _read_snippet(code_key, "CODE")
+            + _read_snippet(debugged_key, "DEBUGGED")
+            + f"   ```\n"
+            f"2. Write `review.md` in your working directory containing:\n"
+            f"   - **Star Rating**: ★ (1-5 stars) with brief justification\n"
+            f"   - **Summary**: 2-3 sentence overall assessment\n"
+            f"   - **Correctness**: does the implementation match the plan? any logic errors?\n"
+            f"   - **Code Quality**: readability, naming, docstrings, type annotations\n"
+            f"   - **Edge Case Handling**: are all edge cases from the plan handled?\n"
+            f"   - **Performance**: any obvious inefficiencies?\n"
+            f"   - **Security**: any obvious security issues (e.g., injection, overflow)?\n"
+            f"   - **Recommendations**: top 3-5 actionable improvements\n"
+            f"   - **Final Verdict**: APPROVED / APPROVED_WITH_COMMENTS / NEEDS_REVISION\n"
+            f"3. Store the review in the shared scratchpad:\n"
+            f"   ```python\n"
+            + _write_snippet(review_key, "review.md")
+            + f"\n"
+            f"   ```\n"
+            f"\n"
+            f"Be thorough and constructive. Your review is the final quality gate."
+        )
+
+        # ----------------------------------------------------------------
+        # Submit the 4-step sequential DAG
+        # ----------------------------------------------------------------
+        planner_task = await orchestrator.submit_task(
+            planner_prompt,
+            required_tags=["agentmesh_planner"],
+            depends_on=[],
+            timeout=body.agent_timeout,
+        )
+
+        coder_task = await orchestrator.submit_task(
+            coder_prompt,
+            required_tags=["agentmesh_coder"],
+            depends_on=[planner_task.id],
+            timeout=body.agent_timeout,
+        )
+
+        debugger_task = await orchestrator.submit_task(
+            debugger_prompt,
+            required_tags=["agentmesh_debugger"],
+            depends_on=[coder_task.id],
+            timeout=body.agent_timeout,
+        )
+
+        reviewer_task = await orchestrator.submit_task(
+            reviewer_prompt,
+            required_tags=["agentmesh_reviewer"],
+            depends_on=[debugger_task.id],
+            reply_to=body.reply_to,
+            timeout=body.agent_timeout,
+        )
+
+        task_ids_map = {
+            "planner": planner_task.id,
+            "coder": coder_task.id,
+            "debugger": debugger_task.id,
+            "reviewer": reviewer_task.id,
         }
         all_task_ids = list(task_ids_map.values())
         run = wm.submit(name=wf_name, task_ids=all_task_ids)

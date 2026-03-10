@@ -158,6 +158,46 @@
         "title": "AgentSelectorModel",
         "type": "object"
       },
+      "AgentmeshWorkflowSubmit": {
+        "description": "Request body for POST /workflows/agentmesh \u2014 AgentMesh 4-role dev pipeline.\n\nSubmits a Planner \u2192 Coder \u2192 Debugger \u2192 Reviewer sequential Workflow DAG\nthat transforms a feature request into a fully reviewed implementation via\nthe shared scratchpad (Blackboard pattern):\n\n  - **planner**: reads ``feature_request``, writes a detailed implementation\n    plan (data structures, algorithm, test cases, edge cases) to the scratchpad.\n  - **coder**: reads the plan from the scratchpad, writes the implementation\n    in ``language`` to the scratchpad.\n  - **debugger**: reads the implementation, identifies bugs and edge-case failures,\n    writes a corrected/improved version to the scratchpad.\n  - **reviewer**: reads all previous scratchpad outputs, writes a structured code\n    review with a star rating (1-5) and actionable recommendations.\n\nWorkflow topology (strictly sequential via depends_on)::\n\n    planner -> coder -> debugger -> reviewer\n\nScratchpad keys (Blackboard pattern):\n\n- ``{scratchpad_prefix}_plan``      : planner's implementation plan\n- ``{scratchpad_prefix}_code``      : coder's implementation\n- ``{scratchpad_prefix}_debugged``  : debugger's corrected implementation\n- ``{scratchpad_prefix}_review``    : reviewer's structured code review\n\nAgent routing: each phase uses ``required_tags`` to target a specialised agent:\n\n- planner   -> ``agentmesh_planner``\n- coder     -> ``agentmesh_coder``\n- debugger  -> ``agentmesh_debugger``\n- reviewer  -> ``agentmesh_reviewer``\n\nDesign references:\n- Elias, \"AgentMesh: A Cooperative Multi-Agent Generative AI Framework\n  for Software Development Automation\", arXiv:2507.19902 (2025):\n  Planner/Coder/Debugger/Reviewer 4-role pipeline automates software development.\n- ACM TOSEM, \"LLM-Based Multi-Agent Systems for Software Engineering\" (2025),\n  https://dl.acm.org/doi/10.1145/3712003: Pipeline pattern with deterministic\n  handoff between specialised roles.\n- DESIGN.md \u00a710.73 (v1.1.41)",
+        "properties": {
+          "agent_timeout": {
+            "default": 300,
+            "title": "Agent Timeout",
+            "type": "integer"
+          },
+          "feature_request": {
+            "title": "Feature Request",
+            "type": "string"
+          },
+          "language": {
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "scratchpad_prefix": {
+            "default": "agentmesh",
+            "title": "Scratchpad Prefix",
+            "type": "string"
+          }
+        },
+        "required": [
+          "feature_request"
+        ],
+        "title": "AgentmeshWorkflowSubmit",
+        "type": "object"
+      },
       "AutoScalerUpdate": {
         "description": "Request body for PUT /orchestrator/autoscaler.\n\nAll fields are optional \u2014 only supplied fields are updated.",
         "properties": {
@@ -4785,6 +4825,47 @@
           }
         },
         "summary": "Submit a Proposer/Reviewer/Synthesizer ADR generation workflow"
+      }
+    },
+    "/workflows/agentmesh": {
+      "post": {
+        "description": "Submit a 4-agent sequential AgentMesh development pipeline Workflow DAG.\n\nPipeline (strictly sequential):\n\n  1. **planner**: reads the feature request, produces a detailed implementation\n     plan (data structures, algorithm, test cases, edge cases), and stores it\n     in ``{scratchpad_prefix}_plan``.\n  2. **coder**: reads the plan from the scratchpad, writes a complete\n     implementation in ``language``, and stores it in ``{scratchpad_prefix}_code``.\n  3. **debugger**: reads the implementation, identifies bugs and edge-case\n     failures, writes a corrected/improved version, and stores it in\n     ``{scratchpad_prefix}_debugged``.\n  4. **reviewer**: reads all previous scratchpad outputs (plan, code, debugged),\n     writes a structured code review with a star rating (1\u20135) and actionable\n     recommendations to ``{scratchpad_prefix}_review``.\n\nReturns:\n- ``workflow_id``: workflow run UUID for status polling\n- ``name``: human-readable name (``agentmesh/<feature_request[:40]>``)\n- ``task_ids``: dict with keys ``planner``, ``coder``, ``debugger``, ``reviewer``\n- ``scratchpad_prefix``: scratchpad namespace for this run\n\nDesign references:\n- Elias, \"AgentMesh: A Cooperative Multi-Agent Generative AI Framework\n  for Software Development Automation\", arXiv:2507.19902 (2025):\n  Planner/Coder/Debugger/Reviewer 4-role pipeline.\n- ACM TOSEM, \"LLM-Based Multi-Agent Systems for Software Engineering\" (2025),\n  https://dl.acm.org/doi/10.1145/3712003: Pipeline pattern with deterministic\n  handoff between specialised roles.\n- DESIGN.md \u00a710.73 (v1.1.41)",
+        "operationId": "submit_agentmesh_workflow_workflows_agentmesh_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentmeshWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Agentmesh Workflow Workflows Agentmesh Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit an AgentMesh 4-role development pipeline (Planner\u2192Coder\u2192Debugger\u2192Reviewer)"
       }
     },
     "/workflows/clean-arch": {

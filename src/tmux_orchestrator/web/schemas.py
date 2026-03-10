@@ -1431,3 +1431,66 @@ class SpecFirstTddWorkflowSubmit(BaseModel):
         if not v.strip():
             raise ValueError("requirements must not be empty")
         return v
+
+
+class AgentmeshWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/agentmesh — AgentMesh 4-role dev pipeline.
+
+    Submits a Planner → Coder → Debugger → Reviewer sequential Workflow DAG
+    that transforms a feature request into a fully reviewed implementation via
+    the shared scratchpad (Blackboard pattern):
+
+      - **planner**: reads ``feature_request``, writes a detailed implementation
+        plan (data structures, algorithm, test cases, edge cases) to the scratchpad.
+      - **coder**: reads the plan from the scratchpad, writes the implementation
+        in ``language`` to the scratchpad.
+      - **debugger**: reads the implementation, identifies bugs and edge-case failures,
+        writes a corrected/improved version to the scratchpad.
+      - **reviewer**: reads all previous scratchpad outputs, writes a structured code
+        review with a star rating (1-5) and actionable recommendations.
+
+    Workflow topology (strictly sequential via depends_on)::
+
+        planner -> coder -> debugger -> reviewer
+
+    Scratchpad keys (Blackboard pattern):
+
+    - ``{scratchpad_prefix}_plan``      : planner's implementation plan
+    - ``{scratchpad_prefix}_code``      : coder's implementation
+    - ``{scratchpad_prefix}_debugged``  : debugger's corrected implementation
+    - ``{scratchpad_prefix}_review``    : reviewer's structured code review
+
+    Agent routing: each phase uses ``required_tags`` to target a specialised agent:
+
+    - planner   -> ``agentmesh_planner``
+    - coder     -> ``agentmesh_coder``
+    - debugger  -> ``agentmesh_debugger``
+    - reviewer  -> ``agentmesh_reviewer``
+
+    Design references:
+    - Elias, "AgentMesh: A Cooperative Multi-Agent Generative AI Framework
+      for Software Development Automation", arXiv:2507.19902 (2025):
+      Planner/Coder/Debugger/Reviewer 4-role pipeline automates software development.
+    - ACM TOSEM, "LLM-Based Multi-Agent Systems for Software Engineering" (2025),
+      https://dl.acm.org/doi/10.1145/3712003: Pipeline pattern with deterministic
+      handoff between specialised roles.
+    - DESIGN.md §10.73 (v1.1.41)
+    """
+
+    # The feature request / task description for the pipeline
+    feature_request: str
+    # Programming language for code generation
+    language: str = "python"
+    # Scratchpad namespace prefix (no slashes); defaults to "agentmesh"
+    scratchpad_prefix: str = "agentmesh"
+    # Per-task timeout in seconds; passed to submit_task
+    agent_timeout: int = 300
+    # When set, the reviewer RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    @field_validator("feature_request")
+    @classmethod
+    def feature_request_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("feature_request must not be empty")
+        return v
