@@ -308,6 +308,16 @@ class PhaseSpec:
     timeout: int | None = None
     strategy_config: StrategyConfig | None = None  # type: ignore[type-arg]
     skip_condition: SkipCondition | None = None
+    agent_template: str | None = None
+    """Template agent ID to use for dynamic ephemeral agent spawning.
+
+    When set, the orchestrator spawns a new ephemeral agent from the named
+    template config before dispatching this phase's tasks, and stops the agent
+    automatically after the phase completes.
+
+    Design reference: DESIGN.md §10.79 (v1.2.3)
+    Research: Kubernetes Pod-per-Job pattern; ephemeral agent lifecycle.
+    """
 
     def __post_init__(self) -> None:
         if self.pattern not in _VALID_PATTERNS:
@@ -462,8 +472,17 @@ def _make_task_spec(
     target_agent: str | None = None,
     target_group: str | None = None,
     timeout: int | None = None,
+    agent_template: str | None = None,
 ) -> dict:
-    """Build a task spec dict compatible with ``WorkflowTaskSpec``."""
+    """Build a task spec dict compatible with ``WorkflowTaskSpec``.
+
+    When *agent_template* is set, the key is embedded in the dict so that the
+    workflow submission handler can spawn an ephemeral agent before dispatching.
+    The handler replaces the ``agent_template`` key with ``target_agent`` after
+    calling ``Orchestrator.spawn_ephemeral_agent()``.
+
+    Design reference: DESIGN.md §10.79 (v1.2.3)
+    """
     spec: dict = {
         "local_id": local_id,
         "prompt": prompt,
@@ -475,6 +494,8 @@ def _make_task_spec(
         spec["target_agent"] = target_agent
     if target_group is not None:
         spec["target_group"] = target_group
+    if agent_template is not None:
+        spec["agent_template"] = agent_template
     return spec
 
 
@@ -616,6 +637,7 @@ class SingleStrategy:
             target_agent=phase.agents.target_agent,
             target_group=phase.agents.target_group,
             timeout=phase.timeout,
+            agent_template=phase.agent_template,
         )
         ps = WorkflowPhaseStatus(name=phase.name, pattern="single", task_ids=[local_id])
         return [task], [ps]
@@ -650,6 +672,7 @@ class ParallelStrategy:
                     target_agent=phase.agents.target_agent,
                     target_group=phase.agents.target_group,
                     timeout=phase.timeout,
+                    agent_template=phase.agent_template,
                 )
             )
             local_ids.append(local_id)
@@ -707,6 +730,7 @@ class CompetitiveStrategy:
                     target_agent=phase.agents.target_agent,
                     target_group=phase.agents.target_group,
                     timeout=phase.timeout,
+                    agent_template=phase.agent_template,
                 )
             )
             local_ids.append(local_id)

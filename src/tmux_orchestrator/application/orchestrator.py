@@ -394,6 +394,13 @@ class Orchestrator:
         # DESIGN.md §10.50 (v1.1.18)
         self._drift_rebrief_history: dict[str, list[dict]] = {}
         self._drift_rebrief_last_sent: dict[str, float] = {}
+        # Ephemeral agent tracking — IDs of agents spawned for a single phase.
+        # After their task completes, they are auto-stopped and unregistered.
+        # Lifecycle mirrors _draining_agents but triggered by agent_template at
+        # phase dispatch time rather than by manual drain_agent() calls.
+        # Design reference: DESIGN.md §10.79 (v1.2.3) — PhaseSpec.agent_template.
+        # Research: Kubernetes Pod-per-Job pattern; ephemeral CI agent lifecycle.
+        self._ephemeral_agents: set[str] = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -2061,6 +2068,33 @@ class Orchestrator:
                         payload={"event": "agent_drained", "agent_id": drain_agent_id},
                     ))
                     logger.info("Agent %s drained and stopped after task completion", drain_agent_id)
+                # Ephemeral auto-stop: if the agent that sent this RESULT is ephemeral,
+                # stop it now that its task has completed and unregister from registry.
+                # Mirrors the drain pattern but triggered by agent_template at phase
+                # dispatch time rather than by manual drain_agent() calls.
+                # Design reference: DESIGN.md §10.79 (v1.2.3) — PhaseSpec.agent_template.
+                elif drain_agent_id in self._ephemeral_agents:
+                    ephemeral_agent = self.registry.get(drain_agent_id)
+                    if ephemeral_agent is not None:
+                        try:
+                            await ephemeral_agent.stop()
+                        except Exception:  # noqa: BLE001
+                            logger.exception(
+                                "Ephemeral: error stopping agent %s", drain_agent_id
+                            )
+                        self.registry.unregister(drain_agent_id)
+                    self._ephemeral_agents.discard(drain_agent_id)
+                    await self.bus.publish(Message(
+                        type=MessageType.STATUS,
+                        from_id="__orchestrator__",
+                        payload={
+                            "event": "ephemeral_agent_stopped",
+                            "agent_id": drain_agent_id,
+                        },
+                    ))
+                    logger.info(
+                        "Ephemeral agent %s stopped after task completion", drain_agent_id
+                    )
             elif msg.type == MessageType.STATUS:
                 # Webhook: agent_status event for IDLE/BUSY/ERROR transitions.
                 # Fires a non-blocking background deliver for each registered webhook
@@ -2604,6 +2638,105 @@ class Orchestrator:
         ))
         logger.info("Dynamic agent %s created (parent=%s, tags=%s)", agent_id, parent_id, tags)
         return agent
+
+    async def spawn_ephemeral_agent(self, template_id: str) -> str:
+        """Create, register, and start an ephemeral agent from a config template.
+
+        An ephemeral agent is a short-lived agent scoped to a single workflow
+        phase.  It is created just before the phase's tasks are dispatched and
+        auto-stopped once its task completes (the same drain mechanism used by
+        ``drain_agent()``).
+
+        Parameters
+        ----------
+        template_id:
+            ``id`` of an :class:`~tmux_orchestrator.application.config.AgentConfig`
+            in ``self.config.agents`` to use as the template.  The new agent
+            inherits ``isolate``, ``system_prompt``, ``tags``, ``task_timeout``,
+            and other fields from the template config.
+
+        Returns
+        -------
+        str
+            The newly created agent's ID (``f"{template_id}-ephemeral-{hex8}"``).
+
+        Raises
+        ------
+        ValueError
+            If no agent config with *template_id* is found.
+
+        Design reference: DESIGN.md §10.79 (v1.2.3)
+        Research: Kubernetes Pod-per-Job pattern; ephemeral CI agent lifecycle.
+        """
+        from pathlib import Path as _Path  # noqa: PLC0415
+
+        from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent  # noqa: PLC0415
+
+        # Locate the template config.
+        template_cfg = next(
+            (a for a in self.config.agents if a.id == template_id), None
+        )
+        if template_cfg is None:
+            raise ValueError(
+                f"spawn_ephemeral_agent: no agent config with id={template_id!r} found. "
+                f"Available templates: {[a.id for a in self.config.agents]}"
+            )
+
+        ephemeral_id = f"{template_id}-ephemeral-{uuid.uuid4().hex[:8]}"
+
+        mailbox = Mailbox(self.config.mailbox_dir, self.config.session_name)
+        effective_timeout = (
+            template_cfg.task_timeout
+            if template_cfg.task_timeout is not None
+            else self.config.task_timeout
+        )
+        effective_wm = self._worktree_manager if template_cfg.isolate else None
+
+        agent: Agent = ClaudeCodeAgent(
+            agent_id=ephemeral_id,
+            bus=self.bus,
+            tmux=self.tmux,
+            mailbox=mailbox,
+            worktree_manager=effective_wm,
+            isolate=template_cfg.isolate,
+            session_name=self.config.session_name,
+            web_base_url=self.config.web_base_url,
+            api_key=self.config.api_key,
+            task_timeout=effective_timeout,
+            role=template_cfg.role,
+            command=(
+                template_cfg.command
+                or "env -u CLAUDECODE claude --dangerously-skip-permissions"
+            ),
+            system_prompt=template_cfg.system_prompt,
+            context_files=template_cfg.context_files,
+            context_files_root=_Path.cwd() if template_cfg.context_files else None,
+            context_spec_files=template_cfg.context_spec_files,
+            context_spec_files_root=(
+                _Path.cwd() if template_cfg.context_spec_files else None
+            ),
+            tags=list(template_cfg.tags),
+            merge_on_stop=False,  # ephemeral agents never merge
+            cleanup_subdir=template_cfg.cleanup_subdir,
+        )
+
+        self.registry.register(agent)
+        self._ephemeral_agents.add(ephemeral_id)
+        await agent.start()
+
+        await self.bus.publish(Message(
+            type=MessageType.STATUS,
+            from_id="__orchestrator__",
+            payload={
+                "event": "ephemeral_agent_spawned",
+                "agent_id": ephemeral_id,
+                "template_id": template_id,
+            },
+        ))
+        logger.info(
+            "Ephemeral agent %s spawned from template %s", ephemeral_id, template_id
+        )
+        return ephemeral_id
 
     # ------------------------------------------------------------------
     # Workflow DAG tracking

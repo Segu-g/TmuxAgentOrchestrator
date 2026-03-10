@@ -519,6 +519,17 @@ class PhaseSpecModel(BaseModel):
             "Design reference: DESIGN.md §10.68 (v1.1.36)."
         ),
     )
+    agent_template: str | None = Field(
+        default=None,
+        description=(
+            "ID of an agent config template to use for dynamic ephemeral agent spawning. "
+            "When set, the orchestrator spawns a new ephemeral agent from the named "
+            "template config just before dispatching this phase's tasks, and stops the "
+            "agent automatically after the task completes. "
+            "The template must match an agent 'id' defined in the YAML config. "
+            "Design reference: DESIGN.md §10.79 (v1.2.3)."
+        ),
+    )
 
     @field_validator("pattern")
     @classmethod

@@ -187,6 +187,7 @@ def build_workflows_router(
                     skip_condition=_to_domain_skip_condition(
                         getattr(p, "skip_condition", None)
                     ),
+                    agent_template=getattr(p, "agent_template", None),
                 )
 
             def _to_domain_phase_item(item: Any) -> Any:
@@ -293,11 +294,25 @@ def build_workflows_router(
     
         for spec in ordered:
             global_deps = [local_to_global[lid] for lid in spec.get("depends_on", [])]
+            # Dynamic ephemeral agent spawning: when a task spec carries an
+            # ``agent_template`` key (set by phase strategies when
+            # ``PhaseSpec.agent_template`` is non-None), spawn a fresh ephemeral
+            # agent from that template and route the task directly to it.
+            # Design reference: DESIGN.md §10.79 (v1.2.3)
+            effective_target_agent = spec.get("target_agent")
+            agent_template = spec.get("agent_template")
+            if agent_template:
+                try:
+                    effective_target_agent = await orchestrator.spawn_ephemeral_agent(
+                        agent_template
+                    )
+                except ValueError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc))
             task = await orchestrator.submit_task(
                 spec["prompt"],
                 priority=spec.get("priority", 0),
                 depends_on=global_deps or None,
-                target_agent=spec.get("target_agent"),
+                target_agent=effective_target_agent,
                 required_tags=spec.get("required_tags") or None,
                 target_group=spec.get("target_group"),
                 max_retries=spec.get("max_retries", 0),
