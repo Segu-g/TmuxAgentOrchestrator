@@ -16,26 +16,91 @@ TmuxAgentOrchestrator/
 │   └── tmux_orchestrator/
 │       ├── __init__.py
 │       ├── main.py                 # CLI entry point (typer): tui / web / run
-│       ├── config.py               # YAML config loader + dataclasses
+│       ├── config.py               # shim → application/config.py
+│       ├── orchestrator.py         # shim → application/orchestrator.py
+│       ├── bus.py                  # shim → application/bus.py
+│       ├── factory.py              # Composition Root (build_system, patch_web_url)
+│       ├── workflow_defaults.py    # deep_merge_defaults for workflow YAML templates
+│       ├── phase_executor.py       # PhaseExecutor (workflow phase dispatch)
 │       ├── tmux_interface.py       # libtmux wrapper (sessions, panes, watcher thread)
-│       ├── bus.py                  # Async in-process pub/sub message bus
-│       ├── orchestrator.py         # Task queue, agent registry, dispatch, P2P gating
+│       ├── domain/                 # Pure domain types — zero external deps
+│       │   ├── agent.py            # AgentStatus, AgentRole
+│       │   ├── message.py          # MessageType, Message
+│       │   ├── task.py             # Task dataclass
+│       │   ├── workflow.py         # WorkflowStatus, WorkflowPhase, WorkflowRun
+│       │   └── phase_strategy.py   # PhaseStrategy protocol + 4 concrete strategies
+│       ├── application/            # Use-cases and business logic; depends on domain only
+│       │   ├── bus.py              # Async in-process pub/sub message bus
+│       │   ├── config.py           # YAML config loader + dataclasses (canonical)
+│       │   ├── factory.py          # re-exports from root factory.py
+│       │   ├── orchestrator.py     # Task queue, agent registry, dispatch, P2P gating (canonical)
+│       │   ├── registry.py         # AgentRegistry
+│       │   ├── task_queue.py       # AsyncPriorityTaskQueue
+│       │   ├── rate_limiter.py     # TokenBucketRateLimiter
+│       │   ├── group_manager.py    # GroupManager
+│       │   ├── workflow_manager.py # WorkflowManager
+│       │   ├── workflow_service.py # WorkflowService
+│       │   ├── slash_notify.py     # Slash command notification helpers
+│       │   ├── schemas.py          # Pydantic DTOs (bus payloads, episode)
+│       │   ├── circuit_breaker.py  # CircuitBreaker
+│       │   ├── supervision.py      # Supervision strategies
+│       │   └── use_cases.py        # Application use-case handlers
+│       ├── infrastructure/         # External deps: libtmux, httpx, OTel, SQLite
+│       │   ├── tmux.py             # TmuxInterface (libtmux wrapper)
+│       │   ├── worktree.py         # WorktreeManager (git worktree lifecycle)
+│       │   ├── worktree_integrity.py # Worktree integrity checks
+│       │   ├── messaging.py        # File-based mailbox (persistent P2P)
+│       │   ├── context_monitor.py  # Pane polling + TF-IDF compression
+│       │   ├── drift_monitor.py    # ASI drift detection
+│       │   ├── autoscaler.py       # MAPE-K autoscale loop
+│       │   ├── result_store.py     # JSONL append-only result store
+│       │   ├── checkpoint_store.py # SQLite WAL checkpoint store
+│       │   ├── episode_store.py    # JSONL episodic memory store
+│       │   ├── webhook_manager.py  # httpx HTTP delivery + HMAC signing
+│       │   ├── security.py         # AuditLogMiddleware + sanitize_prompt
+│       │   ├── telemetry.py        # OTel TracerProvider + RingBufferSpanExporter
+│       │   ├── logging_config.py   # JsonFormatter + setup_json_logging
+│       │   ├── claude_trust.py     # pre_trust_worktree (trust dialog fix)
+│       │   └── process_port.py     # Process/port utilities
 │       ├── agents/
 │       │   ├── base.py             # Abstract Agent (lifecycle, status, run loop)
-│       │   └── claude_code.py      # Drives `claude` CLI in a tmux pane
+│       │   ├── claude_code.py      # Drives `claude` CLI in a tmux pane
+│       │   └── completion.py       # Completion detection helpers
+│       ├── agent_plugin/           # Slash commands + hooks loaded by claude
+│       │   ├── commands/           # One .md file per slash command
+│       │   └── hooks/              # UserPromptSubmit hook (long-prompt file delivery)
 │       ├── tui/
 │       │   ├── app.py              # Textual App root (keybindings: n/k/p/q)
 │       │   └── widgets.py          # AgentPanel, TaskQueuePanel, LogPanel, StatusBar
-│       └── web/
-│           ├── app.py              # FastAPI app (REST + embedded browser UI)
-│           └── ws.py               # WebSocket hub (fans out bus events to browsers)
+│       ├── web/
+│       │   ├── app.py              # FastAPI app (REST + embedded browser UI)
+│       │   ├── ws.py               # WebSocket hub (fans out bus events to browsers)
+│       │   ├── schemas.py          # Pydantic request/response models for REST
+│       │   └── routers/            # APIRouter modules (split from web/app.py v1.1.6)
+│       │       ├── agents.py
+│       │       ├── tasks.py
+│       │       ├── workflows.py
+│       │       ├── scratchpad.py
+│       │       ├── groups.py
+│       │       ├── webhooks.py
+│       │       ├── memory.py
+│       │       └── system.py
+│       └── testing/
+│           └── demo_client.py      # Helpers for writing demo scripts
 ├── examples/
-│   └── basic_config.yaml           # Two-worker example config
-└── tests/
+│   ├── basic_config.yaml           # Two-worker example config
+│   ├── director_config.yaml        # Director + workers example
+│   ├── declarative_workflow_config.yaml
+│   ├── autonomous_strategy_config.yaml
+│   └── workflows/                  # Built-in workflow YAML templates
+│       ├── tdd.yaml, competition.yaml, debate.yaml, pair.yaml, …
+│       └── README.md
+└── tests/                          # 2700+ tests; see test_*.py files
     ├── test_bus.py
     ├── test_orchestrator.py
     ├── test_tmux_interface.py
-    └── test_worktree.py
+    ├── test_worktree.py
+    └── … (100+ test files)
 ```
 
 ## Installation
@@ -68,10 +133,14 @@ pytest
 
 ## Architecture Notes
 
-- **Bus** (`bus.py`): async pub/sub; `to_id="*"` = broadcast; `broadcast=True` subscriber receives all messages regardless of `to_id`. Used by web hub and TUI.
-- **Orchestrator** (`orchestrator.py`): `asyncio.PriorityQueue` for tasks; polls for idle agents every 0.2 s; P2P permission table is a `Set[frozenset[str]]`.
+- **Bus** (`application/bus.py`, shim at `bus.py`): async pub/sub; `to_id="*"` = broadcast; `broadcast=True` subscriber receives all messages regardless of `to_id`. Used by web hub and TUI.
+- **Orchestrator** (`application/orchestrator.py`, shim at `orchestrator.py`): `asyncio.PriorityQueue` for tasks; polls for idle agents every 0.2 s; P2P permission table is a `Set[frozenset[str]]`.
+- **Config** (`application/config.py`, shim at `config.py`): YAML config loader + dataclasses. `load_config(path, cwd=None)` resolves relative paths against `cwd` (e.g. `mailbox_dir`). Default `mailbox_dir` is `.orchestrator/mailbox` (project-scoped, v1.1.30).
 - **ClaudeCodeAgent**: launches `claude --dangerously-skip-permissions` (with `CLAUDECODE` stripped so it works inside a Claude Code session); waits for the initial `❯` prompt (`_wait_for_ready`) before marking IDLE; sends task via `send_keys`; completion is explicit — Worker agents call `/task-complete` (Stop hook fires on each response turn and nudges if not called); Director agents call `POST /agents/{id}/task-complete` directly.
-- **Web UI**: single-page HTML served from `GET /`; auto-reconnecting WebSocket at `ws://host/ws`; polls REST endpoints every 3 s for agent/task table refresh.
+- **isolate: false (v1.1.35)**: When `isolate: false`, each agent gets its own `.agent/{agent_id}/` subdir under the shared cwd. All per-agent files (context file, API key, CLAUDE.md, settings.local.json, slash commands) go into this subdir. Claude is launched from the subdir, making it an independent project root. Context files shared across all agents are still written to the shared cwd root.
+- **Mailbox auto-cleanup (v1.1.34)**: On `Orchestrator.stop()`, the session-scoped mailbox subdir (`{mailbox_dir}/{session_name}/`) is deleted by default. Set `mailbox_cleanup_on_stop: false` in config to preserve for post-mortem inspection.
+- **Web UI**: single-page HTML served from `GET /`; auto-reconnecting WebSocket at `ws://host/ws`; polls REST endpoints every 3 s for agent/task table refresh. REST endpoints are split across 8 APIRouter modules under `web/routers/` (v1.1.6).
+- **Clean Architecture**: domain/ → application/ → infrastructure/ layer separation. Root-level `.py` files (`bus.py`, `config.py`, `orchestrator.py`, etc.) are shims that re-export from canonical locations for backward compatibility.
 
 ## Autonomous Development Loop
 
@@ -249,7 +318,7 @@ Contents (both files have identical structure):
 {
   "agent_id": "worker-1",
   "session_name": "orchestrator",
-  "mailbox_dir": "/home/user/.tmux_orchestrator",
+  "mailbox_dir": "/path/to/project/.orchestrator/mailbox",
   "worktree_path": "/path/to/repo/.worktrees/worker-1",
   "web_base_url": "http://localhost:8000"
 }
@@ -343,13 +412,20 @@ The orchestrator enforces P2P permissions. Your message is silently dropped if t
 | `/spawn-subagent` | `/spawn-subagent <template_id>` | Spawn a pre-configured sub-agent; P2P auto-granted |
 | `/list-agents` | `/list-agents` | Show all agents and their IDLE/BUSY/ERROR status |
 | `/plan` | `/plan <description>` | Write a structured `PLAN.md` before beginning implementation |
+| `/plan-workflow` | `/plan-workflow <description>` | Plan a multi-phase workflow with dependency graph |
 | `/tdd` | `/tdd <feature>` | Guide a Red → Green → Refactor TDD cycle |
 | `/progress` | `/progress <summary>` | Report progress to your parent agent in the hierarchy |
 | `/summarize` | `/summarize` | Compress current context state into `NOTES.md` to prevent context rot |
+| `/compress-context` | `/compress-context` | Explicitly compress context when approaching window limits |
 | `/delegate` | `/delegate <task>` | Break a task into subtasks and spawn sub-agents to work on them |
+| `/task-complete` | `/task-complete <summary>` | Signal task completion to the orchestrator (required for workers) |
+| `/sync-to-main` | `/sync-to-main` | Merge your worktree branch back to main and clean up |
+| `/change-strategy` | `/change-strategy <strategy>` | Switch the current workflow phase to a different strategy |
+| `/spec` | `/spec <topic>` | Write a structured specification document |
+| `/deliberate` | `/deliberate <question>` | Run a structured deliberation before making a decision |
 
 All commands require `__orchestrator_context__.json` in your cwd.
-Commands that use REST (`/send-message`, `/spawn-subagent`, `/list-agents`, `/progress`, `/delegate`) require the orchestrator to have been started with `tmux-orchestrator web`.
+Commands that use REST (`/send-message`, `/spawn-subagent`, `/list-agents`, `/progress`, `/delegate`, `/task-complete`, `/sync-to-main`, `/change-strategy`) require the orchestrator to have been started with `tmux-orchestrator web`.
 
 ### Shared Scratchpad
 
@@ -464,7 +540,7 @@ By default you run in an isolated git worktree at `{repo_root}/.worktrees/{agent
 - Commit freely on your branch.
 - On agent stop, your worktree and branch are automatically deleted.
 
-If the config sets `isolate: false` for your agent, you share the main repo working tree.
+If the config sets `isolate: false` for your agent, you share the main repo working tree but run inside a per-agent subdirectory `.agent/{agent_id}/` under the shared cwd (v1.1.35). All your per-agent files (CLAUDE.md, settings.local.json, slash commands, context file, API key file) live inside that subdir. Shared project-level files (e.g. source code) remain at the shared cwd root. The `.agent/{agent_id}/` subdir is deleted on agent stop unless `cleanup_subdir: false` is set in config.
 
 ### Context Engineering Cheatsheet
 
