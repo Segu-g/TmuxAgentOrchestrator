@@ -122,12 +122,14 @@ def build_workflows_router(
                         scorer=m.scorer,
                         top_k=m.top_k,
                         timeout_per_agent=m.timeout_per_agent,
+                        judge_prompt_template=getattr(m, "judge_prompt_template", ""),
                     )
                 if t == "debate":
                     return DebateConfig(
                         rounds=m.rounds,
                         require_consensus=m.require_consensus,
                         judge_criteria=m.judge_criteria,
+                        early_stop_signal=getattr(m, "early_stop_signal", ""),
                     )
                 return None
 
