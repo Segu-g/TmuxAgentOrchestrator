@@ -4180,3 +4180,48 @@ References:
 
 **Clean Architecture 完成度**: ~99%
 - 残存課題: `Orchestrator` を `application/__init__` から re-export できない (循環インポートチェーン) → `application/__init__.py` の NOTE コメントで対処済み。
+
+## §10.61 — v1.1.29: Circular Import Resolution — `Orchestrator` in `application/__init__`
+
+### Step 0 — 選択理由
+
+**選択**: `application/__init__.py` に `Orchestrator` を追加して Clean Architecture 100% を達成。
+
+**なぜ選択**: v1.1.28 の実装後、唯一の残存課題が `Orchestrator` を `application/__init__` から re-export できないことだった。これを解決すれば Clean Architecture Migration が完全完成となる。
+
+**なぜ他を選ばなかったか**: §11 の他の候補はより大きな変更を要する。循環インポート解決は最小コスト・最大インパクトの変更。
+
+### Step 1 — Research (WebSearch 3クエリ)
+
+**調査内容**: 循環インポート解決の定石パターン、TYPE_CHECKING ガード、PEP 562 module `__getattr__`、Python の package `__init__.py` ロード時の循環インポート発生メカニズム。
+
+**調査結果**:
+
+1. **TYPE_CHECKING ガード** (Fedorov, Kirill, "Type Annotations and circular imports", Medium, https://medium.com/@k.a.fedorov/type-annotations-and-circular-imports-0a8014cd243b):
+   - `if TYPE_CHECKING:` でガードしたインポートは静的解析時のみ実行される。ランタイムでは無視される。
+   - 型アノテーションのみに使われるインポートに有効。実際にオブジェクトを使う場合は使えない。
+
+2. **PEP 562 — Module `__getattr__`** (Python Software Foundation, "PEP 562 – Module `__getattr__` and `__dir__`", https://peps.python.org/pep-0562/, 2017):
+   - Python 3.7 以降、モジュールに `__getattr__` 関数を定義できる。
+   - 属性が通常のルックアップで見つからない場合にのみ呼ばれる。
+   - `application/__init__.py` に `__getattr__` を定義して `Orchestrator` のみを lazy import する方法が有効。
+   - ただし pickle との互換性に注意が必要。
+
+3. **実際の循環インポートメカニズム** (Lippens, Stefaan, "Yet another solution to dig you out of a circular import hole in Python", https://www.stefaanlippens.net/circular-imports-type-hints-python.html):
+   - `from pkg.submod import X` は pkg の `__init__.py` を部分的にロード済みの状態で submod を直接 import できる。
+   - `from tmux_orchestrator.application.bus import Bus` は `application/__init__` を経由しない — `application/bus.py` を直接ロードする。
+   - したがって、`application/__init__` ロード中に `orchestrator.py` が `bus.py` shim を介して `application.bus` を import しても、`application/__init__` に再入しない。
+
+**実証調査**:
+- `uv run python3 -c "from tmux_orchestrator.application.orchestrator import Orchestrator"` → 成功
+- 一時的に `application/__init__.py` に import 追加してサブプロセステスト → `from tmux_orchestrator.application import Orchestrator` が成功
+- **結論**: 想定されていた循環インポートチェーンは実際には存在しない。`application.bus` は submodule として直接ロードされるため、`application/__init__` への再入が起きない。
+
+**選択した修正方針**: 最小侵襲的アプローチ — `application/__init__.py` に直接 `from tmux_orchestrator.application.orchestrator import Orchestrator` を追加し、`__all__` に `"Orchestrator"` を追加。
+
+**References**:
+- Fedorov, Kirill, "Type Annotations and circular imports", Medium, https://medium.com/@k.a.fedorov/type-annotations-and-circular-imports-0a8014cd243b (2023)
+- Python Software Foundation, "PEP 562 – Module __getattr__ and __dir__", https://peps.python.org/pep-0562/ (2017)
+- Lippens, Stefaan, "Yet another solution to dig you out of a circular import hole in Python", https://www.stefaanlippens.net/circular-imports-type-hints-python.html
+- DataCamp, "Python Circular Import: Causes, Fixes, and Best Practices", https://www.datacamp.com/tutorial/python-circular-import (2025)
+- Scientific Python, "SPEC 1 — Lazy Loading of Submodules and Functions", https://scientific-python.org/specs/spec-0001/

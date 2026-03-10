@@ -44,6 +44,7 @@ References:
     - DESIGN.md §10.N (v1.0.15 — application/ layer extraction)
     - DESIGN.md §10.56 (v1.1.24 — Clean Architecture Phase 2)
     - DESIGN.md §10.59 (v1.1.27 — Clean Architecture Phase 5)
+    - DESIGN.md §10.61 (v1.1.29 — circular import resolution, Orchestrator re-export)
 """
 
 from tmux_orchestrator.application.bus import Bus
@@ -108,12 +109,28 @@ from tmux_orchestrator.application.config import (
     WebhookConfig,
     load_config,
 )
-# NOTE: Orchestrator, build_system, patch_api_key, patch_web_url are NOT imported here
-# to avoid a deep circular import chain (orchestrator → agents.base → logging_config →
-# infrastructure → bus → application/__init__ → orchestrator).
-# Import them directly from their canonical modules:
-#   from tmux_orchestrator.application.orchestrator import Orchestrator
-#   from tmux_orchestrator.application.factory import build_system, patch_api_key, patch_web_url
+# Orchestrator is exposed via __getattr__ (PEP 562, Python 3.7+) to avoid a
+# circular import at module initialisation time.  The cycle exists only when
+# __init__.py is the first module being loaded AND agents.base is mid-import:
+#
+#   application/__init__ → orchestrator → agents.base → bus shim →
+#   application (package, still loading) → orchestrator → agents.base  ← CYCLE
+#
+# With __getattr__, the import is deferred until the attribute is first
+# accessed, by which point all modules in the chain have fully initialised.
+# See DESIGN.md §10.61 for details.  (PEP 562: https://peps.python.org/pep-0562/)
+
+
+def __getattr__(name: str):  # noqa: ANN201
+    if name == "Orchestrator":
+        from tmux_orchestrator.application.orchestrator import (  # noqa: PLC0415
+            Orchestrator,
+        )
+        # Cache in module dict so subsequent accesses bypass __getattr__
+        globals()["Orchestrator"] = Orchestrator
+        return Orchestrator
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "AgentRegistry",
@@ -138,6 +155,7 @@ __all__ = [
     "NullContextMonitor",
     "NullDriftMonitor",
     "NullResultStore",
+    "Orchestrator",
     "ResultStoreProtocol",
     "SubmitTaskDTO",
     "SubmitTaskResult",
