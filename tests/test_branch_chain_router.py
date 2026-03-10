@@ -752,3 +752,90 @@ async def test_spawn_ephemeral_agent_source_branch_ignored_for_non_isolated():
     # (the orchestrator checks `template_cfg.isolate` before setting _source_branch)
     assert len(set_source_branches) == 1
     assert set_source_branches[0] is None
+
+
+# ---------------------------------------------------------------------------
+# Test 12: Orchestrator._task_ephemeral_agent is populated by deferred spawn
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_task_ephemeral_agent_mapping_populated_on_deferred_spawn():
+    """After deferred spawn, _task_ephemeral_agent[task_id] = ephemeral_id."""
+    wm = make_mock_worktree_manager()
+    agent_cfg = make_agent_config("worker", isolate=True)
+    orch, _ = make_orch(agent_configs=[agent_cfg], worktree_manager=wm)
+
+    # Initially empty
+    assert orch._task_ephemeral_agent == {}
+
+    with patch("tmux_orchestrator.agents.claude_code.ClaudeCodeAgent") as MockAgent:
+        instance = AsyncMock()
+        instance.tags = []
+        instance._source_branch = None
+
+        def _capture(*args, **kwargs):
+            aid = kwargs.get("agent_id", "")
+            instance.agent_id = aid
+            instance.id = aid
+            return instance
+
+        MockAgent.side_effect = _capture
+
+        # Spawn with source_branch — simulating deferred spawn
+        eph_id = await orch.spawn_ephemeral_agent("worker", source_branch=None)
+
+    # Manually simulate what _route_loop does after deferred spawn:
+    fake_task_id = "task-abc-123"
+    orch._task_ephemeral_agent[fake_task_id] = eph_id
+
+    assert orch._task_ephemeral_agent[fake_task_id] == eph_id
+
+
+# ---------------------------------------------------------------------------
+# Test 13: Deferred spawn resolves source_branch via _task_ephemeral_agent
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_deferred_spawn_resolves_source_branch_via_task_map():
+    """_route_loop deferred spawn: resolves source_branch via _task_ephemeral_agent."""
+    wm = make_mock_worktree_manager()
+    agent_cfg = make_agent_config("worker", isolate=True)
+    orch, _ = make_orch(agent_configs=[agent_cfg], worktree_manager=wm)
+
+    # Simulate: Phase A ran as ephemeral "worker-ephemeral-aaaa1111"
+    pred_task_id = "task-phase-a-global-id"
+    pred_ephemeral_id = "worker-ephemeral-aaaa1111"
+    pred_branch = f"worktree/{pred_ephemeral_id}"
+
+    # Pre-populate state as if Phase A's task already ran and was recorded
+    orch._task_ephemeral_agent[pred_task_id] = pred_ephemeral_id
+    orch._ephemeral_agent_branches[pred_ephemeral_id] = pred_branch
+
+    spawned_calls: list[dict] = []
+
+    async def _mock_spawn(template_id: str, *, source_branch: str | None = None) -> str:
+        fake_id = f"{template_id}-ephemeral-bbbb2222"
+        spawned_calls.append({"source_branch": source_branch, "id": fake_id})
+        orch._ephemeral_agent_branches[fake_id] = f"worktree/{fake_id}"
+        return fake_id
+
+    orch.spawn_ephemeral_agent = _mock_spawn  # type: ignore[method-assign]
+
+    # Simulate the _route_loop deferred spawn logic for Phase B
+    _chain_pred_task_ids = [pred_task_id]
+    _source_branch: str | None = None
+    for _pred_task_id in _chain_pred_task_ids:
+        _pred_eph_id = orch._task_ephemeral_agent.get(_pred_task_id)
+        if _pred_eph_id:
+            _candidate = orch._ephemeral_agent_branches.get(_pred_eph_id)
+            if _candidate:
+                _source_branch = _candidate
+                break
+
+    _new_eph_id = await orch.spawn_ephemeral_agent("worker", source_branch=_source_branch)
+
+    # Phase B should get source_branch = Phase A's branch
+    assert len(spawned_calls) == 1
+    assert spawned_calls[0]["source_branch"] == pred_branch

@@ -293,8 +293,10 @@ def build_workflows_router(
         local_to_global: dict[str, str] = {}
         global_task_ids: list[str] = []
         # Branch-chain handoff (v1.2.5): tracks local_id → ephemeral_agent_id
-        # so that successor phases with chain_branch=True can inherit the
-        # predecessor's worktree branch as their starting point.
+        # for agents spawned immediately (non-chain-branch phases).  Chain-branch
+        # phases defer spawning to dispatch time (see _route_loop) so that the
+        # predecessor's worktree branch already has the committed files when the
+        # successor's worktree is created.
         # Design reference: DESIGN.md §10.81
         local_id_to_ephemeral: dict[str, str] = {}
 
@@ -307,32 +309,43 @@ def build_workflows_router(
             # Design reference: DESIGN.md §10.79 (v1.2.3)
             effective_target_agent = spec.get("target_agent")
             agent_template = spec.get("agent_template")
+            task_metadata: dict = {}
+
             if agent_template:
-                # Branch-chain handoff: resolve source_branch from predecessor.
-                # When chain_branch=True, look for a direct dependency whose
-                # ephemeral agent has a recorded worktree branch.
-                # Design reference: DESIGN.md §10.81 (v1.2.5)
-                source_branch: str | None = None
                 if spec.get("chain_branch"):
-                    for dep_local_id in spec.get("depends_on", []):
-                        pred_ephemeral = local_id_to_ephemeral.get(dep_local_id)
-                        if pred_ephemeral:
-                            candidate = orchestrator._ephemeral_agent_branches.get(
-                                pred_ephemeral
-                            )
-                            if candidate:
-                                source_branch = candidate
-                                break  # use the first chain_branch predecessor
-                try:
-                    effective_target_agent = await orchestrator.spawn_ephemeral_agent(
-                        agent_template, source_branch=source_branch
-                    )
-                except ValueError as exc:
-                    raise HTTPException(status_code=422, detail=str(exc))
-                local_id_to_ephemeral[spec["local_id"]] = effective_target_agent
+                    # Deferred spawning for chain_branch phases (v1.2.5):
+                    # Store the template ID and predecessor global task IDs in
+                    # task metadata.  The orchestrator's _route_loop spawns the
+                    # ephemeral agent at dispatch time (after depends_on tasks
+                    # complete), ensuring create_from_branch sees the predecessor's
+                    # committed files.  We store the predecessor global task IDs
+                    # so _route_loop can look up which ephemeral agent ran them
+                    # via Orchestrator._task_ephemeral_agent.
+                    # Design reference: DESIGN.md §10.81
+                    pred_global_task_ids = [
+                        local_to_global[dep_lid]
+                        for dep_lid in spec.get("depends_on", [])
+                        if dep_lid in local_to_global
+                    ]
+                    task_metadata["_ephemeral_template"] = agent_template
+                    task_metadata["_chain_branch"] = True
+                    task_metadata["_chain_pred_task_ids"] = pred_global_task_ids
+                    # No immediate spawn; target_agent stays None.
+                    # _route_loop will spawn and set target_agent at dispatch time.
+                    effective_target_agent = None
+                else:
+                    # Immediate spawn for non-chain-branch ephemeral phases (v1.2.3).
+                    try:
+                        effective_target_agent = await orchestrator.spawn_ephemeral_agent(
+                            agent_template
+                        )
+                    except ValueError as exc:
+                        raise HTTPException(status_code=422, detail=str(exc))
+                    local_id_to_ephemeral[spec["local_id"]] = effective_target_agent
             task = await orchestrator.submit_task(
                 spec["prompt"],
                 priority=spec.get("priority", 0),
+                metadata=task_metadata or None,
                 depends_on=global_deps or None,
                 target_agent=effective_target_agent,
                 required_tags=spec.get("required_tags") or None,

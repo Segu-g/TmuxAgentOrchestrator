@@ -404,11 +404,16 @@ class Orchestrator:
         # Branch tracking for ephemeral agents — maps agent_id → branch_name
         # (e.g. "worker-ephemeral-abc12345" → "worktree/worker-ephemeral-abc12345").
         # Populated in spawn_ephemeral_agent() after the agent starts.
-        # Consumed by the workflow router when chain_branch=True is set on the
-        # *next* sequential phase to call WorktreeManager.create_from_branch()
-        # instead of the default setup(isolate=True).
+        # Consumed by the workflow router (immediate spawning) and _route_loop
+        # (deferred spawning) when chain_branch=True is set on the next phase.
         # Design reference: DESIGN.md §10.80 (v1.2.4)
         self._ephemeral_agent_branches: dict[str, str] = {}
+        # Task → ephemeral agent mapping (v1.2.5): maps global task_id → the
+        # ephemeral agent_id that ran (or is running) that task.  Populated at
+        # dispatch time in _route_loop for deferred chain_branch spawns.  Used
+        # by successor phases to resolve which branch to chain from.
+        # Design reference: DESIGN.md §10.81
+        self._task_ephemeral_agent: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1493,6 +1498,57 @@ class Orchestrator:
                 self._task_queue.task_done()
                 await self._expire_task(task, from_reaper=False)
                 continue
+
+            # --- Deferred ephemeral agent spawn for chain_branch phases (v1.2.5) ---
+            # When the workflow router stored ``_ephemeral_template`` in task
+            # metadata (chain_branch=True), the ephemeral agent was NOT spawned
+            # at submission time.  We spawn it here — after all depends_on tasks
+            # have completed — so that ``create_from_branch`` sees the predecessor
+            # phase's committed files.
+            #
+            # The predecessor's ephemeral agent ID is resolved via:
+            #   _task_ephemeral_agent[pred_task_id] → pred_ephemeral_id
+            #   _ephemeral_agent_branches[pred_ephemeral_id] → source_branch
+            #
+            # Design reference: DESIGN.md §10.81
+            if task.metadata.get("_ephemeral_template") and task.target_agent is None:
+                _tmpl = task.metadata["_ephemeral_template"]
+                _pred_task_ids: list[str] = task.metadata.get("_chain_pred_task_ids", [])
+                _source_branch: str | None = None
+                for _pred_task_id in _pred_task_ids:
+                    _pred_eph_id = self._task_ephemeral_agent.get(_pred_task_id)
+                    if _pred_eph_id:
+                        _candidate = self._ephemeral_agent_branches.get(_pred_eph_id)
+                        if _candidate:
+                            _source_branch = _candidate
+                            break
+                try:
+                    _new_eph_id = await self.spawn_ephemeral_agent(
+                        _tmpl, source_branch=_source_branch
+                    )
+                    import dataclasses as _dc  # noqa: PLC0415
+                    task = _dc.replace(task, target_agent=_new_eph_id)
+                    # Record task → ephemeral mapping so successors can resolve branch.
+                    self._task_ephemeral_agent[task.id] = _new_eph_id
+                    # Update the in-flight task record so the RESULT handler knows
+                    # the actual ephemeral agent that ran this task.
+                    self._active_tasks[task.id] = task
+                    logger.info(
+                        "Deferred chain_branch spawn: task %s → ephemeral agent %s "
+                        "(source_branch=%s)",
+                        task.id,
+                        _new_eph_id,
+                        _source_branch or "<none>",
+                    )
+                except (ValueError, Exception) as _spawn_err:
+                    logger.error(
+                        "Deferred chain_branch spawn failed for task %s template %r: %s",
+                        task.id,
+                        _tmpl,
+                        _spawn_err,
+                    )
+                    await self._dead_letter(task, f"deferred spawn failed: {_spawn_err}")
+                    continue
 
             # --- Agent selection: respect target_agent routing ---
             if task.target_agent is not None:

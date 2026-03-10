@@ -6038,35 +6038,50 @@ else:
 
 **ルーター配線**:
 
+**遅延スポーン (Deferred Spawn) アーキテクチャ**:
+
+`chain_branch=True` フェーズは**ルーター提出時に即時スポーンしない**。
+即時スポーンだと `create_from_branch` が前駆フェーズのコミット前に実行されるため
+(前駆フェーズが `depends_on` でゲートされているにもかかわらず、全タスクを一括提出する)。
+
 ```
-local_id_to_ephemeral: dict[str, str] = {}  # local_id → ephemeral_agent_id
+# ルーター (提出時): chain_branch=True タスクはメタデータに記録のみ
+task_metadata = {
+    "_ephemeral_template": template_id,
+    "_chain_branch": True,
+    "_chain_pred_task_ids": [global_task_id for dep in depends_on],
+}
+submit_task(..., target_agent=None, metadata=task_metadata)
 
-for spec in ordered:
-    source_branch = None
-    if spec.get("chain_branch") and spec.get("agent_template"):
-        for dep_local_id in spec.get("depends_on", []):
-            pred_eph = local_id_to_ephemeral.get(dep_local_id)
-            if pred_eph:
-                source_branch = orch._ephemeral_agent_branches.get(pred_eph)
-                break
-
-    if spec.get("agent_template"):
-        eid = await orch.spawn_ephemeral_agent(spec["agent_template"], source_branch=source_branch)
-        local_id_to_ephemeral[spec["local_id"]] = eid
-        spec = {**spec, "target_agent": eid}
+# _route_loop (ディスパッチ時: depends_on 完了後):
+if task.metadata.get("_ephemeral_template") and task.target_agent is None:
+    source_branch = orch._ephemeral_agent_branches.get(
+        orch._task_ephemeral_agent.get(pred_task_id)
+    )
+    new_eph_id = await spawn_ephemeral_agent(template, source_branch=source_branch)
+    orch._task_ephemeral_agent[task.id] = new_eph_id
+    task.target_agent = new_eph_id
 ```
 
-**前提**: `chain_branch=True` は `agent_template` とセットで使用。`isolate=True` のエージェントのみ worktree ブランチを持つ。
+**新規フィールド**: `Orchestrator._task_ephemeral_agent: dict[str, str]` — `task_id → ephemeral_agent_id`
+
+**前提**: `chain_branch=True` は `agent_template` とセットで使用。`isolate=True` のエージェントのみ worktree ブランチを持つ。非 chain_branch の `agent_template` タスクは従来通り即時スポーン (v1.2.3 動作維持)。
 
 ### Implementation Summary
 
 **新規ファイル**:
-- `tests/test_branch_chain_router.py`: 8+ 新規テスト
+- `tests/test_branch_chain_router.py`: 14 新規テスト
 
 **変更ファイル**:
-- `src/tmux_orchestrator/agents/base.py`: `_source_branch` 属性追加; `_setup_worktree()` に `create_from_branch` 分岐追加
-- `src/tmux_orchestrator/application/orchestrator.py`: `spawn_ephemeral_agent(source_branch=None)` パラメータ追加
-- `src/tmux_orchestrator/web/routers/workflows.py`: DAG submission ループに `local_id_to_ephemeral` + `source_branch` 解決ロジック追加
+- `src/tmux_orchestrator/agents/base.py`: `_source_branch` 属性追加; `_setup_worktree()` に `create_from_branch` 分岐追加 (fallback to `setup()` on error)
+- `src/tmux_orchestrator/application/orchestrator.py`: `spawn_ephemeral_agent(source_branch=None)` パラメータ追加; `_task_ephemeral_agent` dict 追加; `_route_loop` に deferred spawn ブロック追加
+- `src/tmux_orchestrator/web/routers/workflows.py`: chain_branch フェーズは `_ephemeral_template` + `_chain_pred_task_ids` メタデータのみ記録 (即時スポーンなし); 非 chain_branch は v1.2.3 互換の即時スポーン維持
 - `pyproject.toml`: version 1.2.4 → 1.2.5
 
-**テスト結果**: 18 新規テスト 全 PASS; 既存 3000 テスト (pre-existing 2 failures 除く) 全 PASS
+**テスト結果**: 14 新規テスト 全 PASS; 既存 3006 テスト (pre-existing 2 failures 除く) 全 PASS (計 3020)
+
+**デモ結果 (v1.2.5)**:
+- 12/12 PASS
+- Phase 2 git log: `phase2: add reply → phase1: add message → init`
+- Phase 2 scratchpad reply: `Phase 2 received: Hello from phase 1`
+- 遅延スポーンにより Phase 1 のコミット後に Phase 2 の worktree が作成されることを確認
