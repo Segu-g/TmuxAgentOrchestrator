@@ -53,6 +53,19 @@ class AgentConfig:
     # automatically.  Set to False (default) to delete commits on stop.
     merge_on_stop: bool = False
     merge_target: str | None = None  # target branch for merge_on_stop; None = merge into current HEAD
+    # cleanup_subdir: when True (default) and isolate=False, the per-agent
+    #   .agent/{agent_id}/ subdirectory is deleted with shutil.rmtree() on
+    #   agent stop().  Set to False to retain the subdir for post-mortem
+    #   inspection or debugging.
+    #
+    # Rationale: the .agent/{id}/ subdir is created for the lifetime of the
+    #   agent (similar to a TemporaryDirectory context manager), so it should
+    #   be cleaned up automatically.  For isolate=True agents this field has
+    #   no effect because the worktree is managed by WorktreeManager.teardown().
+    #
+    # Reference: Python docs "tempfile.TemporaryDirectory" cleanup semantics;
+    #   DESIGN.md §10.69 (v1.1.37 — .agent/{id}/ cleanup on stop)
+    cleanup_subdir: bool = True
 
 
 @dataclass
@@ -409,6 +422,7 @@ def load_config(path: str | Path, cwd: Path | str | None = None) -> Orchestrator
             groups=a.get("groups", []),
             merge_on_stop=a.get("merge_on_stop", False),
             merge_target=a.get("merge_target"),
+            cleanup_subdir=a.get("cleanup_subdir", True),
         )
         for a in data.get("agents", [])
     ]

@@ -69,6 +69,12 @@ class ClaudeCodeAgent(Agent):
         # --- Worktree lifecycle ---
         merge_on_stop: bool = False,
         merge_target: str | None = None,
+        # cleanup_subdir: when True (default) and isolate=False, the
+        # .agent/{agent_id}/ subdir is deleted with shutil.rmtree() on stop().
+        # Set to False to preserve the subdir for post-mortem inspection.
+        # Has no effect when isolate=True (worktree lifecycle handled by WorktreeManager).
+        # Reference: DESIGN.md §10.69 (v1.1.37)
+        cleanup_subdir: bool = True,
     ) -> None:
         super().__init__(agent_id, bus, task_timeout=task_timeout)
         self.mailbox = mailbox
@@ -80,6 +86,7 @@ class ClaudeCodeAgent(Agent):
         self._isolate = isolate
         self._merge_on_stop = merge_on_stop
         self._merge_target = merge_target
+        self._cleanup_subdir = cleanup_subdir
         self._cwd_override = cwd_override
         self._session_name = session_name
         self._web_base_url = web_base_url
@@ -644,6 +651,49 @@ use the plain form without a namespace prefix.
     # Lifecycle — stop
     # ------------------------------------------------------------------
 
+    def _cleanup_agent_subdir(self) -> None:
+        """Delete the per-agent ``.agent/{agent_id}/`` subdir on stop when ``cleanup_subdir=True``.
+
+        This is only meaningful for ``isolate=False`` agents: when multiple agents
+        share a cwd, each gets its own ``.agent/{agent_id}/`` directory (created by
+        ``_agent_work_dir()``).  That directory is a transient workspace — analogous
+        to a ``tempfile.TemporaryDirectory`` — and should be removed when the agent
+        stops to avoid accumulating stale artefacts across successive runs.
+
+        No-op conditions (all silently skipped):
+        - ``isolate=True``: worktree lifecycle is managed by ``WorktreeManager.teardown()``.
+        - ``cleanup_subdir=False``: caller explicitly opted out.
+        - ``self._cwd`` is ``None``: agent was never fully started (e.g. start() failed).
+        - The subdir does not exist: already removed or never created.
+
+        ``shutil.rmtree(ignore_errors=True)`` is used so that partially-written
+        or already-removed directories are silently tolerated (idempotent shutdown).
+
+        Reference: DESIGN.md §10.69 (v1.1.37 — .agent/{id}/ cleanup on stop)
+        """
+        if self._isolate:
+            return  # isolate=True: WorktreeManager handles teardown
+        if not self._cleanup_subdir:
+            return  # opt-out
+        if self._cwd is None:
+            return  # never fully started
+        # self._cwd is the agent subdir (.agent/{agent_id}/) for isolate=False agents.
+        # Confirm this is actually inside a .agent/ directory before deleting.
+        if self._cwd.parent.name != ".agent":
+            # Unexpected layout; do not delete to avoid data loss.
+            logger.warning(
+                "Agent %s: _cleanup_agent_subdir: cwd %s is not inside .agent/ — skipping cleanup",
+                self.id,
+                self._cwd,
+            )
+            return
+        shutil.rmtree(self._cwd, ignore_errors=True)
+        logger.info(
+            "Agent %s: removed per-agent subdir %s (cleanup_subdir=True)",
+            self.id,
+            self._cwd,
+        )
+
     async def stop(self) -> None:
         self.status = AgentStatus.STOPPED
         if self._run_task:
@@ -671,6 +721,7 @@ use the plain form without a namespace prefix.
         if cleanup_dir is not None:
             self._completion.on_stop(cleanup_dir)
         await self._teardown_worktree()
+        self._cleanup_agent_subdir()
         logger.info("ClaudeCodeAgent %s stopped", self.id)
 
     # ------------------------------------------------------------------
