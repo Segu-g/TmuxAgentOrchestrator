@@ -5465,3 +5465,106 @@ Recommended Decision: SQLite with WAL mode for current scale.
 - `src/tmux_orchestrator/web/schemas.py`: `RedBlueWorkflowSubmit` を `feature_description`, `language`, `security_focus`, `agent_timeout` フィールドに更新。`required_tags` デフォルトを `["redblue_blue"]`, `["redblue_red"]`, `["redblue_arbiter"]` に設定。
 - `src/tmux_orchestrator/web/routers/workflows.py`: スクラッチパッドキーを `_implementation`, `_vulnerabilities`, `_risk_report` に変更。セキュリティフォーカスを赤チームプロンプトに注入。
 - `tests/test_workflow_redblue.py`: 新スキーマに対応したテスト群に置き換え。
+
+## §10.76 — v1.1.44: ループ対応ワークフロー (LoopBlock + {iter} 置換 + POST /workflows/pdca)
+
+### Step 0 — 選択
+
+**選択**: v1.1.44 — ループ対応ワークフロー実装
+
+**選択理由**:
+1. **ユーザー明示的設計承認**: LoopBlock + LoopSpec + {iter} プレースホルダー + until 条件評価の設計がユーザーにより完全承認済み。
+2. **§11 高優先度**: PDCA サイクルなどのフィードバックループは、既存の DAG 構造が根本的に表現できない反復パターンを可能にする。
+3. **POST /workflows/pdca**: 専用エンドポイントで PDCA サイクルを簡便に実行可能にする。
+
+**選択しなかった候補**:
+- ワークフロー出力フォーマット標準化: §11 低優先度。
+- DECISION.md 標準フォーマット規約: 実装価値が低い。
+
+### Step 1 — Research
+
+**Query 1**: "PDCA cycle workflow automation orchestration iterative loop"
+
+1. **Moxo, "Continuous improvement with the PDSA & PDCA cycle"**,
+   https://www.moxo.com/blog/continuous-improvement-pdsa-pdca-cycle —
+   PDCA/PDSA サイクルは、証拠ベースのイテレーションによる継続的改善フレームワーク。
+   テンプレートが各イテレーションに構造化された証拠を残し、次サイクルへの継続性を確保する。
+   ワークフロー自動化 (ブランチ、マイルストーン、SLA しきい値) が PDCA サイクルを強化。
+
+2. **Asana, "What is the Plan-Do-Check-Act (PDCA) Cycle?"**,
+   https://asana.com/resources/pdca-cycle —
+   Plan → Do → Check → Act の4段階。サイクルは終わりに達したら最初から繰り返せる。
+   デミングの強調: 改善された系への収束スパイラル。各サイクルが目標に近づく。
+
+3. **businessmap.io, "PDCA Cycle: Guide, Practical Example & Template"**,
+   https://businessmap.io/lean-management/improvement/what-is-pdca-cycle —
+   PDCA は継続的改善のための4ステップの反復プロセス。Deming Cycle とも呼ばれる。
+   各フェーズの完了後に条件を評価し、次のサイクルか終了かを決定する。
+
+**Query 2**: "workflow loop construct nested phases Argo Airflow iterative execution"
+
+4. **Argo Workflows, "Loops"**,
+   https://argo-workflows.readthedocs.io/en/latest/walk-through/loops/ —
+   Argo Workflows の3種類のループ機構: `withItems`, `withParam`, `withSequence`。
+   `withParam` が最強: 前ステップの JSON 出力を受け取りイテレーション数を動的決定。
+   各ループは独立したテンプレート呼び出しとして実行される (コンテナ単位)。
+
+5. **Springer Nature, "Executing cyclic scientific workflows in the cloud"**,
+   https://link.springer.com/article/10.1186/s13677-021-00229-7 —
+   クラウドでのサイクリックワークフロー実行。既存 DAG アプローチはサイクル回避のワークアラウンドが必要。
+   一部システムはネイティブサイクルをサポートして複雑性を低減。
+   条件 (「成功するまでリトライ」) によるループ制御。
+
+6. **komodor.com, "Understanding Argo Workflows: Practical Guide"**,
+   https://komodor.com/learn/understanding-argo-workflows-practical-guide-2024/ —
+   ネストされたループ: 外部ループが内部テンプレートを呼び出し、内部に `withItems` を持てる。
+   ループ間の値受け渡しが課題 (issue #5143)。ネストループの実装に `withParam` + 動的生成。
+
+**Query 3**: "feedback loop conditional repeat workflow DAG runtime convergence"
+
+7. **AiiDA Tutorials, "More workflow logic: while loops and conditional statements"**,
+   https://aiida-tutorials.readthedocs.io/en/tutorial-2020-intro-week/source/appendices/workflow_logic.html —
+   AiiDA WorkChain の `while_()` 構文: 条件関数が False を返すまでステップを繰り返す。
+   収束ループの例: 圧力収束まで `not_converged()` 条件チェックを繰り返す。
+   DAG 構造を維持しながらランタイム分岐・ループを実現 (Python 制御フロー構文に対応)。
+
+8. **Airflow Community, "Is it possible to add a loop condition in Airflow?"**,
+   https://github.com/apache/airflow/discussions/21726 —
+   Airflow での `while` ループ: DAG が本質的に非巡回のため、ループには ShortCircuitOperator や
+   ExternalTaskSensor を活用するワークアラウンドが必要。
+   純粋 DAG システムでの反復は「サブ DAG」として事前展開するアプローチが主流。
+
+9. **Airflow Documentation, "Dynamic Task Mapping"**,
+   https://airflow.apache.org/docs/apache-airflow/stable/authoring-and-scheduling/dynamic-task-mapping.html —
+   動的タスクマッピング: ランタイムデータに基づきタスク数を決定 (for ループ的)。
+   前タスクの出力を入力とした反復実行。`expand()` API で宣言的に記述可能。
+
+**設計上の知見**:
+- Argo Workflows: ループを DAG 内の「反復テンプレート呼び出し」として表現。TmuxAgentOrchestrator では「イテレーション展開」として静的に事前展開するか、動的に次イテレーションを投入するかのトレードオフあり。
+- AiiDA: `while_()` 条件はランタイム評価。TmuxAgentOrchestrator の `until` 条件はスクラッチパッドを参照するため、フェーズ完了イベントフックでの評価が適切。
+- 今回の設計選択: 静的ループ (DAG 全体を事前生成) ではなく動的ループ (イテレーション完了時に次イテレーションを投入) を採用。理由: ループ回数が `until` 条件の評価結果に依存するため、事前に全タスクを生成できない。
+
+### Step 2 — 実装
+
+
+---
+
+## §11 — 次期候補一覧 (v1.2.x)
+
+### 高優先度
+
+| 課題 | 概要 |
+|---|---|
+| **スクラッチパッド永続化 + スラッシュコマンド** | APIが正のまま、PUT時に `.orchestrator/scratchpad/{key}` にも書き出し (write-through)。サーバー再起動後もファイルから復元。スラッシュコマンド `/scratchpad-write key value` / `/scratchpad-read key` を追加してcurl不要に。 |
+
+### 中優先度
+
+| 課題 | 概要 |
+|---|---|
+| **Worktree ↔ branch sync の UI 改善** | `POST /agents/{id}/sync` は実装済み (v1.1.39)。完了後に worktree を自動削除するオプション、merge conflict 時の通知改善。 |
+| **タスク優先度の動的更新** | `PATCH /tasks/{id}/priority` — キューに積まれたタスクの優先度をランタイムに変更。 |
+| **Codified Context + PairCoder デモ** | `.claude/specs/` に規約 YAML を配置、複数セッションにわたり規約違反ゼロを実証。 |
+
+### バージョン方針
+- v1.1.44 (ループワークフロー) を最終 v1.1.x リリースとする
+- v1.1.44 完了後、次の実装から **v1.2.0** に移行する
