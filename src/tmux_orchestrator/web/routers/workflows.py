@@ -292,7 +292,12 @@ def build_workflows_router(
         # Assign global IDs and submit in dependency order
         local_to_global: dict[str, str] = {}
         global_task_ids: list[str] = []
-    
+        # Branch-chain handoff (v1.2.5): tracks local_id → ephemeral_agent_id
+        # so that successor phases with chain_branch=True can inherit the
+        # predecessor's worktree branch as their starting point.
+        # Design reference: DESIGN.md §10.81
+        local_id_to_ephemeral: dict[str, str] = {}
+
         for spec in ordered:
             global_deps = [local_to_global[lid] for lid in spec.get("depends_on", [])]
             # Dynamic ephemeral agent spawning: when a task spec carries an
@@ -303,12 +308,28 @@ def build_workflows_router(
             effective_target_agent = spec.get("target_agent")
             agent_template = spec.get("agent_template")
             if agent_template:
+                # Branch-chain handoff: resolve source_branch from predecessor.
+                # When chain_branch=True, look for a direct dependency whose
+                # ephemeral agent has a recorded worktree branch.
+                # Design reference: DESIGN.md §10.81 (v1.2.5)
+                source_branch: str | None = None
+                if spec.get("chain_branch"):
+                    for dep_local_id in spec.get("depends_on", []):
+                        pred_ephemeral = local_id_to_ephemeral.get(dep_local_id)
+                        if pred_ephemeral:
+                            candidate = orchestrator._ephemeral_agent_branches.get(
+                                pred_ephemeral
+                            )
+                            if candidate:
+                                source_branch = candidate
+                                break  # use the first chain_branch predecessor
                 try:
                     effective_target_agent = await orchestrator.spawn_ephemeral_agent(
-                        agent_template
+                        agent_template, source_branch=source_branch
                     )
                 except ValueError as exc:
                     raise HTTPException(status_code=422, detail=str(exc))
+                local_id_to_ephemeral[spec["local_id"]] = effective_target_agent
             task = await orchestrator.submit_task(
                 spec["prompt"],
                 priority=spec.get("priority", 0),

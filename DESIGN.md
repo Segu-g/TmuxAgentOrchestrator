@@ -5970,4 +5970,103 @@ phases:
 - `src/tmux_orchestrator/web/routers/workflows.py`: `_to_domain_phase_spec()` に `chain_branch` mapping 追加
 - `pyproject.toml`: version 1.2.3 → 1.2.4
 
+---
+
+## §10.81 — v1.2.5: ブランチ連鎖ルーター配線 (Branch-Chain Router Wiring)
+
+### 選択の根拠
+
+**選択**: `spawn_ephemeral_agent(source_branch=...)` パラメータ追加 + ワークフロールーターで `chain_branch` フラグに基づく前駆フェーズのブランチを後継エージェントに引き継ぐ配線実装。
+
+**理由**: v1.2.4 で構築したビルディングブロック（`create_from_branch`, `_ephemeral_agent_branches`, `get_worktree_manager`, `chain_branch` フラグ）が揃った。最後の欠落ピースはルーター配線のみ。
+
+**見送り候補**:
+- Phase-level webhook events (phase_complete/phase_failed) — 優先度が低い
+- Dynamic `until` condition short-circuit — LoopBlock 実装の既知制限
+
+### 調査記録
+
+#### Query 1: "sequential git worktree branch handoff CI pipeline"
+
+主要知見:
+- Git worktrees allow multiple branches to coexist simultaneously as separate directories. A "handoff" pattern documents path, branch, status, and notes for passing work between stages. (DataCamp, 2025; Nx Blog, 2025)
+- Jenkins CI/CD pipelines with worktrees include explicit checkout, build/test, and cleanup stages. Orphaned worktrees from failed pipelines must be explicitly cleaned up. (dredyson.com, 2025)
+- OpenAI Codex uses "Local→Worktree" handoff as a named flow for moving work safely between environments. (developers.openai.com, 2025)
+
+参考 URL:
+- https://www.datacamp.com/tutorial/git-worktree-tutorial
+- https://dredyson.com/how-to-integrate-git-worktree-rebasing-into-enterprise-ci-cd-pipelines-a-complete-step-by-step-guide-for-it-architects/
+- https://developers.openai.com/codex/app/worktrees/
+
+#### Query 2: "DAG task dispatcher branch inheritance workflow orchestration"
+
+主要知見:
+- Airflow DAGs support branching via `@task.branch` decorator — the orchestrator picks one or more paths based on a predicate (Airflow docs, 2025). This is *conditional* branching, distinct from our sequential branch *chaining*.
+- Argo Workflows' DAG template passes task outputs as inputs to dependent tasks via `{{tasks.X.outputs.Y}}` references. This is the canonical pattern for inter-task data inheritance in a DAG (Argo, 2025).
+- A Java DAG execution engine tracks a `local_id → task_id` mapping for dependency resolution (Medium/Amit Kumar, 2025). Directly analogous to `local_to_global` in our router.
+
+参考 URL:
+- https://argo-workflows.readthedocs.io/en/latest/walk-through/dag/
+- https://medium.com/@amit.anjani89/building-a-dag-based-workflow-execution-engine-in-java-with-spring-boot-ba4a5376713d
+- https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/dags.html
+
+#### Query 3: "ephemeral agent worktree chain orchestration multi-agent"
+
+主要知見:
+- Gas Town (gastown) uses "Polecats" — ephemeral worker agents that spawn, complete a task, and disappear — with "The Refinery" managing the merge queue. This is the same ephemeral-agent-per-task pattern as TmuxAgentOrchestrator. (GitHub steveyegge/gastown, 2025)
+- Stoneforge: Director creates a plan, daemon assigns tasks to workers in isolated worktrees, stewards merge results. The sequential handoff between worktrees for a pipeline is explicitly described. (stoneforge.ai, 2025)
+- ccswarm: Multi-agent orchestration with Claude Code using git worktree isolation. Each agent operates in its own worktree branch, with the orchestrator managing branch lifecycle. (GitHub nwiizo/ccswarm, 2025)
+
+参考 URL:
+- https://github.com/steveyegge/gastown
+- https://stoneforge.ai/blog/introducing-stoneforge/
+- https://github.com/nwiizo/ccswarm
+
+### 設計決定
+
+**`spawn_ephemeral_agent(source_branch=None)` 追加**:
+
+`source_branch` が指定された場合、エージェントの `start()` 内で `wm.setup()` の代わりに `wm.create_from_branch()` が呼ばれるよう `Agent._source_branch` 属性を設定してから `start()` を呼び出す。
+
+```python
+# base.py: _setup_worktree に source_branch 分岐を追加
+if self._source_branch:
+    path = wm.create_from_branch(self.id, self._source_branch)
+else:
+    path = wm.setup(self.id, isolate=self._isolate)
+```
+
+**ルーター配線**:
+
+```
+local_id_to_ephemeral: dict[str, str] = {}  # local_id → ephemeral_agent_id
+
+for spec in ordered:
+    source_branch = None
+    if spec.get("chain_branch") and spec.get("agent_template"):
+        for dep_local_id in spec.get("depends_on", []):
+            pred_eph = local_id_to_ephemeral.get(dep_local_id)
+            if pred_eph:
+                source_branch = orch._ephemeral_agent_branches.get(pred_eph)
+                break
+
+    if spec.get("agent_template"):
+        eid = await orch.spawn_ephemeral_agent(spec["agent_template"], source_branch=source_branch)
+        local_id_to_ephemeral[spec["local_id"]] = eid
+        spec = {**spec, "target_agent": eid}
+```
+
+**前提**: `chain_branch=True` は `agent_template` とセットで使用。`isolate=True` のエージェントのみ worktree ブランチを持つ。
+
+### Implementation Summary
+
+**新規ファイル**:
+- `tests/test_branch_chain_router.py`: 8+ 新規テスト
+
+**変更ファイル**:
+- `src/tmux_orchestrator/agents/base.py`: `_source_branch` 属性追加; `_setup_worktree()` に `create_from_branch` 分岐追加
+- `src/tmux_orchestrator/application/orchestrator.py`: `spawn_ephemeral_agent(source_branch=None)` パラメータ追加
+- `src/tmux_orchestrator/web/routers/workflows.py`: DAG submission ループに `local_id_to_ephemeral` + `source_branch` 解決ロジック追加
+- `pyproject.toml`: version 1.2.4 → 1.2.5
+
 **テスト結果**: 18 新規テスト 全 PASS; 既存 3000 テスト (pre-existing 2 failures 除く) 全 PASS

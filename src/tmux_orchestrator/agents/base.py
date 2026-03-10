@@ -55,6 +55,12 @@ class Agent(ABC):
         self._merge_target: str | None = None
         self._cwd_override: Path | None = None
         self.worktree_path: Path | None = None
+        # Branch-chain handoff (v1.2.5): when set, _setup_worktree calls
+        # create_from_branch(self.id, _source_branch) instead of the default
+        # setup(self.id, isolate=True).  Set by spawn_ephemeral_agent before
+        # calling agent.start() when chain_branch=True in the workflow router.
+        # Design reference: DESIGN.md §10.81
+        self._source_branch: str | None = None
         # Startup time (set by _record_start_time() in concrete start() implementations)
         self.started_at: datetime | None = None
 
@@ -229,6 +235,13 @@ class Agent(ABC):
 
         Returns the path to use as cwd, or ``None`` if no isolation is active.
         Priority: ``_cwd_override`` > ``_worktree_manager`` > None.
+
+        When ``_source_branch`` is set (branch-chain handoff, v1.2.5), calls
+        ``WorktreeManager.create_from_branch(agent_id, source_branch)`` instead
+        of the default ``setup(agent_id, isolate=True)``.  This ensures the
+        agent's worktree starts from the predecessor phase's committed state.
+
+        Design reference: DESIGN.md §10.81 (v1.2.5)
         """
         if self._cwd_override is not None:
             # Shared parent worktree — do not register or teardown.
@@ -236,7 +249,33 @@ class Agent(ABC):
         if self._worktree_manager is None:
             return None
         loop = asyncio.get_running_loop()
-        path: Path = await loop.run_in_executor(
+        if self._source_branch is not None:
+            # Branch-chain handoff: create worktree from predecessor's branch.
+            # Falls back to default setup() if create_from_branch raises.
+            try:
+                source = self._source_branch
+                path: Path = await loop.run_in_executor(
+                    None,
+                    lambda: self._worktree_manager.create_from_branch(  # type: ignore[union-attr]
+                        self.id, source
+                    ),
+                )
+                logger.info(
+                    "Agent %s: worktree created from branch %s (branch-chain handoff)",
+                    self.id,
+                    source,
+                )
+                self.worktree_path = path
+                return path
+            except Exception as exc:
+                logger.warning(
+                    "Agent %s: create_from_branch(%r) failed (%s); "
+                    "falling back to default worktree setup",
+                    self.id,
+                    self._source_branch,
+                    exc,
+                )
+        path = await loop.run_in_executor(
             None,
             lambda: self._worktree_manager.setup(self.id, isolate=self._isolate),  # type: ignore[union-attr]
         )

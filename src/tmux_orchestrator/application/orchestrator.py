@@ -2647,7 +2647,9 @@ class Orchestrator:
         logger.info("Dynamic agent %s created (parent=%s, tags=%s)", agent_id, parent_id, tags)
         return agent
 
-    async def spawn_ephemeral_agent(self, template_id: str) -> str:
+    async def spawn_ephemeral_agent(
+        self, template_id: str, *, source_branch: str | None = None
+    ) -> str:
         """Create, register, and start an ephemeral agent from a config template.
 
         An ephemeral agent is a short-lived agent scoped to a single workflow
@@ -2662,6 +2664,20 @@ class Orchestrator:
             in ``self.config.agents`` to use as the template.  The new agent
             inherits ``isolate``, ``system_prompt``, ``tags``, ``task_timeout``,
             and other fields from the template config.
+        source_branch:
+            Optional git branch name to branch the new agent's worktree from.
+            When provided (and the template uses ``isolate=True``), the agent's
+            worktree is created via :meth:`WorktreeManager.create_from_branch`
+            instead of the default :meth:`WorktreeManager.setup`.  This threads
+            git history through sequential phases — the new agent sees all
+            commits made by the predecessor phase.
+
+            Set by the workflow router when ``chain_branch=True`` on the current
+            phase spec and a predecessor phase's ephemeral agent ID is available
+            in ``_ephemeral_agent_branches``.
+
+            When ``None`` (default), the agent's worktree starts from the repo
+            HEAD (original behaviour).
 
         Returns
         -------
@@ -2673,8 +2689,9 @@ class Orchestrator:
         ValueError
             If no agent config with *template_id* is found.
 
-        Design reference: DESIGN.md §10.79 (v1.2.3)
-        Research: Kubernetes Pod-per-Job pattern; ephemeral CI agent lifecycle.
+        Design reference: DESIGN.md §10.79 (v1.2.3), §10.81 (v1.2.5)
+        Research: Kubernetes Pod-per-Job pattern; ephemeral CI agent lifecycle;
+        sequential git worktree branch handoff (dredyson.com, 2025).
         """
         from pathlib import Path as _Path  # noqa: PLC0415
 
@@ -2730,6 +2747,20 @@ class Orchestrator:
 
         self.registry.register(agent)
         self._ephemeral_agents.add(ephemeral_id)
+
+        # Branch-chain handoff (v1.2.5): when source_branch is provided and the
+        # agent uses worktree isolation, tell the agent to branch from that source
+        # instead of the default HEAD.  The agent's _setup_worktree() method reads
+        # _source_branch and calls create_from_branch() accordingly.
+        # Design reference: DESIGN.md §10.81
+        if source_branch and template_cfg.isolate and effective_wm is not None:
+            agent._source_branch = source_branch  # type: ignore[attr-defined]
+            logger.info(
+                "Ephemeral agent %s: will branch from %s (chain_branch handoff)",
+                ephemeral_id,
+                source_branch,
+            )
+
         await agent.start()
 
         # Track the worktree branch name for sequential branch-chain handoff.
