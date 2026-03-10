@@ -1196,6 +1196,17 @@
             "title": "Required Tags",
             "type": "array"
           },
+          "skip_condition": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SkipConditionModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When set, the orchestrator evaluates this condition against the scratchpad at dispatch time. If met, no task is created and the phase is marked SKIPPED (dependent phases still run normally). Design reference: DESIGN.md \u00a710.68 (v1.1.36)."
+          },
           "strategy_config": {
             "anyOf": [
               {
@@ -1359,6 +1370,33 @@
           }
         },
         "title": "SingleConfigModel",
+        "type": "object"
+      },
+      "SkipConditionModel": {
+        "description": "Pydantic schema for a phase skip condition.\n\nWhen present on a :class:`PhaseSpecModel`, the orchestrator evaluates\nthis condition against the scratchpad at workflow dispatch time.  If the\ncondition is met, the phase is skipped (no task created; downstream phases\nstill run normally).\n\nAttributes\n----------\nkey:\n    Scratchpad key to check.\nvalue:\n    If non-empty: skip when ``scratchpad[key] == value``.\n    If empty (default): skip when ``key`` exists in the scratchpad.\nnegate:\n    When ``True``, invert the condition (skip when NOT met).\n\nExamples\n--------\nSkip phase if build failed::\n\n    {\"key\": \"build_status\", \"value\": \"failed\"}\n\nSkip phase if any value at key exists::\n\n    {\"key\": \"already_done\"}\n\nSkip phase if key does NOT exist (run only when flag is set)::\n\n    {\"key\": \"run_tests\", \"negate\": true}\n\nDesign reference: DESIGN.md \u00a710.68 (v1.1.36)",
+        "properties": {
+          "key": {
+            "description": "Scratchpad key to check.",
+            "title": "Key",
+            "type": "string"
+          },
+          "negate": {
+            "default": false,
+            "description": "When True, invert the condition \u2014 skip when NOT met.",
+            "title": "Negate",
+            "type": "boolean"
+          },
+          "value": {
+            "default": "",
+            "description": "Expected scratchpad value. When empty, skip if the key exists (any value). When non-empty, skip if scratchpad[key] == value.",
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "title": "SkipConditionModel",
         "type": "object"
       },
       "SocraticWorkflowSubmit": {

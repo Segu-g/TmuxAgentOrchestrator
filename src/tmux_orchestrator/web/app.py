@@ -446,7 +446,7 @@ def create_app(
         build_agents_router(orchestrator, auth, episode_store=_episode_store),
     )
     app.include_router(
-        build_workflows_router(orchestrator, auth),
+        build_workflows_router(orchestrator, auth, scratchpad=_scratchpad),
     )
     app.include_router(
         build_scratchpad_router(auth, _scratchpad),

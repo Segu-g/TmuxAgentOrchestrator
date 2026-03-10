@@ -203,6 +203,70 @@ _VALID_PATTERNS: frozenset[str] = frozenset({"single", "parallel", "competitive"
 
 
 @dataclass
+class SkipCondition:
+    """Condition that, when met, causes a phase to be skipped entirely.
+
+    The orchestrator evaluates this condition against the scratchpad at workflow
+    dispatch time.  When the condition is met, no task is created for the phase
+    and the phase is marked SKIPPED (treated as completed for dependency purposes).
+
+    Attributes
+    ----------
+    key:
+        Scratchpad key to check.
+    value:
+        If non-empty: skip when ``scratchpad[key] == value``.
+        If empty (default): skip when ``key`` exists in the scratchpad.
+    negate:
+        When ``True``, the logic is inverted — skip when the condition is NOT
+        met (e.g. skip when key does NOT exist, or when value does NOT match).
+
+    Examples
+    --------
+    Skip phase if build failed::
+
+        SkipCondition(key="build_status", value="failed")
+
+    Skip phase if a key exists::
+
+        SkipCondition(key="already_done")
+
+    Skip phase if a key does NOT exist (run only when key is set)::
+
+        SkipCondition(key="run_tests", negate=True)
+
+    Design references:
+    - DESIGN.md §10.68 (v1.1.36)
+    - Argo Workflows ``when`` expression (govaluate, 2024)
+    - Apache Airflow ``trigger_rule=none_failed`` (2024)
+    """
+
+    key: str
+    value: str = ""
+    negate: bool = False
+
+    def is_met(self, scratchpad: dict) -> bool:
+        """Evaluate the condition against the given scratchpad dict.
+
+        Parameters
+        ----------
+        scratchpad:
+            Current scratchpad state (key → JSON-serialisable value).
+
+        Returns
+        -------
+        bool
+            ``True`` if the phase should be skipped.
+        """
+        key_exists = self.key in scratchpad
+        if self.value:
+            base = key_exists and str(scratchpad[self.key]) == self.value
+        else:
+            base = key_exists
+        return (not base) if self.negate else base
+
+
+@dataclass
 class PhaseSpec:
     """Specification for a single phase in a declarative workflow.
 
@@ -226,6 +290,11 @@ class PhaseSpec:
     required_tags:
         Additional ``required_tags`` applied to all tasks in this phase
         (merged with ``agents.tags`` for the primary role).
+    skip_condition:
+        When set, the orchestrator evaluates this condition against the
+        scratchpad at dispatch time.  If the condition is met, no task is
+        created and the phase is marked SKIPPED (dependent phases still run).
+        See :class:`SkipCondition` for evaluation semantics.
     """
 
     name: str
@@ -238,6 +307,7 @@ class PhaseSpec:
     required_tags: list[str] = field(default_factory=list)
     timeout: int | None = None
     strategy_config: StrategyConfig | None = None  # type: ignore[type-arg]
+    skip_condition: SkipCondition | None = None
 
     def __post_init__(self) -> None:
         if self.pattern not in _VALID_PATTERNS:
@@ -292,6 +362,30 @@ class WorkflowPhaseStatus:
         self.status = "failed"
         if self.completed_at is None:
             self.completed_at = time.time()
+
+    def mark_skipped(self) -> None:
+        """Transition the phase to ``skipped`` (no tasks created, treated as complete).
+
+        SKIPPED phases honour the dependency chain — downstream phases see a
+        SKIPPED phase as resolved (equivalent to ``complete`` for scheduling
+        purposes).  This mirrors Apache Airflow's ``none_failed`` trigger rule
+        and Argo Workflows' ``when``-condition skip behaviour.
+
+        Design reference: DESIGN.md §10.68 (v1.1.36)
+        """
+        self.status = "skipped"
+        now = time.time()
+        if self.started_at is None:
+            self.started_at = now
+        if self.completed_at is None:
+            self.completed_at = now
+
+    def is_resolved(self) -> bool:
+        """Return ``True`` if this phase counts as resolved for dependency purposes.
+
+        Both ``complete`` and ``skipped`` statuses are resolved.
+        """
+        return self.status in {"complete", "skipped"}
 
     def to_dict(self) -> dict:
         """Return a JSON-serialisable snapshot."""
@@ -775,16 +869,41 @@ def _terminal_ids_domain(phase: PhaseSpec, tasks: list[dict]) -> list[str]:
     return [t["local_id"] for t in tasks]
 
 
+def _evaluate_skip(phase: PhaseSpec, scratchpad: dict | None) -> bool:
+    """Return ``True`` if this phase should be skipped based on its ``skip_condition``.
+
+    When ``skip_condition`` is ``None`` or ``scratchpad`` is ``None``, always
+    returns ``False`` (no skip).
+
+    Parameters
+    ----------
+    phase:
+        The phase to evaluate.
+    scratchpad:
+        Current scratchpad state dict, or ``None`` when no scratchpad is
+        available (e.g. in pure domain tests).
+    """
+    if phase.skip_condition is None or scratchpad is None:
+        return False
+    return phase.skip_condition.is_met(scratchpad)
+
+
 def expand_phases_from_specs(
     phases: list[PhaseSpec],
     *,
     context: str,
     scratchpad_prefix: str = "",
+    scratchpad: dict | None = None,
 ) -> list[dict]:
     """Canonical domain-layer phase expansion.
 
     Translates a list of :class:`PhaseSpec` objects into task spec dicts.
     Each phase's ``timeout`` is propagated to every generated task spec.
+
+    When a phase has a ``skip_condition`` that is met (checked against
+    ``scratchpad``), no tasks are created for that phase and the prior terminal
+    IDs are passed through unchanged so that downstream phases receive the
+    correct dependency chain.
 
     This function mirrors :func:`~tmux_orchestrator.phase_executor.expand_phases`
     but lives in the domain layer (no infrastructure imports).
@@ -798,11 +917,19 @@ def expand_phases_from_specs(
         Overridden per-phase by ``PhaseSpec.context``.
     scratchpad_prefix:
         Prefix for scratchpad keys embedded in prompts.
+    scratchpad:
+        Optional scratchpad dict for evaluating ``skip_condition`` fields.
+        When ``None``, skip conditions are never triggered.
     """
     all_tasks: list[dict] = []
     prior_terminal_ids: list[str] = []
 
     for phase in phases:
+        if _evaluate_skip(phase, scratchpad):
+            # Phase is skipped: no tasks created, prior_terminal_ids unchanged.
+            # Downstream phases inherit the same dependency chain as if this
+            # phase completed normally.
+            continue
         effective_context = phase.context if phase.context is not None else context
         strategy = get_strategy(phase.pattern)
         new_tasks, _ = strategy.expand(phase, prior_terminal_ids, effective_context, scratchpad_prefix)

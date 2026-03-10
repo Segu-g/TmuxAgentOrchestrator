@@ -33,9 +33,11 @@ from tmux_orchestrator.domain.phase_strategy import (  # noqa: F401
     PhaseStrategy,
     SingleConfig,
     SingleStrategy,
+    SkipCondition,
     StrategyConfig,
     WorkflowPhaseStatus,
     _VALID_PATTERNS,
+    _evaluate_skip,
     _make_task_spec,
     _phase_prompt,
     expand_phases_from_specs,
@@ -65,12 +67,18 @@ def expand_phases(
     *,
     context: str,
     scratchpad_prefix: str = "",
+    scratchpad: dict | None = None,
 ) -> list[dict]:
     """Translate a list of PhaseSpec objects into task spec dicts.
 
     Uses the Strategy pattern: each phase's ``pattern`` selects the
     concrete :class:`~tmux_orchestrator.domain.phase_strategy.PhaseStrategy`
     implementation from the domain registry.
+
+    When a phase has a ``skip_condition`` that is met (checked against
+    ``scratchpad``), no tasks are created for that phase and the prior terminal
+    IDs are passed through unchanged so that downstream phases receive the
+    correct dependency chain.
 
     Parameters
     ----------
@@ -81,6 +89,9 @@ def expand_phases(
         Overridden per-phase by ``PhaseSpec.context``.
     scratchpad_prefix:
         Prefix for scratchpad keys embedded in prompts.
+    scratchpad:
+        Optional scratchpad dict for evaluating ``skip_condition`` fields.
+        When ``None``, skip conditions are never triggered.
 
     Returns
     -------
@@ -92,6 +103,8 @@ def expand_phases(
     prior_terminal_ids: list[str] = []
 
     for phase in phases:
+        if _evaluate_skip(phase, scratchpad):
+            continue
         effective_context = phase.context if phase.context is not None else context
         strategy = get_strategy(phase.pattern)
         new_tasks, _ = strategy.expand(phase, prior_terminal_ids, effective_context, scratchpad_prefix)
@@ -106,8 +119,24 @@ def expand_phases_with_status(
     *,
     context: str,
     scratchpad_prefix: str = "",
+    scratchpad: dict | None = None,
 ) -> tuple[list[dict], list[WorkflowPhaseStatus]]:
     """Like ``expand_phases``, but also returns per-phase status trackers.
+
+    When a phase has a ``skip_condition`` that is met, no tasks are created
+    and a :class:`WorkflowPhaseStatus` with ``status="skipped"`` is returned
+    for that phase.  Downstream phases still run normally.
+
+    Parameters
+    ----------
+    phases:
+        Ordered list of phase specifications.
+    context:
+        Global workflow context string embedded in every task prompt.
+    scratchpad_prefix:
+        Prefix for scratchpad keys embedded in prompts.
+    scratchpad:
+        Optional scratchpad dict for evaluating ``skip_condition`` fields.
 
     Returns
     -------
@@ -118,6 +147,18 @@ def expand_phases_with_status(
     prior_terminal_ids: list[str] = []
 
     for phase in phases:
+        if _evaluate_skip(phase, scratchpad):
+            # Create a SKIPPED status tracker — no task IDs.
+            skipped_ps = WorkflowPhaseStatus(
+                name=phase.name,
+                pattern=phase.pattern,
+                task_ids=[],
+            )
+            skipped_ps.mark_skipped()
+            all_statuses.append(skipped_ps)
+            # prior_terminal_ids unchanged: downstream phases inherit the
+            # same deps as if this phase completed normally.
+            continue
         effective_context = phase.context if phase.context is not None else context
         strategy = get_strategy(phase.pattern)
         new_tasks, new_statuses = strategy.expand(phase, prior_terminal_ids, effective_context, scratchpad_prefix)
@@ -140,9 +181,11 @@ __all__ = [
     "PhaseStrategy",
     "SingleConfig",
     "SingleStrategy",
+    "SkipCondition",
     "StrategyConfig",
     "WorkflowPhaseStatus",
     "_VALID_PATTERNS",
+    "_evaluate_skip",
     "_make_task_spec",
     "_phase_prompt",
     "_terminal_ids",

@@ -34,6 +34,7 @@ from tmux_orchestrator.web.schemas import (
 def build_workflows_router(
     orchestrator: Any,
     auth: Callable,
+    scratchpad: dict | None = None,
 ) -> APIRouter:
     """Build and return the workflows APIRouter.
 
@@ -105,8 +106,19 @@ def build_workflows_router(
             from tmux_orchestrator.phase_executor import (  # noqa: PLC0415
                 AgentSelector,
                 PhaseSpec,
+                SkipCondition,
                 expand_phases_with_status,
             )
+
+            def _to_domain_skip_condition(m: Any) -> Any:
+                """Convert a SkipConditionModel → domain SkipCondition dataclass."""
+                if m is None:
+                    return None
+                return SkipCondition(
+                    key=m.key,
+                    value=m.value,
+                    negate=m.negate,
+                )
 
             def _to_domain_strategy_config(m: Any) -> Any:
                 """Convert a StrategyConfigModel → domain StrategyConfig dataclass."""
@@ -163,13 +175,17 @@ def build_workflows_router(
                         required_tags=p.required_tags,
                         timeout=p.timeout,
                         strategy_config=_to_domain_strategy_config(p.strategy_config),
+                        skip_condition=_to_domain_skip_condition(
+                            getattr(p, "skip_condition", None)
+                        ),
                     )
                 )
-    
+
             task_specs, phase_statuses = expand_phases_with_status(
                 phase_specs,
                 context=body.context,
                 scratchpad_prefix=f"wf/{run_id_prefix}",
+                scratchpad=scratchpad,
             )
         else:
             # Legacy tasks= path

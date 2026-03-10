@@ -394,6 +394,56 @@ StrategyConfigModel = Annotated[
 ]
 
 
+class SkipConditionModel(BaseModel):
+    """Pydantic schema for a phase skip condition.
+
+    When present on a :class:`PhaseSpecModel`, the orchestrator evaluates
+    this condition against the scratchpad at workflow dispatch time.  If the
+    condition is met, the phase is skipped (no task created; downstream phases
+    still run normally).
+
+    Attributes
+    ----------
+    key:
+        Scratchpad key to check.
+    value:
+        If non-empty: skip when ``scratchpad[key] == value``.
+        If empty (default): skip when ``key`` exists in the scratchpad.
+    negate:
+        When ``True``, invert the condition (skip when NOT met).
+
+    Examples
+    --------
+    Skip phase if build failed::
+
+        {"key": "build_status", "value": "failed"}
+
+    Skip phase if any value at key exists::
+
+        {"key": "already_done"}
+
+    Skip phase if key does NOT exist (run only when flag is set)::
+
+        {"key": "run_tests", "negate": true}
+
+    Design reference: DESIGN.md §10.68 (v1.1.36)
+    """
+
+    key: str = Field(description="Scratchpad key to check.")
+    value: str = Field(
+        default="",
+        description=(
+            "Expected scratchpad value. "
+            "When empty, skip if the key exists (any value). "
+            "When non-empty, skip if scratchpad[key] == value."
+        ),
+    )
+    negate: bool = Field(
+        default=False,
+        description="When True, invert the condition — skip when NOT met.",
+    )
+
+
 class AgentSelectorModel(BaseModel):
     """Agent selector for a workflow phase.
 
@@ -459,6 +509,15 @@ class PhaseSpecModel(BaseModel):
     strategy_config: StrategyConfigModel | None = Field(
         default=None,
         description="Typed strategy parameters for this phase. Discriminated by 'type'.",
+    )
+    skip_condition: SkipConditionModel | None = Field(
+        default=None,
+        description=(
+            "When set, the orchestrator evaluates this condition against the scratchpad "
+            "at dispatch time. If met, no task is created and the phase is marked SKIPPED "
+            "(dependent phases still run normally). "
+            "Design reference: DESIGN.md §10.68 (v1.1.36)."
+        ),
     )
 
     @field_validator("pattern")
