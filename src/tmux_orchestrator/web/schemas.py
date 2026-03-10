@@ -530,6 +530,19 @@ class PhaseSpecModel(BaseModel):
             "Design reference: DESIGN.md §10.79 (v1.2.3)."
         ),
     )
+    chain_branch: bool = Field(
+        default=False,
+        description=(
+            "When True, the next sequential phase will branch its worktree from this "
+            "phase's worktree branch (instead of from HEAD/main). "
+            "Requires agent_template to be set on both phases so that each phase has "
+            "an isolated worktree. This enables sequential file handoff: phase N commits "
+            "files to its branch; phase N+1 branches from there and sees those files. "
+            "The orchestrator records the branch in _ephemeral_agent_branches and the "
+            "workflow router calls WorktreeManager.create_from_branch() for the next phase. "
+            "Design reference: DESIGN.md §10.80 (v1.2.4)."
+        ),
+    )
 
     @field_validator("pattern")
     @classmethod

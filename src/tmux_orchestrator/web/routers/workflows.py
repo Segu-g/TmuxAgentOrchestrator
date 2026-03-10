@@ -188,6 +188,7 @@ def build_workflows_router(
                         getattr(p, "skip_condition", None)
                     ),
                     agent_template=getattr(p, "agent_template", None),
+                    chain_branch=getattr(p, "chain_branch", False),
                 )
 
             def _to_domain_phase_item(item: Any) -> Any:

@@ -319,6 +319,27 @@ class PhaseSpec:
     Research: Kubernetes Pod-per-Job pattern; ephemeral agent lifecycle.
     """
 
+    chain_branch: bool = False
+    """When True, the next sequential phase should branch from this phase's
+    worktree branch (not from HEAD/main).
+
+    Requires ``agent_template`` to be set (so that the ephemeral agent has
+    an isolated worktree branch to chain from).  Used together with
+    :class:`SequenceBlock` to thread file changes through a pipeline:
+    phase N's worktree branch becomes the source branch for phase N+1's
+    worktree, so phase N+1 sees all files committed by phase N.
+
+    The orchestrator records the branch name in ``_ephemeral_agent_branches``
+    after spawning the phase's agent; the workflow router reads this mapping
+    when spawning the next phase's agent and calls
+    ``WorktreeManager.create_from_branch(agent_id, source_branch)`` instead
+    of the default ``setup(agent_id, isolate=True)``.
+
+    Design reference: DESIGN.md §10.80 (v1.2.4)
+    Research: git worktree per-task sequential handoff; Codex worktree
+    Handoff pattern; series-parallel composition graphs (Springer 2000).
+    """
+
     def __post_init__(self) -> None:
         if self.pattern not in _VALID_PATTERNS:
             raise ValueError(
@@ -473,6 +494,7 @@ def _make_task_spec(
     target_group: str | None = None,
     timeout: int | None = None,
     agent_template: str | None = None,
+    chain_branch: bool = False,
 ) -> dict:
     """Build a task spec dict compatible with ``WorkflowTaskSpec``.
 
@@ -496,6 +518,8 @@ def _make_task_spec(
         spec["target_group"] = target_group
     if agent_template is not None:
         spec["agent_template"] = agent_template
+    if chain_branch:
+        spec["chain_branch"] = True
     return spec
 
 
@@ -638,6 +662,7 @@ class SingleStrategy:
             target_group=phase.agents.target_group,
             timeout=phase.timeout,
             agent_template=phase.agent_template,
+            chain_branch=phase.chain_branch,
         )
         ps = WorkflowPhaseStatus(name=phase.name, pattern="single", task_ids=[local_id])
         return [task], [ps]
@@ -673,6 +698,7 @@ class ParallelStrategy:
                     target_group=phase.agents.target_group,
                     timeout=phase.timeout,
                     agent_template=phase.agent_template,
+                    chain_branch=phase.chain_branch,
                 )
             )
             local_ids.append(local_id)

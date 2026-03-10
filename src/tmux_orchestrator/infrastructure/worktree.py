@@ -101,6 +101,72 @@ class WorktreeManager:
             self._owned[agent_id] = path
             return path
 
+    def create_from_branch(self, agent_id: str, source_branch: str) -> Path:
+        """Create a worktree for *agent_id*, branching from *source_branch*.
+
+        Unlike :meth:`setup` (which always branches from the current HEAD),
+        this method creates a new worktree and branch that starts from
+        *source_branch*.  This enables sequential branch chaining: phase N+1
+        sees all commits made by phase N without requiring a merge.
+
+        The new branch is named ``worktree/{agent_id}`` and the worktree is
+        placed at ``{repo_root}/.worktrees/{agent_id}/``.
+
+        Parameters
+        ----------
+        agent_id:
+            Unique ID for the new agent/worktree.
+        source_branch:
+            Existing branch to branch from (e.g. ``"worktree/worker-ephemeral-abc12345"``).
+
+        Returns
+        -------
+        Path
+            Filesystem path of the newly created worktree directory.
+
+        Raises
+        ------
+        RuntimeError
+            If *source_branch* does not exist or the git operation fails.
+
+        Design reference: DESIGN.md §10.80 (v1.2.4)
+        Research: git-worktree add -b <branch> <path> <source>;
+        Codex worktree Handoff pattern (developers.openai.com/codex);
+        Git Worktrees in the Age of AI Coding Agents (knowledge.buka.sh, 2025).
+        """
+        branch = f"worktree/{agent_id}"
+        wt_path = self._worktrees_dir / agent_id
+
+        with self._lock:
+            # Clean up any leftover worktree/branch from a previous run.
+            if wt_path.exists():
+                subprocess.run(
+                    ["git", "worktree", "remove", "--force", str(wt_path)],
+                    cwd=self._repo_root,
+                    capture_output=True,
+                )
+                shutil.rmtree(wt_path, ignore_errors=True)
+            subprocess.run(
+                ["git", "branch", "-D", branch],
+                cwd=self._repo_root,
+                capture_output=True,
+            )
+
+            result = subprocess.run(
+                ["git", "worktree", "add", "-b", branch, str(wt_path), source_branch],
+                cwd=self._repo_root,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"git worktree add from branch {source_branch!r} failed: "
+                    f"{result.stderr.strip()}"
+                )
+            self._owned[agent_id] = wt_path
+            return wt_path
+
     def teardown(
         self,
         agent_id: str,

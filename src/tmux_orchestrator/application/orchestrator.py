@@ -401,6 +401,14 @@ class Orchestrator:
         # Design reference: DESIGN.md §10.79 (v1.2.3) — PhaseSpec.agent_template.
         # Research: Kubernetes Pod-per-Job pattern; ephemeral CI agent lifecycle.
         self._ephemeral_agents: set[str] = set()
+        # Branch tracking for ephemeral agents — maps agent_id → branch_name
+        # (e.g. "worker-ephemeral-abc12345" → "worktree/worker-ephemeral-abc12345").
+        # Populated in spawn_ephemeral_agent() after the agent starts.
+        # Consumed by the workflow router when chain_branch=True is set on the
+        # *next* sequential phase to call WorktreeManager.create_from_branch()
+        # instead of the default setup(isolate=True).
+        # Design reference: DESIGN.md §10.80 (v1.2.4)
+        self._ephemeral_agent_branches: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -2724,6 +2732,15 @@ class Orchestrator:
         self._ephemeral_agents.add(ephemeral_id)
         await agent.start()
 
+        # Track the worktree branch name for sequential branch-chain handoff.
+        # When the ephemeral agent uses isolate=True, it has a dedicated branch
+        # named "worktree/{ephemeral_id}".  The workflow router reads this mapping
+        # when chain_branch=True is set on the next sequential phase.
+        # Design reference: DESIGN.md §10.80 (v1.2.4)
+        branch_name = f"worktree/{ephemeral_id}" if template_cfg.isolate else ""
+        if branch_name:
+            self._ephemeral_agent_branches[ephemeral_id] = branch_name
+
         await self.bus.publish(Message(
             type=MessageType.STATUS,
             from_id="__orchestrator__",
@@ -2731,16 +2748,35 @@ class Orchestrator:
                 "event": "ephemeral_agent_spawned",
                 "agent_id": ephemeral_id,
                 "template_id": template_id,
+                "branch": branch_name,
             },
         ))
         logger.info(
-            "Ephemeral agent %s spawned from template %s", ephemeral_id, template_id
+            "Ephemeral agent %s spawned from template %s (branch=%s)",
+            ephemeral_id,
+            template_id,
+            branch_name or "<none>",
         )
         return ephemeral_id
 
     # ------------------------------------------------------------------
     # Workflow DAG tracking
     # ------------------------------------------------------------------
+
+    def get_worktree_manager(self):
+        """Return the WorktreeManager instance, or ``None`` if not configured.
+
+        The WorktreeManager provides git worktree lifecycle operations for
+        isolated agents.  It is ``None`` when the orchestrator is started
+        without a git repository context (e.g. in unit tests or when all
+        agents use ``isolate=False``).
+
+        Used by the workflow router to call :meth:`WorktreeManager.create_from_branch`
+        for sequential branch-chain phases (``chain_branch=True``).
+
+        Design reference: DESIGN.md §10.80 (v1.2.4)
+        """
+        return self._worktree_manager
 
     def get_workflow_manager(self):
         """Return the WorkflowManager instance.
