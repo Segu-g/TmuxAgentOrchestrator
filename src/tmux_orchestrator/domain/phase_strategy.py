@@ -935,8 +935,79 @@ class LoopBlock:
     phases: list  # list[PhaseItem] — type annotation uses forward ref
 
 
+# ---------------------------------------------------------------------------
+# SequenceBlock / ParallelBlock — structural composition blocks (v1.2.2)
+#
+# Design:
+# - ``SequenceBlock`` runs inner phases in order (each phase depends on the
+#   previous).  Equivalent to a named sub-sequence.  Backward compatible with
+#   the existing flat ``phases: [PhaseSpec, ...]`` list.
+# - ``ParallelBlock`` starts all inner phases simultaneously (fan-out).
+#   The block completes when ALL inner phases complete (fan-in).
+# - Both block types are named → usable in ``depends_on`` of sibling phases.
+# - Recursive: inner phases may themselves be SequenceBlock, ParallelBlock,
+#   LoopBlock, or PhaseSpec.
+#
+# Design references:
+# - Argo Workflows steps (list-of-lists: outer=sequential, inner=parallel)
+# - Argo Workflows DAG (explicit dependencies per task)
+# - DESIGN.md §10.78 (v1.2.2)
+# - Formalization of Workflows and Correctness Issues (Springer, 2000)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SequenceBlock:
+    """A named sequential composition of phase items.
+
+    Items in ``phases`` run in order: each phase implicitly depends on the
+    previous phase's terminal tasks (auto-chaining).  The block completes
+    when the last item completes.
+
+    Attributes
+    ----------
+    name:
+        Human-readable identifier.  Sibling phases may declare
+        ``depends_on: [<name>]`` to wait for this block to finish.
+    phases:
+        Ordered list of :data:`PhaseItem` objects.
+
+    Design reference: DESIGN.md §10.78 (v1.2.2)
+    Research: Argo Workflows steps template (outer list = sequential);
+    series-parallel computation graphs (Springer 2000).
+    """
+
+    name: str
+    phases: list  # list[PhaseItem]
+
+
+@dataclass
+class ParallelBlock:
+    """A named parallel composition of phase items (fan-out / fan-in).
+
+    All top-level items in ``phases`` start simultaneously — each receives
+    the same ``prior_ids`` (dependencies from the enclosing context).
+    The block completes when ALL items complete (fan-in).
+
+    Attributes
+    ----------
+    name:
+        Human-readable identifier.  Sibling phases may declare
+        ``depends_on: [<name>]`` to wait for ALL inner phases to complete.
+    phases:
+        List of :data:`PhaseItem` objects executed in parallel.
+
+    Design reference: DESIGN.md §10.78 (v1.2.2)
+    Research: Azure Durable Functions fan-out/fan-in pattern;
+    Argo Workflows steps inner list (parallel); Dagster dynamic fanout.
+    """
+
+    name: str
+    phases: list  # list[PhaseItem]
+
+
 # Type alias for the discriminated union of a phase item.
-# PhaseItem = PhaseSpec | LoopBlock
+# PhaseItem = PhaseSpec | LoopBlock | SequenceBlock | ParallelBlock
 PhaseItem = object  # Runtime alias; use isinstance checks for dispatch.
 
 

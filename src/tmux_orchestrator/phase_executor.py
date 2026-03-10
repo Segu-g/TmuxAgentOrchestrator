@@ -37,10 +37,12 @@ from tmux_orchestrator.domain.phase_strategy import (  # noqa: F401
     DebateStrategy,
     LoopBlock,
     LoopSpec,
+    ParallelBlock,
     ParallelConfig,
     ParallelStrategy,
     PhaseSpec,
     PhaseStrategy,
+    SequenceBlock,
     SingleConfig,
     SingleStrategy,
     SkipCondition,
@@ -460,6 +462,190 @@ def _expand_all_loop_iters(
     return all_tasks, all_statuses, current_prior
 
 
+def _expand_sequence_block(
+    block: "SequenceBlock",
+    *,
+    context: str,
+    scratchpad_prefix: str = "",
+    scratchpad: dict | None = None,
+    prior_ids: list[str] | None = None,
+) -> tuple[list[dict], list[WorkflowPhaseStatus], list[str]]:
+    """Expand a SequenceBlock into task specs, statuses, and terminal IDs.
+
+    Items in the block run in order (each phase depends on the previous
+    phase's terminal tasks — auto-chaining).  Supports nested blocks.
+
+    Parameters
+    ----------
+    block:
+        The :class:`SequenceBlock` to expand.
+    context:
+        Global workflow context string.
+    scratchpad_prefix:
+        Scratchpad key prefix.
+    scratchpad:
+        Optional scratchpad dict for skip_condition evaluation.
+    prior_ids:
+        External dependency IDs for the first item in the block.
+
+    Returns
+    -------
+    (task_specs, phase_statuses, terminal_ids)
+    - ``task_specs`` — flat list of task spec dicts.
+    - ``phase_statuses`` — per-phase status trackers.
+    - ``terminal_ids`` — local IDs of the terminal tasks of the last item.
+
+    Design reference: DESIGN.md §10.78 (v1.2.2)
+    """
+    prior_ids = prior_ids or []
+    all_tasks: list[dict] = []
+    all_statuses: list[WorkflowPhaseStatus] = []
+    current_prior = list(prior_ids)
+
+    for item in block.phases:
+        item_tasks, item_statuses, item_terminals = _expand_single_item(
+            item,
+            context=context,
+            scratchpad_prefix=scratchpad_prefix,
+            scratchpad=scratchpad,
+            prior_ids=current_prior,
+        )
+        all_tasks.extend(item_tasks)
+        all_statuses.extend(item_statuses)
+        current_prior = item_terminals
+
+    return all_tasks, all_statuses, current_prior
+
+
+def _expand_parallel_block(
+    block: "ParallelBlock",
+    *,
+    context: str,
+    scratchpad_prefix: str = "",
+    scratchpad: dict | None = None,
+    prior_ids: list[str] | None = None,
+) -> tuple[list[dict], list[WorkflowPhaseStatus], list[str]]:
+    """Expand a ParallelBlock into task specs, statuses, and terminal IDs.
+
+    All top-level items start simultaneously (same prior_ids — fan-out).
+    The block completes when ALL items complete (fan-in): the terminal IDs
+    are the union of each branch's terminal IDs.
+
+    Parameters
+    ----------
+    block:
+        The :class:`ParallelBlock` to expand.
+    context:
+        Global workflow context string.
+    scratchpad_prefix:
+        Scratchpad key prefix.
+    scratchpad:
+        Optional scratchpad dict for skip_condition evaluation.
+    prior_ids:
+        External dependency IDs for ALL items in the block.
+
+    Returns
+    -------
+    (task_specs, phase_statuses, terminal_ids)
+    - ``task_specs`` — flat list of task spec dicts.
+    - ``phase_statuses`` — per-phase status trackers.
+    - ``terminal_ids`` — union of terminal IDs from all branches (fan-in).
+
+    Design reference: DESIGN.md §10.78 (v1.2.2)
+    """
+    prior_ids = prior_ids or []
+    all_tasks: list[dict] = []
+    all_statuses: list[WorkflowPhaseStatus] = []
+    all_terminal_ids: list[str] = []
+
+    for item in block.phases:
+        item_tasks, item_statuses, item_terminals = _expand_single_item(
+            item,
+            context=context,
+            scratchpad_prefix=scratchpad_prefix,
+            scratchpad=scratchpad,
+            prior_ids=list(prior_ids),  # each branch gets the same prior_ids
+        )
+        all_tasks.extend(item_tasks)
+        all_statuses.extend(item_statuses)
+        all_terminal_ids.extend(item_terminals)
+
+    return all_tasks, all_statuses, all_terminal_ids
+
+
+def _expand_single_item(
+    item: object,
+    *,
+    context: str,
+    scratchpad_prefix: str = "",
+    scratchpad: dict | None = None,
+    prior_ids: list[str] | None = None,
+) -> tuple[list[dict], list[WorkflowPhaseStatus], list[str]]:
+    """Dispatch a single PhaseItem to its expander and return (tasks, statuses, terminals).
+
+    Handles ``PhaseSpec``, ``LoopBlock``, ``SequenceBlock``, and
+    ``ParallelBlock`` recursively.
+
+    Parameters
+    ----------
+    item:
+        A single :data:`PhaseItem` object.
+    context, scratchpad_prefix, scratchpad:
+        Passed through to inner expanders.
+    prior_ids:
+        Dependency IDs for the item's first tasks.
+
+    Returns
+    -------
+    (task_specs, phase_statuses, terminal_ids)
+
+    Design reference: DESIGN.md §10.78 (v1.2.2)
+    """
+    prior_ids = prior_ids or []
+
+    if isinstance(item, SequenceBlock):
+        return _expand_sequence_block(
+            item,
+            context=context,
+            scratchpad_prefix=scratchpad_prefix,
+            scratchpad=scratchpad,
+            prior_ids=prior_ids,
+        )
+    if isinstance(item, ParallelBlock):
+        return _expand_parallel_block(
+            item,
+            context=context,
+            scratchpad_prefix=scratchpad_prefix,
+            scratchpad=scratchpad,
+            prior_ids=prior_ids,
+        )
+    if isinstance(item, LoopBlock):
+        loop_tasks, loop_statuses, loop_terminals = _expand_all_loop_iters(
+            item,
+            context=context,
+            scratchpad_prefix=scratchpad_prefix,
+            prior_ids=prior_ids,
+        )
+        return loop_tasks, loop_statuses, loop_terminals
+    # PhaseSpec
+    phase: PhaseSpec = item  # type: ignore[assignment]
+    if _evaluate_skip(phase, scratchpad):
+        skipped_ps = WorkflowPhaseStatus(
+            name=phase.name,
+            pattern=phase.pattern,
+            task_ids=[],
+        )
+        skipped_ps.mark_skipped()
+        return [], [skipped_ps], list(prior_ids)
+    effective_context = phase.context if phase.context is not None else context
+    strategy = get_strategy(phase.pattern)
+    new_tasks, new_statuses = strategy.expand(
+        phase, prior_ids, effective_context, scratchpad_prefix
+    )
+    terminals = _terminal_ids(phase, new_tasks)
+    return new_tasks, new_statuses, terminals
+
+
 def expand_phase_items_with_status(
     items: list,
     *,
@@ -469,29 +655,34 @@ def expand_phase_items_with_status(
     iter_num: int = 1,
     prev_scratchpad_keys: list[str] | None = None,
 ) -> tuple[list[dict], list[WorkflowPhaseStatus], dict[str, list[str]]]:
-    """Expand a mixed list of PhaseSpec and LoopBlock items.
+    """Expand a mixed list of PhaseSpec, LoopBlock, SequenceBlock, and ParallelBlock items.
 
     Processes each item in *items*:
 
     - ``PhaseSpec``: expanded using the usual strategy pattern (same as
       ``expand_phases_with_status``).
     - ``LoopBlock``: all ``loop.max`` iterations are pre-expanded into a
-      static chain of tasks via ``_expand_all_loop_iters``.  The LoopBlock's
-      name is recorded in the returned *loop_terminal_ids* dict so that outer
-      phases that ``depends_on`` the loop block name can resolve their
-      dependency.
+      static chain of tasks via ``_expand_all_loop_iters``.
+    - ``SequenceBlock``: inner phases run in order (each depends on the
+      previous).  Block name recorded in *block_terminal_ids*.
+    - ``ParallelBlock``: all inner phases start simultaneously (fan-out).
+      Block completes when ALL complete (fan-in).  Block name recorded in
+      *block_terminal_ids*.
+
+    The LoopBlock/SequenceBlock/ParallelBlock name is recorded in the returned
+    *block_terminal_ids* dict so that outer phases that ``depends_on`` the
+    block name can resolve their dependency.
 
     Parameters
     ----------
     items:
-        Mixed list of :class:`PhaseSpec` and :class:`LoopBlock` objects.
+        Mixed list of phase items.
     context:
         Global workflow context string.
     scratchpad_prefix:
         Scratchpad key prefix.
     scratchpad:
-        Current scratchpad state for evaluating ``skip_condition`` fields
-        (only applied to ``PhaseSpec`` items, not loop bodies).
+        Current scratchpad state for evaluating ``skip_condition`` fields.
     iter_num:
         Unused (kept for API compatibility); iteration numbering is internal.
     prev_scratchpad_keys:
@@ -499,34 +690,37 @@ def expand_phase_items_with_status(
 
     Returns
     -------
-    (task_specs, phase_statuses, loop_terminal_ids)
+    (task_specs, phase_statuses, block_terminal_ids)
     - ``task_specs`` — flat list of task spec dicts.
     - ``phase_statuses`` — per-phase status trackers.
-    - ``loop_terminal_ids`` — mapping from LoopBlock name to the local IDs
-      of its terminal tasks (used to resolve ``depends_on: [loop_name]``
-      in outer phases that follow the loop).
+    - ``block_terminal_ids`` — mapping from block name to the local IDs
+      of its terminal tasks (used to resolve ``depends_on: [block_name]``
+      in outer phases that follow the block).
 
-    Design reference: DESIGN.md §10.76 (v1.1.44)
+    Design references:
+    - DESIGN.md §10.76 (v1.1.44 — LoopBlock)
+    - DESIGN.md §10.78 (v1.2.2 — SequenceBlock + ParallelBlock)
     """
     all_tasks: list[dict] = []
     all_statuses: list[WorkflowPhaseStatus] = []
-    loop_terminal_ids: dict[str, list[str]] = {}
+    block_terminal_ids: dict[str, list[str]] = {}
     prior_terminal_ids: list[str] = []
 
     for item in items:
-        if isinstance(item, LoopBlock):
-            loop_tasks, loop_statuses, loop_terminals = _expand_all_loop_iters(
+        if isinstance(item, (LoopBlock, SequenceBlock, ParallelBlock)):
+            item_tasks, item_statuses, item_terminals = _expand_single_item(
                 item,
                 context=context,
                 scratchpad_prefix=scratchpad_prefix,
+                scratchpad=scratchpad,
                 prior_ids=prior_terminal_ids,
             )
-            all_tasks.extend(loop_tasks)
-            all_statuses.extend(loop_statuses)
-            # Record terminal IDs for this loop block name so outer phases
-            # that declare depends_on: [loop_block.name] can be wired up.
-            loop_terminal_ids[item.name] = list(loop_terminals)
-            prior_terminal_ids = list(loop_terminals)
+            all_tasks.extend(item_tasks)
+            all_statuses.extend(item_statuses)
+            # Record terminal IDs for this block name so outer phases
+            # that declare depends_on: [block.name] can be wired up.
+            block_terminal_ids[item.name] = list(item_terminals)
+            prior_terminal_ids = list(item_terminals)
         else:
             phase: PhaseSpec = item  # type: ignore[assignment]
             if _evaluate_skip(phase, scratchpad):
@@ -547,7 +741,7 @@ def expand_phase_items_with_status(
             all_statuses.extend(new_statuses)
             prior_terminal_ids = _terminal_ids(phase, new_tasks)
 
-    return all_tasks, all_statuses, loop_terminal_ids
+    return all_tasks, all_statuses, block_terminal_ids
 
 
 def is_until_condition_met(loop_block: "LoopBlock", scratchpad: dict) -> bool:
@@ -578,10 +772,12 @@ __all__ = [
     "DebateStrategy",
     "LoopBlock",
     "LoopSpec",
+    "ParallelBlock",
     "ParallelConfig",
     "ParallelStrategy",
     "PhaseSpec",
     "PhaseStrategy",
+    "SequenceBlock",
     "SingleConfig",
     "SingleStrategy",
     "SkipCondition",
@@ -590,6 +786,9 @@ __all__ = [
     "_VALID_PATTERNS",
     "_evaluate_skip",
     "_expand_all_loop_iters",
+    "_expand_parallel_block",
+    "_expand_sequence_block",
+    "_expand_single_item",
     "_inject_header_into_phase",
     "_iter_prefix_header",
     "_make_task_spec",

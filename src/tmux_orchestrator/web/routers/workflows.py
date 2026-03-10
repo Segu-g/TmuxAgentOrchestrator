@@ -24,8 +24,10 @@ from tmux_orchestrator.web.schemas import (
     LoopBlockModel,
     MobReviewWorkflowSubmit,
     PairWorkflowSubmit,
+    ParallelBlockModel,
     PdcaWorkflowSubmit,
     RedBlueWorkflowSubmit,
+    SequenceBlockModel,
     SkipConditionModel,
     SpecFirstTddWorkflowSubmit,
     SpecFirstWorkflowSubmit,
@@ -106,7 +108,9 @@ def build_workflows_router(
                 DebateConfig,
                 LoopBlock,
                 LoopSpec,
+                ParallelBlock,
                 ParallelConfig,
+                SequenceBlock,
                 SingleConfig,
             )
             from tmux_orchestrator.phase_executor import (  # noqa: PLC0415
@@ -186,7 +190,7 @@ def build_workflows_router(
                 )
 
             def _to_domain_phase_item(item: Any) -> Any:
-                """Convert a PhaseItemModel → domain PhaseSpec or LoopBlock."""
+                """Convert a PhaseItemModel → domain PhaseSpec, LoopBlock, SequenceBlock, or ParallelBlock."""
                 # Detect LoopBlockModel by presence of 'loop' attribute.
                 if isinstance(item, LoopBlockModel):
                     loop_model = item.loop
@@ -197,12 +201,26 @@ def build_workflows_router(
                         loop=LoopSpec(max=loop_model.max, until=until),
                         phases=inner_phases,
                     )
+                # Detect SequenceBlockModel by presence of 'sequence' structure.
+                if isinstance(item, SequenceBlockModel):
+                    inner_phases = [_to_domain_phase_item(p) for p in item.phases]
+                    return SequenceBlock(name=item.name, phases=inner_phases)
+                # Detect ParallelBlockModel by presence of 'parallel' structure.
+                if isinstance(item, ParallelBlockModel):
+                    inner_phases = [_to_domain_phase_item(p) for p in item.phases]
+                    return ParallelBlock(name=item.name, phases=inner_phases)
                 # Otherwise treat as PhaseSpecModel.
                 # If it arrived as a dict (e.g. from list[Any]), parse it first.
                 if isinstance(item, dict):
                     if "loop" in item:
                         from tmux_orchestrator.web.schemas import LoopBlockModel as LBM  # noqa: PLC0415
                         return _to_domain_phase_item(LBM.model_validate(item))
+                    if "sequence" in item:
+                        from tmux_orchestrator.web.schemas import SequenceBlockModel as SQM  # noqa: PLC0415
+                        return _to_domain_phase_item(SQM.model_validate(item["sequence"] if isinstance(item.get("sequence"), dict) else item))
+                    if "parallel" in item:
+                        from tmux_orchestrator.web.schemas import ParallelBlockModel as PBM  # noqa: PLC0415
+                        return _to_domain_phase_item(PBM.model_validate(item["parallel"] if isinstance(item.get("parallel"), dict) else item))
                     from tmux_orchestrator.web.schemas import PhaseSpecModel as PSM  # noqa: PLC0415
                     return _to_domain_phase_spec(PSM.model_validate(item))
                 return _to_domain_phase_spec(item)
@@ -210,9 +228,11 @@ def build_workflows_router(
             run_id_prefix = uuid.uuid4().hex[:8]
             phase_sp = f"wf/{run_id_prefix}"
 
-            # Check whether any item is a LoopBlock (mixed-item list).
+            # Check whether any item is a block type (LoopBlock, SequenceBlock, ParallelBlock).
+            # Any block type triggers the block-aware expander path.
             has_loop = any(
-                isinstance(p, LoopBlockModel) or (isinstance(p, dict) and "loop" in p)
+                isinstance(p, (LoopBlockModel, SequenceBlockModel, ParallelBlockModel))
+                or (isinstance(p, dict) and ("loop" in p or "sequence" in p or "parallel" in p))
                 for p in body.phases
             )
 
@@ -232,16 +252,16 @@ def build_workflows_router(
                     scratchpad=scratchpad,
                 )
 
-                # Resolve depends_on references to loop block names in phase tasks.
-                # When a PhaseSpec (outer) declares depends_on: [loop_block_name],
-                # that local_id will not exist in task_specs — we need to wire it
-                # to the loop's terminal task IDs.
-                loop_names = set(_loop_terminals.keys())
-                if loop_names:
+                # Resolve depends_on references to block names (loop/sequence/parallel)
+                # in phase tasks.  When a PhaseSpec (outer) declares
+                # depends_on: [block_name], that local_id will not exist in
+                # task_specs — we need to wire it to the block's terminal task IDs.
+                block_names = set(_loop_terminals.keys())
+                if block_names:
                     for spec in task_specs:
                         new_deps = []
                         for dep in spec.get("depends_on", []):
-                            if dep in loop_names:
+                            if dep in block_names:
                                 new_deps.extend(_loop_terminals[dep])
                             else:
                                 new_deps.append(dep)

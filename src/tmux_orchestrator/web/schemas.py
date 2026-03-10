@@ -596,11 +596,73 @@ class LoopBlockModel(BaseModel):
     )
 
 
+class SequenceBlockModel(BaseModel):
+    """Pydantic schema for a named sequential composition of phase items.
+
+    Items in ``phases`` run in order: each phase depends on the previous
+    phase's terminal tasks (auto-chaining).  The block completes when the
+    last item completes.
+
+    Attributes
+    ----------
+    name:
+        Human-readable identifier.  Sibling phases may declare
+        ``depends_on: [<name>]`` to wait for this block to finish.
+    phases:
+        Ordered list of inner :data:`PhaseItemModel` objects.
+
+    Design reference: DESIGN.md §10.78 (v1.2.2)
+    Research: Argo Workflows steps template (outer list = sequential);
+    series-parallel computation graphs.
+    """
+
+    name: str = Field(description="Unique name for this sequence block.")
+    phases: list[Any] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of inner phase items "
+            "(PhaseSpecModel, SequenceBlockModel, ParallelBlockModel, LoopBlockModel)."
+        ),
+    )
+
+
+class ParallelBlockModel(BaseModel):
+    """Pydantic schema for a named parallel composition of phase items.
+
+    All top-level items in ``phases`` start simultaneously (fan-out).
+    The block completes when ALL items complete (fan-in).
+
+    Attributes
+    ----------
+    name:
+        Human-readable identifier.  Sibling phases may declare
+        ``depends_on: [<name>]`` to wait for ALL inner phases to complete.
+    phases:
+        List of inner :data:`PhaseItemModel` objects executed in parallel.
+
+    Design reference: DESIGN.md §10.78 (v1.2.2)
+    Research: Azure Durable Functions fan-out/fan-in; Argo Workflows steps
+    inner list (parallel); Dagster dynamic fanout.
+    """
+
+    name: str = Field(description="Unique name for this parallel block.")
+    phases: list[Any] = Field(
+        default_factory=list,
+        description=(
+            "List of inner phase items executed in parallel "
+            "(PhaseSpecModel, SequenceBlockModel, ParallelBlockModel, LoopBlockModel)."
+        ),
+    )
+
+
 # PhaseItemModel: discriminated union resolved at runtime.
-# JSON discrimination: objects with a 'loop' key are LoopBlockModel;
-# objects with a 'pattern' key are PhaseSpecModel.
+# JSON discrimination:
+#   objects with a 'loop' key     → LoopBlockModel
+#   objects with a 'sequence' key → SequenceBlockModel
+#   objects with a 'parallel' key → ParallelBlockModel
+#   objects with a 'pattern' key  → PhaseSpecModel
 # Pydantic v2 Union with smart union mode handles this automatically.
-PhaseItemModel = Union[LoopBlockModel, PhaseSpecModel]
+PhaseItemModel = Union[LoopBlockModel, SequenceBlockModel, ParallelBlockModel, PhaseSpecModel]
 
 
 class PdcaWorkflowSubmit(BaseModel):
