@@ -336,6 +336,29 @@ def build_tasks_router(
             return {"updated": True, "task_id": task_id, "priority": body.priority}
         return {"updated": False, "task_id": task_id}
 
+    @router.patch(
+        "/tasks/{task_id}/priority",
+        summary="Update a queued task's priority (returns 404 if not found)",
+        dependencies=[Depends(auth)],
+    )
+    async def update_task_priority_strict(task_id: str, body: TaskPriorityUpdate) -> dict:
+        """Update the priority of a task that is still in the pending queue.
+
+        Unlike ``PATCH /tasks/{task_id}``, this endpoint returns HTTP 404 when
+        the task is not found (already dispatched, completed, or never submitted).
+
+        Design reference: DESIGN.md §10.82 — v1.2.6 Dynamic Task Priority Update.
+        Reference: Postman Blog "HTTP PATCH Method: Partial Updates for RESTful APIs"
+          https://blog.postman.com/http-patch-method/
+        """
+        updated = await orchestrator.update_task_priority(task_id, body.priority)
+        if not updated:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Task {task_id!r} not found or already dispatched",
+            )
+        return {"task_id": task_id, "priority": body.priority, "updated": True}
+
     @router.delete(
         "/tasks/{task_id}",
         summary="Cancel a task by ID (queued or in-progress)",

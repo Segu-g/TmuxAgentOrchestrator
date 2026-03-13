@@ -148,6 +148,7 @@ def build_system(
                 merge_on_stop=agent_cfg.merge_on_stop,
                 merge_target=agent_cfg.merge_target,
                 cleanup_subdir=agent_cfg.cleanup_subdir,
+                keep_branch_on_stop=agent_cfg.keep_branch_on_stop,
             )
         else:
             raise ValueError(f"Unknown agent type: {agent_cfg.type!r}")

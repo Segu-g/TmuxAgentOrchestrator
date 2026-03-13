@@ -66,6 +66,22 @@ class AgentConfig:
     # Reference: Python docs "tempfile.TemporaryDirectory" cleanup semantics;
     #   DESIGN.md §10.69 (v1.1.37 — .agent/{id}/ cleanup on stop)
     cleanup_subdir: bool = True
+    # keep_branch_on_stop: when True and isolate=True, the worktree filesystem
+    #   is removed on stop but the git branch ("worktree/{agent_id}") is kept.
+    #   This allows successor phases or post-mortem inspection to read the agent's
+    #   committed artifacts from git history even after the worktree is gone.
+    #
+    # When False (default), both the worktree filesystem and the branch are
+    #   deleted on stop (existing behaviour, WorktreeManager.teardown()).
+    # When True, only the filesystem is removed (WorktreeManager.keep_branch()).
+    #
+    # This is automatically set to True for ephemeral agents in branch-chain
+    #   workflows (chain_branch=True) so that successor phases can branch from
+    #   the predecessor's committed state via create_from_branch().
+    #
+    # Reference: git-worktree(1) — "git worktree remove" keeps the branch;
+    #   DESIGN.md §10.82 (v1.2.6 — branch artifact persistence)
+    keep_branch_on_stop: bool = False
 
 
 @dataclass

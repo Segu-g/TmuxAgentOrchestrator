@@ -61,6 +61,13 @@ class Agent(ABC):
         # calling agent.start() when chain_branch=True in the workflow router.
         # Design reference: DESIGN.md §10.81
         self._source_branch: str | None = None
+        # Branch artifact persistence (v1.2.6): when True and isolate=True,
+        # _teardown_worktree calls WorktreeManager.keep_branch() instead of
+        # teardown(), preserving the git branch after the worktree filesystem
+        # is removed.  Successor phases can then branch from this preserved
+        # branch via create_from_branch().
+        # Design reference: DESIGN.md §10.82
+        self._keep_branch_on_stop: bool = False
         # Startup time (set by _record_start_time() in concrete start() implementations)
         self.started_at: datetime | None = None
 
@@ -285,21 +292,42 @@ class Agent(ABC):
     async def _teardown_worktree(self) -> None:
         """Remove the agent's worktree (no-op when not isolated or not set up).
 
+        When ``_keep_branch_on_stop`` is True (branch artifact persistence,
+        v1.2.6), removes the worktree filesystem via
+        ``WorktreeManager.keep_branch()`` but leaves the git branch intact.
+        This preserves commits for successor phases or post-mortem inspection.
+
         When ``_merge_on_stop`` is True, the agent's worktree branch is
         squash-merged into the main repo HEAD before removal (see
         ``WorktreeManager.teardown(merge_to_base=True)``).
+
+        Design reference: DESIGN.md §10.82 (v1.2.6)
         """
         if self._worktree_manager is None or self.worktree_path is None:
             return
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: self._worktree_manager.teardown(  # type: ignore[union-attr]
+        if self._keep_branch_on_stop:
+            # Remove worktree filesystem but keep the git branch so successor
+            # phases (or post-mortem inspection) can access the committed state.
+            await loop.run_in_executor(
+                None,
+                lambda: self._worktree_manager.keep_branch(self.id),  # type: ignore[union-attr]
+            )
+            logger.info(
+                "Agent %s: worktree removed, branch 'worktree/%s' preserved "
+                "(keep_branch_on_stop=True)",
                 self.id,
-                merge_to_base=self._merge_on_stop,
-                merge_target=self._merge_target,
-            ),
-        )
+                self.id,
+            )
+        else:
+            await loop.run_in_executor(
+                None,
+                lambda: self._worktree_manager.teardown(  # type: ignore[union-attr]
+                    self.id,
+                    merge_to_base=self._merge_on_stop,
+                    merge_target=self._merge_target,
+                ),
+            )
         self.worktree_path = None
 
     def _write_context_file(self, cwd: Path) -> None:

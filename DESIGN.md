@@ -6085,3 +6085,58 @@ if task.metadata.get("_ephemeral_template") and task.target_agent is None:
 - Phase 2 git log: `phase2: add reply → phase1: add message → init`
 - Phase 2 scratchpad reply: `Phase 2 received: Hello from phase 1`
 - 遅延スポーンにより Phase 1 のコミット後に Phase 2 の worktree が作成されることを確認
+
+## §10.82 — v1.2.6: タスク優先度動的更新 + ブランチ証跡保持
+
+### 選定理由
+
+**選択 A**: `PATCH /tasks/{id}/priority` + `AsyncPriorityTaskQueue.update_priority()` — ランタイム中にキュー内タスクの優先度を動的変更する機能。
+
+**選択 B**: `AgentConfig.keep_branch_on_stop` — エフェメラルエージェント停止時に worktree ファイルシステムを削除しつつ git ブランチを保持し、後続フェーズがコミット済みアーティファクトにアクセスできるようにする機能。
+
+**なぜ選択したか**:
+- A: `update_task_priority` は Orchestrator に実装済みだが lazy deletion パターンなし。`AsyncPriorityTaskQueue` に `update_priority()` を追加し、専用 REST エンドポイント `PATCH /tasks/{id}/priority` (404 on not-found) を追加。
+- B: `chain_branch` ワークフローでエフェメラルエージェントが停止すると worktree とブランチの両方が削除され、後続フェーズが前フェーズのコミットを参照できない問題を解決。
+
+### 調査記録
+
+**調査 1: Priority Queue runtime update — lazy deletion (heapq, Python asyncio)**
+- 出典: Python 公式ドキュメント "heapq — Heap queue algorithm" (Priority Queue Implementation Notes)
+  URL: https://docs.python.org/3/library/heapq.html
+- lazy deletion パターン: `_deleted_seqs: set[int]` でシーケンス番号を管理し、`get()` 時にスキップ。
+- `_pending: dict[str, tuple[int, int, Task]]` で pending タスクを追跡。
+- 参照: Sedgewick & Wayne "Algorithms" 4th ed. §2.4; Liu & Layland JACM 20(1) 1973.
+
+**調査 2: git worktree branch keep after remove**
+- 出典: git-worktree(1) https://git-scm.com/docs/git-worktree
+- `git worktree remove` はリンク worktree ディレクトリのみ削除; ブランチは残る (期待動作)。
+- 出典: "Using Git Worktrees for Multi-Feature Development with AI Agents" — Nick Mitchinson (2025)
+  URL: https://www.nrmitchi.com/2025/10/using-git-worktrees-for-multi-feature-development-with-ai-agents/
+- エージェント停止後もブランチを残すことで後続フェーズが `create_from_branch()` で参照可能。
+
+**調査 3: REST PATCH task priority update idempotent API design**
+- 出典: Postman Blog "HTTP PATCH Method: Partial Updates for RESTful APIs" (2025)
+  URL: https://blog.postman.com/http-patch-method/
+- 出典: mscharhag.com "Making POST and PATCH requests idempotent" (2025)
+  URL: https://www.mscharhag.com/api-design/rest-making-post-patch-idempotent
+- `PATCH /tasks/{id}/priority` は明示的サブリソース。タスク未発見時 HTTP 404。
+
+### Implementation Summary
+
+**変更ファイル (Feature A)**:
+- `src/tmux_orchestrator/application/task_queue.py`: `update_priority()` + `_pending` + `_deleted_seqs` 追加; `put()` / `get()` / `empty()` / `qsize()` を lazy deletion 対応に更新
+- `src/tmux_orchestrator/application/orchestrator.py`: `update_task_priority()` を lazy deletion 優先に更新; `list_tasks()` で `_deleted_seqs` フィルタ追加; `cancel_task()` で `_pending` 更新追加
+- `src/tmux_orchestrator/web/routers/tasks.py`: `PATCH /tasks/{task_id}/priority` エンドポイント追加 (404 on not-found)
+
+**変更ファイル (Feature B)**:
+- `src/tmux_orchestrator/application/config.py`: `AgentConfig.keep_branch_on_stop: bool = False` 追加
+- `src/tmux_orchestrator/agents/base.py`: `_keep_branch_on_stop: bool = False` 属性追加; `_teardown_worktree()` を `keep_branch` 対応に更新
+- `src/tmux_orchestrator/agents/claude_code.py`: `keep_branch_on_stop` 引数追加; `_write_agent_claude_md()` にアーティファクト永続化セクション追加
+- `src/tmux_orchestrator/application/factory.py`: `keep_branch_on_stop` を `ClaudeCodeAgent` コンストラクタに渡す
+- `src/tmux_orchestrator/application/orchestrator.py`: `spawn_ephemeral_agent()` で isolated エフェメラルエージェントに `keep_branch_on_stop=True` を自動設定
+
+**新規ファイル**:
+- `tests/test_task_priority_update.py`: 13 テスト (Feature A)
+- `tests/test_branch_artifact_persistence.py`: 12 テスト (Feature B)
+
+**テスト数**: 3020 → 3057 (37 新規)

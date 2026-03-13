@@ -75,6 +75,11 @@ class ClaudeCodeAgent(Agent):
         # Has no effect when isolate=True (worktree lifecycle handled by WorktreeManager).
         # Reference: DESIGN.md §10.69 (v1.1.37)
         cleanup_subdir: bool = True,
+        # keep_branch_on_stop: when True and isolate=True, the worktree filesystem
+        # is removed but the git branch is preserved.  Used for branch-chain
+        # handoffs where the successor phase needs the committed state.
+        # Reference: DESIGN.md §10.82 (v1.2.6)
+        keep_branch_on_stop: bool = False,
     ) -> None:
         super().__init__(agent_id, bus, task_timeout=task_timeout)
         self.mailbox = mailbox
@@ -87,6 +92,7 @@ class ClaudeCodeAgent(Agent):
         self._merge_on_stop = merge_on_stop
         self._merge_target = merge_target
         self._cleanup_subdir = cleanup_subdir
+        self._keep_branch_on_stop = keep_branch_on_stop
         self._cwd_override = cwd_override
         self._session_name = session_name
         self._web_base_url = web_base_url
@@ -420,6 +426,38 @@ Use these four strategies to keep your context window focused and avoid context 
 you already created. If you notice these, run `/summarize` immediately.
 """
 
+        # Artifact persistence section: shown only when running in an isolated
+        # worktree (isolate=True).  Instructs the agent to commit output files
+        # to git before calling /task-complete.
+        # Design reference: DESIGN.md §10.82 (v1.2.6 — branch artifact persistence)
+        artifact_persistence_section = ""
+        if self._isolate:
+            artifact_persistence_section = f"""
+## Artifact Persistence
+
+You are running in an isolated git worktree. Your worktree **filesystem is deleted**
+when you stop, but git commits on your branch are preserved.
+
+To ensure your output files survive after you stop, you MUST commit them to git
+before calling `/task-complete`:
+
+```bash
+git add -A
+git commit -m "artifacts: <brief description of what you produced>"
+```
+
+**This is required** — any file that is not committed will be lost when your
+worktree is removed. The git commit is the only persistent record of your work.
+
+Successor phases in a pipeline can read your committed files via:
+
+```bash
+git show worktree/{self.id}:<path/to/file>
+```
+
+or by branching from your branch (chain_branch workflow).
+"""
+
         content = f"""\
 # Agent: {self.id}
 
@@ -485,7 +523,7 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
 - Notes file: `NOTES.md` (your structured scratchpad — keep it updated)
 - Plan file: `PLAN.md` (created by `/plan`, deleted when task is done)
 - Slash commands: available in `.claude/commands/` — use plain `/task-complete` etc.
-{context_files_section}{custom_section}{context_strategies_section}
+{context_files_section}{custom_section}{context_strategies_section}{artifact_persistence_section}
 ## Slash Command Reference
 
 Slash commands are copied into `.claude/commands/` at agent startup so you can

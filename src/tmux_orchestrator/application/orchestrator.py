@@ -1068,6 +1068,10 @@ class Orchestrator:
         queued tasks.
         """
         items = list(self._task_queue._queue)  # type: ignore[attr-defined]
+        # When using AsyncPriorityTaskQueue (v1.2.6+), filter out stale heap entries
+        # that were superseded by update_priority() (lazy-deletion pattern).
+        # _deleted_seqs holds the sequence numbers of stale entries.
+        _deleted_seqs: set[int] = getattr(self._task_queue, "_deleted_seqs", set())
         result = [
             {
                 "priority": p,
@@ -1084,6 +1088,7 @@ class Orchestrator:
                 **({"target_group": t.target_group} if t.target_group else {}),
             }
             for p, _seq, t in sorted(items, key=lambda x: (x[0], x[1]))
+            if _seq not in _deleted_seqs
         ]
         # Append waiting tasks (held pending dependency resolution)
         for t in self._waiting_tasks.values():
@@ -1110,49 +1115,51 @@ class Orchestrator:
         """Update the priority of a pending task in-place.
 
         Locates *task_id* in the priority queue, changes its priority to
-        *new_priority*, and rebuilds the heap to restore the heap invariant.
+        *new_priority*, and restores the heap invariant.
         Returns ``True`` if the task was found and updated; ``False`` if not
         found (already dispatched, completed, or never submitted).
 
         A ``task_priority_updated`` STATUS event is published on success.
 
-        Design note: Python's ``heapq`` module does not provide a
-        ``decrease_key`` / ``increase_key`` operation directly. The standard
-        approach (Python docs "heapq — Priority Queue Implementation Notes") is
-        to mark entries as invalid and add a replacement, or to rebuild the
-        heap after mutating an element. We mutate the tuple in-place and call
-        ``heapq.heapify`` for O(n) rebuild — acceptable for the small queue
-        sizes expected (< 10 000 tasks). This is equivalent to the
-        ``decrease_key`` / ``increase_key`` operations described in Sedgewick &
-        Wayne "Algorithms" 4th ed. §2.4 and the RTOS priority-change pattern
-        described in Liu & Layland (1973) "Scheduling Algorithms for
-        Multiprogramming in a Hard Real-Time Environment".
+        Implementation selects the best available strategy:
+        1. If the queue implements ``update_priority()`` (lazy-deletion pattern,
+           AsyncPriorityTaskQueue v1.2.6+), delegates to it for O(log n) update.
+        2. Falls back to a full heap rebuild (O(n)) for injected mock queues or
+           older queue implementations.
 
-        Reference:
-        - Python heapq docs: https://docs.python.org/3/library/heapq.html
+        Design references:
+        - Python heapq docs "Priority Queue Implementation Notes"
+          https://docs.python.org/3/library/heapq.html
         - Liu, C.L.; Layland, J.W. (1973). "Scheduling Algorithms for
           Multiprogramming in a Hard Real-Time Environment". JACM 20(1).
         - Sedgewick & Wayne "Algorithms" 4th ed. §2.4 — Priority Queues.
+        - DESIGN.md §10.82 — v1.2.6 Dynamic Task Priority Update.
         """
-        items = list(self._task_queue._queue)  # type: ignore[attr-defined]
-        new_items = []
-        found = False
-        for p, seq, t in items:
-            if t.id == task_id:
-                t.priority = new_priority
-                new_items.append((new_priority, seq, t))
-                found = True
-            else:
-                new_items.append((p, seq, t))
+        # Prefer the queue's built-in update_priority() which uses lazy-deletion
+        # (O(log n), no heap rebuild, no duplication issues).
+        if hasattr(self._task_queue, "update_priority"):
+            found = self._task_queue.update_priority(task_id, new_priority)  # type: ignore[attr-defined]
+        else:
+            # Fallback: rebuild heap (O(n)) for injected queues without update_priority.
+            items = list(self._task_queue._queue)  # type: ignore[attr-defined]
+            new_items = []
+            found = False
+            for p, seq, t in items:
+                if t.id == task_id:
+                    t.priority = new_priority
+                    new_items.append((new_priority, seq, t))
+                    found = True
+                else:
+                    new_items.append((p, seq, t))
+
+            if found:
+                self._task_queue._queue.clear()  # type: ignore[attr-defined]
+                for item in new_items:
+                    self._task_queue._queue.append(item)  # type: ignore[attr-defined]
+                heapq.heapify(self._task_queue._queue)  # type: ignore[attr-defined]
 
         if not found:
             return False
-
-        # Rebuild the heap with the updated priority.
-        self._task_queue._queue.clear()  # type: ignore[attr-defined]
-        for item in new_items:
-            self._task_queue._queue.append(item)  # type: ignore[attr-defined]
-        heapq.heapify(self._task_queue._queue)  # type: ignore[attr-defined]
 
         await self.bus.publish(Message(
             type=MessageType.STATUS,
@@ -1278,6 +1285,10 @@ class Orchestrator:
             self._task_queue._unfinished_tasks -= 1  # type: ignore[attr-defined]
             if self._task_queue._unfinished_tasks == 0:  # type: ignore[attr-defined]
                 self._task_queue._finished.set()  # type: ignore[attr-defined]
+        # Also remove from _pending so empty() / qsize() return correct values
+        # (AsyncPriorityTaskQueue v1.2.6+ tracks live items in _pending).
+        if hasattr(self._task_queue, "_pending"):
+            self._task_queue._pending.pop(task_id, None)  # type: ignore[attr-defined]
 
         await self.bus.publish(Message(
             type=MessageType.STATUS,
@@ -2773,6 +2784,15 @@ class Orchestrator:
         )
         effective_wm = self._worktree_manager if template_cfg.isolate else None
 
+        # Ephemeral isolated agents auto-enable keep_branch_on_stop so that
+        # successor chain_branch phases can branch from their committed state.
+        # This can be overridden by the template config setting keep_branch_on_stop=False.
+        # Design reference: DESIGN.md §10.82 (v1.2.6)
+        effective_keep_branch = (
+            template_cfg.keep_branch_on_stop
+            or template_cfg.isolate  # auto-enable for isolated ephemeral agents
+        )
+
         agent: Agent = ClaudeCodeAgent(
             agent_id=ephemeral_id,
             bus=self.bus,
@@ -2799,6 +2819,7 @@ class Orchestrator:
             tags=list(template_cfg.tags),
             merge_on_stop=False,  # ephemeral agents never merge
             cleanup_subdir=template_cfg.cleanup_subdir,
+            keep_branch_on_stop=effective_keep_branch,
         )
 
         self.registry.register(agent)
