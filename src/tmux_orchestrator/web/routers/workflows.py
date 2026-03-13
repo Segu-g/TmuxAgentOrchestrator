@@ -372,7 +372,45 @@ def build_workflows_router(
             # Must be called AFTER run.phases is assigned so register_phases() can
             # iterate over the phases with their remapped global task_ids.
             wm.register_phases(run.id)
-    
+            # Register loop until runtime evaluation (v1.2.7).
+            # For each LoopBlock with an until condition, build per-iteration
+            # task ID lists from the local_to_global mapping and register them
+            # with the WorkflowManager for server-side condition evaluation.
+            if has_loop:
+                from tmux_orchestrator.domain.phase_strategy import LoopBlock as _LB  # noqa: PLC0415
+
+                def _register_loop_items(items: list, wf_run_id: str, sp: str) -> None:
+                    """Recursively register LoopBlocks with until conditions."""
+                    for dom_item in items:
+                        if not isinstance(dom_item, _LB):
+                            continue
+                        loop_b = dom_item
+                        if loop_b.loop.until is None:
+                            continue
+                        # Build per-iteration global task ID lists by matching
+                        # the naming pattern used by expand_loop_iter:
+                        # local_id = f"{loop_name}_i{iter_num}_{original_local_id}"
+                        iterations_global: list[list[str]] = []
+                        for iter_num in range(1, loop_b.loop.max + 1):
+                            prefix = f"{loop_b.name}_i{iter_num}_"
+                            iter_tids = [
+                                global_tid
+                                for local_id, global_tid in local_to_global.items()
+                                if local_id.startswith(prefix)
+                            ]
+                            if iter_tids:
+                                iterations_global.append(iter_tids)
+                        if iterations_global:
+                            wm.register_loop(
+                                wf_run_id,
+                                loop_b.name,
+                                loop_b.loop,
+                                iterations_global,
+                                sp,
+                            )
+
+                _register_loop_items(domain_items, run.id, phase_sp)
+
         response: dict = {
             "workflow_id": run.id,
             "name": run.name,

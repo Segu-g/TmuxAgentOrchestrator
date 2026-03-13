@@ -6140,3 +6140,69 @@ if task.metadata.get("_ephemeral_template") and task.target_agent is None:
 - `tests/test_branch_artifact_persistence.py`: 12 テスト (Feature B)
 
 **テスト数**: 3020 → 3057 (37 新規)
+
+## §10.83 — v1.2.7: ループ until 条件のランタイム評価 (Loop Until Runtime Evaluation)
+
+### 選定理由
+
+**選択**: `WorkflowManager` に loop until 条件のランタイム評価を実装し、条件が満たされた時点で後続イテレーションのタスクをキャンセルする。
+
+**なぜ選択したか**:
+- v1.1.44 / v1.2.0 で実装されたループワークフロー (`LoopBlock`) は `until` 条件をエージェントプロンプトに埋め込むだけで、サーバー側では一切評価していない。全 `max` イテレーションが常に実行される。
+- 既知の limitation として DESIGN.md §10.76 に記録済み。
+- `WorkflowManager` は既に `on_task_complete()` フックを持つ — ここで条件を評価して後続タスクをキャンセルするのが自然な拡張。
+- `AsyncPriorityTaskQueue` / `Orchestrator.cancel_task()` は既にキャンセルを完全サポート (v0.27.0, v1.2.6)。
+- `ScratchpadStore` は dict-like で `WorkflowManager` に注入可能。
+
+**選択しなかった候補**:
+- 動的展開 (submit time にイテレーション 1 だけ展開し、完了後に次を展開): 後方互換性破壊のリスクが高く、既存の静的 DAG model と不整合。
+- エージェントプロンプト側の until 評価のみ: 既存の実装。タスクがキャンセルされないため無駄な API 呼び出しが発生。
+
+### 調査記録
+
+**調査 1: DAG ループ早期終了 — Argo Workflows failFast**
+- 出典: Argo Workflows DAG docs
+  URL: https://argo-workflows.readthedocs.io/en/latest/walk-through/dag/
+- failFast=true (デフォルト): 1 タスクが失敗したら新規タスクをスケジュールしない。全実行中タスク完了後に DAG を failed とマーク。
+- until 条件の成功系での early termination に類似。残存タスクのキャンセルが標準パターン。
+
+**調査 2: PDCA サイクルの早期終了条件**
+- 出典: Wikipedia PDCA; Asana PDCA resources (2026)
+  URL: https://en.wikipedia.org/wiki/PDCA; https://asana.com/resources/pdca-cycle
+- PDCA は "条件が満たされるまで繰り返す" イテレーティブモデル。条件達成時に残余サイクルを中断するのは PDCA の本質的な動作。
+- 参照: Deming "Out of the Crisis" (1982) — Plan-Do-Study-Act cycle (PDSA 前身)。
+
+**調査 3: asyncio タスクキャンセル + 条件付きワークフロー終了 (Python 2026)**
+- 出典: Python 3 公式ドキュメント "Coroutines and Tasks"
+  URL: https://docs.python.org/3/library/asyncio-task.html
+- `asyncio.create_task(coroutine.cancel())` は cooperative cancellation。`_waiting_tasks` 内の未ディスパッチタスクは同期的に削除可能。
+- 出典: Super Fast Python "Asyncio Task Cancellation Best Practices"
+  URL: https://superfastpython.com/asyncio-task-cancellation-best-practices/
+- キャンセル後に await することで CancelledError の伝播を確認するのがベストプラクティス。ただし queued/waiting タスクはまだ実行されていないため await 不要。
+
+### Implementation Summary
+
+**変更ファイル**:
+- `src/tmux_orchestrator/application/workflow_manager.py`:
+  - `_loop_iterations: dict[tuple[str,str], list[list[str]]]` — ループ名→イテレーション別タスク ID
+  - `_loop_specs: dict[tuple[str,str], LoopSpec]` — ループ名→LoopSpec (until 条件)
+  - `_loop_scratchpad_prefix: dict[tuple[str,str], str]` — ループ名→スクラッチパッドプレフィックス
+  - `_completed_tasks: set[str]` — 完了済みタスク ID セット
+  - `_scratchpad: dict | None` — スクラッチパッド参照
+  - `_cancel_task_fn: Callable[[str], None] | None` — キャンセル関数
+  - `register_loop()` メソッド
+  - `set_scratchpad()` メソッド
+  - `set_cancel_task_fn()` メソッド
+  - `_check_loop_until()` メソッド
+  - `_mark_task_skipped()` メソッド
+  - `on_task_complete()`: `_completed_tasks` 更新 + `_check_loop_until()` 呼び出し
+- `src/tmux_orchestrator/web/routers/workflows.py`:
+  - `register_loop()` 呼び出し追加 (LoopBlock with until 条件)
+- `src/tmux_orchestrator/web/app.py`:
+  - `wm.set_scratchpad(_scratchpad)` + `wm.set_cancel_task_fn(...)` 配線追加
+- `pyproject.toml`: version `1.2.7`
+
+**新規ファイル**:
+- `tests/test_loop_until_runtime.py`: 12+ テスト
+
+**テスト数**: 3057 → 3069+

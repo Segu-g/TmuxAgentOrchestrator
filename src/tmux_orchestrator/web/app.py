@@ -455,6 +455,30 @@ def create_app(
         _scratchpad = ScratchpadStore(persist_dir=Path(_scratchpad_dir_raw))
     # If no config, leave the existing module-level ScratchpadStore() in place.
 
+    # Wire scratchpad + cancel function into WorkflowManager for loop-until
+    # runtime evaluation (v1.2.7).
+    # The WorkflowManager evaluates the until condition against the live
+    # scratchpad after each loop-iteration completes; when the condition is
+    # met, it calls the cancel function to remove remaining tasks.
+    # Reference: DESIGN.md §10.83 (v1.2.7)
+    if hasattr(orchestrator, "get_workflow_manager"):
+        _wm = orchestrator.get_workflow_manager()
+        if _wm is not None and hasattr(_wm, "set_scratchpad"):
+            _wm.set_scratchpad(_scratchpad)
+            if hasattr(orchestrator, "cancel_task"):
+                import asyncio as _asyncio  # noqa: PLC0415
+
+                def _sync_cancel(task_id: str) -> None:
+                    """Schedule async cancellation from the sync WorkflowManager callback."""
+                    try:
+                        loop = _asyncio.get_event_loop()
+                        if loop.is_running():
+                            _asyncio.ensure_future(orchestrator.cancel_task(task_id))
+                    except RuntimeError:
+                        pass  # No event loop — ignore (e.g. during unit tests)
+
+                _wm.set_cancel_task_fn(_sync_cancel)
+
     # Episodic memory store (shared between agents router and memory router)
     # Reference: DESIGN.md §10.28 (v1.0.28); DESIGN.md §10.29 (v1.0.29)
     _orch_config = getattr(orchestrator, "config", None)

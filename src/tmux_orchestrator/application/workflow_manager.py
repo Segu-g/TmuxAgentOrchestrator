@@ -31,13 +31,16 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
 
 # ---------------------------------------------------------------------------
 # Strangler Fig: WorkflowRun is canonical in domain/workflow.py.
 # Re-export it here so existing imports from this module continue to work.
 # ---------------------------------------------------------------------------
 from tmux_orchestrator.domain.workflow import WorkflowRun  # noqa: F401
+
+if TYPE_CHECKING:
+    from tmux_orchestrator.domain.phase_strategy import LoopSpec
 
 
 class WorkflowManager:
@@ -84,6 +87,20 @@ class WorkflowManager:
         self._phase_completed: dict[tuple[str, str], set[str]] = {}
         # (workflow_id, phase_name) → set of failed task_ids
         self._phase_failed: dict[tuple[str, str], set[str]] = {}
+        # Loop until runtime evaluation (v1.2.7):
+        # (workflow_id, loop_name) → list[list[str]] where inner list[i] is task_ids for iter i
+        self._loop_iterations: dict[tuple[str, str], list[list[str]]] = {}
+        # (workflow_id, loop_name) → LoopSpec (for until condition)
+        self._loop_specs: dict[tuple[str, str], "LoopSpec"] = {}
+        # (workflow_id, loop_name) → scratchpad prefix for the loop
+        self._loop_scratchpad_prefix: dict[tuple[str, str], str] = {}
+        # Tracks all completed task IDs (for loop until iteration completion checks)
+        self._completed_tasks: set[str] = set()
+        # Scratchpad store reference (injected via set_scratchpad)
+        self._scratchpad: Any | None = None
+        # Cancel function injected by the orchestrator (callable[[str], None])
+        # Called synchronously; should schedule async cancellation internally.
+        self._cancel_task_fn: Callable[[str], None] | None = None
 
     # ------------------------------------------------------------------
     # Submission
@@ -155,6 +172,64 @@ class WorkflowManager:
                 self._task_to_phase[tid] = (workflow_id, phase.name)
 
     # ------------------------------------------------------------------
+    # Loop until runtime evaluation (v1.2.7)
+    # ------------------------------------------------------------------
+
+    def set_scratchpad(self, scratchpad: Any) -> None:
+        """Inject the shared scratchpad store for loop-until condition evaluation.
+
+        Called by the web app after building the WorkflowManager so that
+        ``_check_loop_until`` can evaluate ``SkipCondition`` against live
+        scratchpad state.
+
+        Design reference: DESIGN.md §10.83 (v1.2.7)
+        """
+        self._scratchpad = scratchpad
+
+    def set_cancel_task_fn(self, fn: Callable[[str], None]) -> None:
+        """Inject the cancel-task callback used when a loop until condition is met.
+
+        The callback receives a task_id string and should schedule async
+        cancellation (e.g. via ``asyncio.create_task(orchestrator.cancel_task(tid))``).
+        It is called once per remaining-iteration task when the condition fires.
+
+        Design reference: DESIGN.md §10.83 (v1.2.7)
+        """
+        self._cancel_task_fn = fn
+
+    def register_loop(
+        self,
+        workflow_id: str,
+        loop_name: str,
+        loop_spec: "LoopSpec",
+        iterations: list[list[str]],
+        scratchpad_prefix: str,
+    ) -> None:
+        """Register a LoopBlock's iteration task IDs and LoopSpec for runtime until evaluation.
+
+        Parameters
+        ----------
+        workflow_id:
+            The workflow run ID returned by :meth:`submit`.
+        loop_name:
+            The ``LoopBlock.name`` string (unique within the workflow).
+        loop_spec:
+            The :class:`~tmux_orchestrator.domain.phase_strategy.LoopSpec`
+            carrying ``max`` and ``until`` condition.
+        iterations:
+            ``iterations[i]`` is the list of *global* orchestrator task IDs
+            for iteration ``i`` (0-indexed).
+        scratchpad_prefix:
+            The scratchpad namespace prefix for the workflow run.
+
+        Design reference: DESIGN.md §10.83 (v1.2.7)
+        """
+        key = (workflow_id, loop_name)
+        self._loop_iterations[key] = iterations
+        self._loop_specs[key] = loop_spec
+        self._loop_scratchpad_prefix[key] = scratchpad_prefix
+
+    # ------------------------------------------------------------------
     # Completion tracking
     # ------------------------------------------------------------------
 
@@ -178,8 +253,11 @@ class WorkflowManager:
             return
         run._completed.add(task_id)
         run._failed.discard(task_id)  # idempotent: remove any prior failure
+        self._completed_tasks.add(task_id)
         self._update_phase_status(task_id, run, completed=True)
         self._update_status(run)
+        # Check loop-until conditions after each task completion (v1.2.7)
+        self._check_loop_until(task_id)
 
     def on_task_failed(self, task_id: str) -> None:
         """Record a failed task.
@@ -383,6 +461,93 @@ class WorkflowManager:
                 phase.mark_failed()
             else:
                 phase.mark_complete()
+
+    def _check_loop_until(self, completed_task_id: str) -> None:
+        """After a task completes, check if any loop's until condition is now met.
+
+        For each registered LoopBlock, when all tasks in one iteration have
+        completed and the ``until`` condition evaluates to True against the
+        current scratchpad, cancel all tasks from subsequent iterations
+        (they are still in the orchestrator queue or waiting list) and clean up
+        the registration.
+
+        No-op when no scratchpad or cancel function has been injected.
+
+        Design reference: DESIGN.md §10.83 (v1.2.7)
+        """
+        if not self._loop_iterations:
+            return
+
+        # Iterate over a snapshot of keys so we can delete during iteration.
+        for (wf_id, loop_name) in list(self._loop_iterations.keys()):
+            loop_spec = self._loop_specs.get((wf_id, loop_name))
+            if loop_spec is None or loop_spec.until is None:
+                continue
+
+            iterations = self._loop_iterations.get((wf_id, loop_name))
+            if not iterations:
+                continue
+
+            # Only check iterations that contain the just-completed task.
+            for iter_idx, iter_task_ids in enumerate(iterations):
+                if completed_task_id not in iter_task_ids:
+                    continue
+
+                # All tasks in this iteration must be complete before evaluating.
+                if not all(tid in self._completed_tasks for tid in iter_task_ids):
+                    break  # iteration not fully done yet; nothing to evaluate
+
+                # Evaluate the until condition against the current scratchpad.
+                scratchpad = self._scratchpad if self._scratchpad is not None else {}
+                condition_met = loop_spec.until.is_met(scratchpad)
+                if condition_met:
+                    # Condition met — cancel all remaining iterations.
+                    for future_iter in iterations[iter_idx + 1:]:
+                        for tid in future_iter:
+                            if self._cancel_task_fn is not None:
+                                self._cancel_task_fn(tid)
+                            # Mark the task+phase as resolved so the workflow
+                            # can transition to "complete" once all tasks settle.
+                            self._mark_task_skipped(tid, wf_id)
+
+                    # Re-evaluate workflow status now that cancelled tasks are resolved.
+                    run = self._runs.get(wf_id)
+                    if run is not None:
+                        self._update_status(run)
+
+                    # Clean up registry so this loop is not evaluated again.
+                    del self._loop_iterations[(wf_id, loop_name)]
+                    self._loop_specs.pop((wf_id, loop_name), None)
+                    self._loop_scratchpad_prefix.pop((wf_id, loop_name), None)
+                break  # completed_task_id can only be in one iteration
+
+    def _mark_task_skipped(self, task_id: str, workflow_id: str) -> None:
+        """Mark a task as resolved-by-cancellation (loop early termination).
+
+        When a loop until condition fires, the remaining iteration tasks are
+        cancelled in the orchestrator queue.  This method records them as
+        "done" in the WorkflowRun so that ``_update_status`` can transition
+        the workflow to "complete" once the cancelled tasks are accounted for.
+
+        Also marks the *phase* containing the task as "skipped" if that phase
+        is not yet in a terminal state.
+
+        Design reference: DESIGN.md §10.83 (v1.2.7)
+        """
+        run = self._runs.get(workflow_id)
+        if run is None:
+            return
+        # Count cancelled tasks as completed so _update_status resolves correctly.
+        run._completed.add(task_id)
+        run._failed.discard(task_id)
+        self._completed_tasks.add(task_id)
+        # Mark phase as skipped.
+        if run.phases:
+            for phase_status in run.phases:
+                if task_id in phase_status.task_ids:
+                    if phase_status.status not in ("complete", "failed", "skipped"):
+                        phase_status.mark_skipped()
+                    break
 
     def _update_status(self, run: WorkflowRun) -> None:
         """Recompute and update the run's status field."""
