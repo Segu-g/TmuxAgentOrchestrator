@@ -135,6 +135,17 @@ class Orchestrator:
         # Reference: Apache Spark DAG scheduler; POSIX make prerequisites.
         # DESIGN.md §10.24 (v0.29.0)
         self._task_dependents: dict[str, list[str]] = {}
+        # Persistent depends_on snapshot: task_id → list[dependency task_ids].
+        # Unlike _task_dependents (cleared as tasks complete), this dict is
+        # append-only and never cleaned up — used by GET /workflows/{id}/dag
+        # to reconstruct the original topology at query time.
+        # Design reference: DESIGN.md §10.90 (v1.2.14)
+        self._task_deps: dict[str, list[str]] = {}
+        # Persistent task → agent assignment: task_id → agent_id.
+        # Populated at dispatch time so GET /workflows/{id}/dag can show which
+        # agent ran each task.  Never cleaned up (needed for completed tasks).
+        # Design reference: DESIGN.md §10.90 (v1.2.14)
+        self._task_agent: dict[str, str] = {}
         # Idempotency deduplication: key → task_id, with expiry timestamps
         _IKEY_TTL = 3600.0
         self._idempotency_keys: dict[str, str] = {}
@@ -1001,6 +1012,12 @@ class Orchestrator:
         )
         # Record this task's priority for use by future dependent tasks.
         self._task_priorities[task.id] = effective_priority
+        # Record persistent depends_on snapshot for DAG visualization (v1.2.14).
+        # Unlike _task_dependents (cleared on completion), _task_deps is never
+        # cleaned up so GET /workflows/{id}/dag can reconstruct topology later.
+        # Design reference: DESIGN.md §10.90 (v1.2.14)
+        if task.depends_on:
+            self._task_deps[task.id] = list(task.depends_on)
         if idempotency_key is not None:
             self._idempotency_keys[idempotency_key] = task.id
             self._ikey_timestamps[idempotency_key] = time.monotonic()
@@ -1149,6 +1166,74 @@ class Orchestrator:
     def get_waiting_task(self, task_id: str) -> Task | None:
         """Return a waiting task by ID, or None if not in _waiting_tasks."""
         return self._waiting_tasks.get(task_id)
+
+    def get_task_info(self, task_id: str) -> dict:
+        """Return a status snapshot for *task_id* suitable for DAG visualization.
+
+        Looks up the task across all tracking dicts (active, waiting, queued,
+        completed, failed) and returns a unified status dict.
+
+        Returns a dict with keys:
+
+        - ``task_id``: the task ID
+        - ``status``: one of ``"running"``, ``"waiting"``, ``"queued"``,
+          ``"success"``, ``"failed"``, ``"cancelled"``  — or ``"unknown"``
+          if the task ID has never been seen.
+        - ``depends_on``: list of task IDs this task depends on (from
+          persistent ``_task_deps``).
+        - ``dependents``: currently-waiting tasks that depend on this one
+          (from live ``_task_dependents``; empty once they are released).
+        - ``assigned_agent``: agent ID that ran / is running this task, or
+          ``None`` if not yet dispatched.
+        - ``started_at``: ISO-8601 string when the task was dispatched, or
+          ``None``.
+        - ``finished_at``: ``None`` (not yet available without result store;
+          callers wanting history should use ``get_agent_history``).
+
+        Design reference: DESIGN.md §10.90 (v1.2.14)
+        """
+        deps = self._task_deps.get(task_id, [])
+        dependents = list(self._task_dependents.get(task_id, []))
+        assigned = self._task_agent.get(task_id)
+
+        # Determine status from tracking sets / queues.
+        if task_id in self._active_tasks:
+            status = "running"
+        elif task_id in self._waiting_tasks:
+            status = "waiting"
+        elif task_id in self._completed_tasks:
+            status = "success"
+        elif task_id in self._failed_tasks:
+            status = "failed"
+        else:
+            # Check if it's in the priority queue
+            in_queue = any(
+                t.id == task_id
+                for _, _, t in list(self._task_queue._queue)  # type: ignore[attr-defined]
+            )
+            status = "queued" if in_queue else "unknown"
+
+        # started_at from monotonic clock — convert to approximate ISO timestamp
+        # using the same approach as _record_agent_history.
+        started_at: str | None = None
+        started_ts = self._task_started_at.get(task_id)
+        if started_ts is not None:
+            from datetime import datetime, timezone  # noqa: PLC0415
+            elapsed = time.monotonic() - started_ts
+            started_at = datetime.fromtimestamp(
+                datetime.now(tz=timezone.utc).timestamp() - elapsed,
+                tz=timezone.utc,
+            ).isoformat()
+
+        return {
+            "task_id": task_id,
+            "status": status,
+            "depends_on": deps,
+            "dependents": dependents,
+            "assigned_agent": assigned,
+            "started_at": started_at,
+            "finished_at": None,
+        }
 
     async def update_task_priority(self, task_id: str, new_priority: int) -> bool:
         """Update the priority of a pending task in-place.
@@ -1679,6 +1764,10 @@ class Orchestrator:
                 self._task_timeout[task.id] = task.timeout
             # Track the Task object for potential retry on failure.
             self._active_tasks[task.id] = task
+            # Record agent assignment for DAG visualization (v1.2.14).
+            # Persistent: never cleared, so completed-task nodes show their agent.
+            # Design reference: DESIGN.md §10.90 (v1.2.14)
+            self._task_agent[task.id] = agent.id
             # --- Episode auto-inject (v1.0.29) ---
             # If an EpisodeStore is attached and memory_inject_count > 0, prepend
             # the agent's most-recent episodes to the task prompt so the agent has

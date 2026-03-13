@@ -119,7 +119,13 @@ class WorkflowManager:
     # Submission
     # ------------------------------------------------------------------
 
-    def submit(self, name: str, task_ids: list[str]) -> WorkflowRun:
+    def submit(
+        self,
+        name: str,
+        task_ids: list[str],
+        *,
+        dag_edges: list[tuple[str, str]] | None = None,
+    ) -> WorkflowRun:
         """Register a new workflow run with the given task IDs.
 
         Parameters
@@ -129,6 +135,13 @@ class WorkflowManager:
         task_ids:
             List of global orchestrator task IDs that belong to this run.
             Must be non-empty.
+        dag_edges:
+            Optional list of ``(from_task_id, to_task_id)`` pairs representing
+            the dependency graph edges.  When provided, stored on the
+            :class:`WorkflowRun` for later retrieval by
+            ``GET /workflows/{id}/dag``.  Defaults to ``[]``.
+
+            Design reference: DESIGN.md §10.90 (v1.2.14)
 
         Returns
         -------
@@ -140,6 +153,7 @@ class WorkflowManager:
             id=run_id,
             name=name,
             task_ids=list(task_ids),
+            dag_edges=list(dag_edges) if dag_edges else [],
         )
         self._runs[run_id] = run
         for tid in task_ids:

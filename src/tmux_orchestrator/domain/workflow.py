@@ -167,6 +167,11 @@ class WorkflowRun:
     phases: list[Any] = field(default_factory=list, repr=False)
     created_at: float = field(default_factory=time.time)
     completed_at: float | None = None
+    # DAG edge list: list of (from_task_id, to_task_id) tuples.
+    # Populated at submission time from depends_on relationships.
+    # Used by GET /workflows/{id}/dag to return topology without re-derivation.
+    # Design reference: DESIGN.md §10.90 (v1.2.14)
+    dag_edges: list[tuple[str, str]] = field(default_factory=list, repr=False)
     _completed: set[str] = field(default_factory=set, repr=False)
     _failed: set[str] = field(default_factory=set, repr=False)
 

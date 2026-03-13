@@ -362,9 +362,18 @@ def build_workflows_router(
             local_to_global[spec["local_id"]] = task.id
             global_task_ids.append(task.id)
     
-        # Register with WorkflowManager for status tracking
+        # Register with WorkflowManager for status tracking.
+        # Compute dag_edges from the ordered task specs: for each spec, emit one
+        # (from, to) edge per entry in depends_on.  This stores the topology
+        # persistently on WorkflowRun for GET /workflows/{id}/dag (v1.2.14).
         wm = orchestrator.get_workflow_manager()
-        run = wm.submit(name=body.name, task_ids=global_task_ids)
+        dag_edges: list[tuple[str, str]] = [
+            (local_to_global[dep_lid], local_to_global[spec["local_id"]])
+            for spec in ordered
+            for dep_lid in spec.get("depends_on", [])
+            if dep_lid in local_to_global and spec["local_id"] in local_to_global
+        ]
+        run = wm.submit(name=body.name, task_ids=global_task_ids, dag_edges=dag_edges)
 
         # Workflow branch cleanup wiring (v1.2.8):
         # Now that run.id is known, register branch tracking for immediately-spawned
@@ -3280,6 +3289,98 @@ def build_workflows_router(
         return result
     
     
+    @router.get(
+        "/workflows/{workflow_id}/dag",
+        summary="Get workflow DAG with node and edge topology",
+        dependencies=[Depends(auth)],
+    )
+    async def get_workflow_dag(workflow_id: str) -> dict:
+        """Return the dependency graph (DAG) for *workflow_id* with per-node status.
+
+        Each node in the graph corresponds to one orchestrator task in the
+        workflow.  Each edge represents a ``depends_on`` relationship
+        (``from`` must complete before ``to`` can start).
+
+        Response format::
+
+            {
+              "workflow_id": "...",
+              "name": "...",
+              "status": "running",
+              "nodes": [
+                {
+                  "task_id": "global-uuid",
+                  "phase_name": "plan",
+                  "status": "success",
+                  "depends_on": [],
+                  "dependents": ["impl-task-id"],
+                  "started_at": "2026-...",
+                  "finished_at": null,
+                  "duration_s": null,
+                  "assigned_agent": "worker-1"
+                },
+                ...
+              ],
+              "edges": [
+                {"from": "plan-task-id", "to": "impl-task-id"}
+              ]
+            }
+
+        ``nodes`` contains one entry per task in the workflow.
+        ``edges`` duplicates the dependency topology for graph-rendering
+        libraries that prefer a separate edge list (e.g. cytoscape.js, d3-dag,
+        dagrejs).
+
+        Returns 404 if the workflow ID is unknown.
+
+        Design references:
+        - AWS Glue GetDataflowGraph — separate DagNodes + DagEdges arrays
+          (https://docs.aws.amazon.com/glue/latest/webapi/API_GetDataflowGraph.html)
+        - ZenML DAG visualization — per-node status for progress rendering
+          (https://www.zenml.io/blog/dag-visualization-vscode-extension)
+        - DESIGN.md §10.90 (v1.2.14)
+        """
+        wm = orchestrator.get_workflow_manager()
+        run = wm.get(workflow_id)
+        if run is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Workflow {workflow_id!r} not found",
+            )
+
+        # Build task_id → phase_name lookup from run.phases (if phases-mode).
+        task_to_phase: dict[str, str] = {}
+        for phase in run.phases:
+            for tid in getattr(phase, "task_ids", []):
+                task_to_phase[tid] = getattr(phase, "name", "")
+
+        # Build nodes
+        nodes: list[dict] = []
+        for tid in run.task_ids:
+            info = orchestrator.get_task_info(tid)
+            nodes.append({
+                "task_id": tid,
+                "phase_name": task_to_phase.get(tid, ""),
+                "status": info["status"],
+                "depends_on": info["depends_on"],
+                "dependents": info["dependents"],
+                "started_at": info["started_at"],
+                "finished_at": info["finished_at"],
+                "duration_s": None,
+                "assigned_agent": info["assigned_agent"],
+            })
+
+        # Build edges from stored dag_edges (topology captured at submission).
+        edges = [{"from": frm, "to": to} for frm, to in run.dag_edges]
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "status": run.status,
+            "nodes": nodes,
+            "edges": edges,
+        }
+
     @router.delete(
         "/workflows/{workflow_id}",
         summary="Cancel all tasks in a workflow",

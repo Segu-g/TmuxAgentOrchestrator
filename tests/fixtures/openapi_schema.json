@@ -5594,6 +5594,48 @@
         },
         "summary": "Get a specific workflow run status"
       }
+    },
+    "/workflows/{workflow_id}/dag": {
+      "get": {
+        "description": "Return the dependency graph (DAG) for *workflow_id* with per-node status.\n\nEach node in the graph corresponds to one orchestrator task in the\nworkflow.  Each edge represents a ``depends_on`` relationship\n(``from`` must complete before ``to`` can start).\n\nResponse format::\n\n    {\n      \"workflow_id\": \"...\",\n      \"name\": \"...\",\n      \"status\": \"running\",\n      \"nodes\": [\n        {\n          \"task_id\": \"global-uuid\",\n          \"phase_name\": \"plan\",\n          \"status\": \"success\",\n          \"depends_on\": [],\n          \"dependents\": [\"impl-task-id\"],\n          \"started_at\": \"2026-...\",\n          \"finished_at\": null,\n          \"duration_s\": null,\n          \"assigned_agent\": \"worker-1\"\n        },\n        ...\n      ],\n      \"edges\": [\n        {\"from\": \"plan-task-id\", \"to\": \"impl-task-id\"}\n      ]\n    }\n\n``nodes`` contains one entry per task in the workflow.\n``edges`` duplicates the dependency topology for graph-rendering\nlibraries that prefer a separate edge list (e.g. cytoscape.js, d3-dag,\ndagrejs).\n\nReturns 404 if the workflow ID is unknown.\n\nDesign references:\n- AWS Glue GetDataflowGraph \u2014 separate DagNodes + DagEdges arrays\n  (https://docs.aws.amazon.com/glue/latest/webapi/API_GetDataflowGraph.html)\n- ZenML DAG visualization \u2014 per-node status for progress rendering\n  (https://www.zenml.io/blog/dag-visualization-vscode-extension)\n- DESIGN.md \u00a710.90 (v1.2.14)",
+        "operationId": "get_workflow_dag_workflows__workflow_id__dag_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workflow_id",
+            "required": true,
+            "schema": {
+              "title": "Workflow Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Workflow Dag Workflows  Workflow Id  Dag Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get workflow DAG with node and edge topology"
+      }
     }
   }
 }
