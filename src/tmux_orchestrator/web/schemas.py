@@ -1832,3 +1832,81 @@ class PairCoderWorkflowSubmit(BaseModel):
         if not v.strip():
             raise ValueError("language must not be empty")
         return v
+
+
+# ---------------------------------------------------------------------------
+# Task template schemas (v1.2.17)
+# Reference: DESIGN.md §10.93 (v1.2.17)
+# ---------------------------------------------------------------------------
+
+
+class TaskTemplateCreate(BaseModel):
+    """Request body for POST /templates — register a new task template.
+
+    Attributes
+    ----------
+    id:
+        Unique machine-readable identifier (e.g. ``"code_review"``).
+    name:
+        Human-readable label shown in listings.
+    prompt_template:
+        Prompt string with ``{variable}`` Python f-string placeholders.
+    variables:
+        List of required placeholder names that must be supplied at render time.
+    default_priority:
+        Default task priority (lower = dispatched first).
+    default_tags:
+        Capability tags applied to submitted tasks by default.
+    default_timeout:
+        Per-task timeout (seconds); ``None`` uses the orchestrator default.
+    description:
+        Free-text description of the template's purpose.
+    """
+
+    id: str
+    name: str
+    prompt_template: str
+    variables: list[str]
+    default_priority: int = 0
+    default_tags: list[str] = []
+    default_timeout: int | None = None
+    description: str = ""
+
+
+class TaskTemplateRender(BaseModel):
+    """Request body for POST /templates/{id}/render — preview rendered prompt.
+
+    Attributes
+    ----------
+    variables:
+        Mapping of placeholder name → value used to render the template.
+    """
+
+    variables: dict[str, str]
+
+
+class TaskTemplateSubmit(BaseModel):
+    """Request body for POST /templates/{id}/submit — render + submit as a task.
+
+    Attributes
+    ----------
+    variables:
+        Placeholder values used to render the template.
+    priority:
+        Override the template's ``default_priority``.
+    target_agent:
+        When set, force dispatch to this specific agent ID.
+    required_tags:
+        Override the template's ``default_tags``.
+    timeout:
+        Override the template's ``default_timeout``.
+    reply_to:
+        Agent ID that receives the RESULT in its mailbox.
+    """
+
+    variables: dict[str, str]
+    priority: int | None = None
+    target_agent: str | None = None
+    required_tags: list[str] = []
+    timeout: int | None = None
+    reply_to: str | None = None

@@ -109,6 +109,72 @@ from tmux_orchestrator.application.scratchpad_store import ScratchpadStore  # no
 _scratchpad: ScratchpadStore = ScratchpadStore()  # in-memory until create_app() wires persist_dir
 
 # ---------------------------------------------------------------------------
+# TemplateStore — in-memory task template registry (v1.2.17+)
+#
+# Module-level singleton so templates survive across multiple test create_app()
+# calls in the same process.  Built-in templates are registered by
+# _init_template_store() which is called inside create_app().
+#
+# Reference: DESIGN.md §10.93 (v1.2.17)
+# ---------------------------------------------------------------------------
+
+from tmux_orchestrator.application.template_store import TaskTemplate, TemplateStore  # noqa: E402
+
+_template_store: TemplateStore = TemplateStore()
+
+
+def _init_template_store(store: TemplateStore) -> None:
+    """Register built-in templates into *store* if not already present.
+
+    Idempotent — skips any template whose ID is already registered so that
+    calling create_app() multiple times (e.g. in tests) does not duplicate
+    built-in entries.
+    """
+    builtins = [
+        TaskTemplate(
+            id="code_review",
+            name="Code Review",
+            prompt_template=(
+                "Review the following {language} code for {aspect}. "
+                "Provide specific actionable feedback.\n\n"
+                "Code:\n```{language}\n{code}\n```\n\n"
+                "Focus on: {aspect}. "
+                "Write your review to `review.md` and call /task-complete."
+            ),
+            variables=["language", "aspect", "code"],
+            description="Request a code review from an agent",
+        ),
+        TaskTemplate(
+            id="bug_fix",
+            name="Bug Fix",
+            prompt_template=(
+                "Fix the following {language} bug. The issue is: {issue}\n\n"
+                "Buggy code:\n```{language}\n{code}\n```\n\n"
+                "Write the fixed code to `fix.{ext}`, "
+                "explain the fix in `fix_notes.md`, then call /task-complete."
+            ),
+            variables=["language", "issue", "code", "ext"],
+            description="Ask an agent to fix a bug",
+        ),
+        TaskTemplate(
+            id="write_tests",
+            name="Write Tests",
+            prompt_template=(
+                "Write comprehensive {framework} tests for the following {language} code.\n\n"
+                "Code:\n```{language}\n{code}\n```\n\n"
+                "Write tests to `test_{module}.py`, run them with pytest, "
+                "write test results to `test_results.md`, then call /task-complete."
+            ),
+            variables=["framework", "language", "code", "module"],
+            description="Ask an agent to write tests",
+        ),
+    ]
+    for tmpl in builtins:
+        if store.get(tmpl.id) is None:
+            store.register(tmpl)
+
+
+# ---------------------------------------------------------------------------
 # MetricsCollector — time-series ring buffer (v1.2.16+)
 #
 # Module-level singleton so it is shared across create_app() calls in the same
@@ -461,6 +527,7 @@ def create_app(
         build_scratchpad_router,
         build_system_router,
         build_tasks_router,
+        build_templates_router,
         build_webhooks_router,
         build_workflows_router,
     )
@@ -580,6 +647,16 @@ def create_app(
     )
     app.include_router(
         build_memory_router(orchestrator, auth, episode_store=_episode_store),
+    )
+
+    # ------------------------------------------------------------------
+    # Task template registry (v1.2.17)
+    # Reference: DESIGN.md §10.93 (v1.2.17)
+    # ------------------------------------------------------------------
+    global _template_store
+    _init_template_store(_template_store)
+    app.include_router(
+        build_templates_router(orchestrator, auth, template_store=_template_store),
     )
 
     # WebSocket — session cookie OR API key query param

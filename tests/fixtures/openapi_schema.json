@@ -1839,6 +1839,153 @@
         "title": "TaskSubmit",
         "type": "object"
       },
+      "TaskTemplateCreate": {
+        "description": "Request body for POST /templates \u2014 register a new task template.\n\nAttributes\n----------\nid:\n    Unique machine-readable identifier (e.g. ``\"code_review\"``).\nname:\n    Human-readable label shown in listings.\nprompt_template:\n    Prompt string with ``{variable}`` Python f-string placeholders.\nvariables:\n    List of required placeholder names that must be supplied at render time.\ndefault_priority:\n    Default task priority (lower = dispatched first).\ndefault_tags:\n    Capability tags applied to submitted tasks by default.\ndefault_timeout:\n    Per-task timeout (seconds); ``None`` uses the orchestrator default.\ndescription:\n    Free-text description of the template's purpose.",
+        "properties": {
+          "default_priority": {
+            "default": 0,
+            "title": "Default Priority",
+            "type": "integer"
+          },
+          "default_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Default Tags",
+            "type": "array"
+          },
+          "default_timeout": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Timeout"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "prompt_template": {
+            "title": "Prompt Template",
+            "type": "string"
+          },
+          "variables": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Variables",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "prompt_template",
+          "variables"
+        ],
+        "title": "TaskTemplateCreate",
+        "type": "object"
+      },
+      "TaskTemplateRender": {
+        "description": "Request body for POST /templates/{id}/render \u2014 preview rendered prompt.\n\nAttributes\n----------\nvariables:\n    Mapping of placeholder name \u2192 value used to render the template.",
+        "properties": {
+          "variables": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Variables",
+            "type": "object"
+          }
+        },
+        "required": [
+          "variables"
+        ],
+        "title": "TaskTemplateRender",
+        "type": "object"
+      },
+      "TaskTemplateSubmit": {
+        "description": "Request body for POST /templates/{id}/submit \u2014 render + submit as a task.\n\nAttributes\n----------\nvariables:\n    Placeholder values used to render the template.\npriority:\n    Override the template's ``default_priority``.\ntarget_agent:\n    When set, force dispatch to this specific agent ID.\nrequired_tags:\n    Override the template's ``default_tags``.\ntimeout:\n    Override the template's ``default_timeout``.\nreply_to:\n    Agent ID that receives the RESULT in its mailbox.",
+        "properties": {
+          "priority": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Priority"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "required_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Tags",
+            "type": "array"
+          },
+          "target_agent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Agent"
+          },
+          "timeout": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeout"
+          },
+          "variables": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Variables",
+            "type": "object"
+          }
+        },
+        "required": [
+          "variables"
+        ],
+        "title": "TaskTemplateSubmit",
+        "type": "object"
+      },
       "TddWorkflowSubmit": {
         "description": "Request body for POST /workflows/tdd \u2014 3-agent TDD workflow.\n\nSubmits a Red\u2192Green\u2192Refactor Workflow DAG with three context-isolated\nsub-agents:\n  1. ``test-writer``: writes failing tests for *feature* (RED phase)\n  2. ``implementer``: reads tests from the scratchpad and writes the\n     minimal implementation that makes them pass (GREEN phase)\n  3. ``refactorer``: reviews the implementation and improves code quality\n     while keeping tests green (REFACTOR phase)\n\nArtifacts are passed via the shared scratchpad (Blackboard pattern).  The\n``test-writer`` writes the test file path to\n``{scratchpad_prefix}/tests_path``; the ``implementer`` reads it and\nwrites the implementation path to ``{scratchpad_prefix}/impl_path``; the\n``refactorer`` reads both.\n\nDesign references:\n- TDFlow arXiv:2510.23761 (2025): context-isolated sub-agents achieve\n  88.8% on SWE-Bench Lite.\n- alexop.dev \"Forcing Claude Code to TDD\" (2025): context isolation is\n  mandatory for genuine test-first development.\n- Blackboard pattern (Buschmann 1996): shared scratchpad decouples\n  producers from consumers.\n- DESIGN.md \u00a710.31 (v0.36.0)",
         "properties": {
@@ -4813,6 +4960,255 @@
           }
         },
         "summary": "OpenTelemetry status"
+      }
+    },
+    "/templates": {
+      "get": {
+        "description": "Return all registered task templates.\n\nDesign reference: DESIGN.md \u00a710.93 (v1.2.17)",
+        "operationId": "list_templates_templates_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List Templates Templates Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List all registered task templates"
+      },
+      "post": {
+        "description": "Register a parameterized task prompt template.\n\nThe ``variables`` list declares all ``{placeholder}`` names that must\nbe supplied when rendering or submitting this template.\n\nReturns the created template object with HTTP 201 Created.\n\nDesign reference: DESIGN.md \u00a710.93 (v1.2.17)",
+        "operationId": "create_template_templates_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskTemplateCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Create Template Templates Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Register a new task template"
+      }
+    },
+    "/templates/{template_id}": {
+      "delete": {
+        "description": "Remove *template_id* from the registry.\n\nReturns ``{\"deleted\": true}`` on success or 404 if not found.\n\nDesign reference: DESIGN.md \u00a710.93 (v1.2.17)",
+        "operationId": "delete_template_templates__template_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "title": "Template Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Delete Template Templates  Template Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete a task template"
+      },
+      "get": {
+        "description": "Return the template with *template_id*.\n\nRaises 404 if the template is not registered.\n\nDesign reference: DESIGN.md \u00a710.93 (v1.2.17)",
+        "operationId": "get_template_templates__template_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "title": "Template Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Template Templates  Template Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get a task template by ID"
+      }
+    },
+    "/templates/{template_id}/render": {
+      "post": {
+        "description": "Render *template_id* with the provided *variables* and return the result.\n\nThis is a dry-run endpoint \u2014 no task is submitted.  Use it to preview\nthe rendered prompt before submitting.\n\nReturns ``{\"template_id\": ..., \"rendered_prompt\": ...}``.\n\nRaises 404 if the template is not found; 422 if required variables\nare missing.\n\nDesign reference: DESIGN.md \u00a710.93 (v1.2.17)",
+        "operationId": "render_template_templates__template_id__render_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "title": "Template Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskTemplateRender"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Render Template Templates  Template Id  Render Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Render a template with variables (preview only \u2014 no task submission)"
+      }
+    },
+    "/templates/{template_id}/submit": {
+      "post": {
+        "description": "Render *template_id* with *variables*, then enqueue as a task.\n\nPriority, tags, and timeout can be overridden per-submission;\nwhen omitted, the template's defaults are used.\n\nReturns the submitted task record (same shape as ``POST /tasks``).\n\nRaises 404 if the template is not found; 422 if required variables\nare missing or substitution fails.\n\nDesign reference: DESIGN.md \u00a710.93 (v1.2.17)",
+        "operationId": "submit_template_templates__template_id__submit_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "template_id",
+            "required": true,
+            "schema": {
+              "title": "Template Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TaskTemplateSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Template Templates  Template Id  Submit Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Render a template and submit the result as a new task"
       }
     },
     "/webhooks": {
