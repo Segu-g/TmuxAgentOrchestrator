@@ -535,9 +535,13 @@ or by branching from your branch (chain_branch workflow).
 """
 
         # Codified Specs section: injected when spec_files are configured.
-        # spec_files_root is set to cwd at write time so relative paths resolve correctly.
+        # spec_files_root is set only when not already specified by the factory.
+        # When the factory passes spec_files_root=server_cwd, that root is used
+        # (spec files are relative to the project root where config lives).
+        # When spec_files_root is None, fall back to the agent's worktree cwd.
         # Reference: DESIGN.md §10.86 (v1.2.10)
-        self._spec_files_root = cwd
+        if self._spec_files_root is None and self._spec_files:
+            self._spec_files_root = cwd
         codified_specs_section = self._load_spec_files()
 
         content = f"""\
