@@ -439,6 +439,20 @@ class OrchestratorConfig:
     # Research: jessfraz/branch-cleanup-action (github.com, 2025);
     #   Jenkins Multibranch Pipeline stale branch hygiene (pankajaswal, 2025).
     workflow_branch_cleanup: bool = True
+    # --- Agent metrics time-series (ring buffer, v1.2.16) ---
+    # metrics_enabled: when True (default), a background MetricsCollector task
+    #   accumulates queue/agent snapshots at metrics_interval_s intervals.
+    #   Enables GET /metrics/time-series and GET /metrics/agents/{id} endpoints.
+    # metrics_interval_s: seconds between snapshot collections (default 10.0).
+    # metrics_max_snapshots: ring buffer capacity (default 360 = 1 hour at 10s).
+    #
+    # Reference: "Beyond Black-Box Benchmarking" arXiv:2503.06745 (Galileo 2025)
+    #   — agent observability via time-series metrics;
+    # Prometheus Monitoring Systems (SoundCloud 2015) — interval-based scraping;
+    # DESIGN.md §10.92 (v1.2.16)
+    metrics_enabled: bool = True
+    metrics_interval_s: float = 10.0
+    metrics_max_snapshots: int = 360
 
     def __post_init__(self) -> None:
         """Validate cross-field constraints after dataclass initialisation.
@@ -634,4 +648,7 @@ def load_config(path: str | Path, cwd: Path | str | None = None) -> Orchestrator
         workflow_branch_cleanup=data.get("workflow_branch_cleanup", True),
         task_escalation_enabled=data.get("task_escalation_enabled", True),
         max_task_escalations=data.get("max_task_escalations", 2),
+        metrics_enabled=data.get("metrics_enabled", True),
+        metrics_interval_s=float(data.get("metrics_interval_s", 10.0)),
+        metrics_max_snapshots=int(data.get("metrics_max_snapshots", 360)),
     )

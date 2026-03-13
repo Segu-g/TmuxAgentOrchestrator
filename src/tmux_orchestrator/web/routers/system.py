@@ -19,6 +19,7 @@ from tmux_orchestrator.web.schemas import AutoScalerUpdate, RateLimitUpdate
 def build_system_router(
     orchestrator: Any,
     auth: Callable,
+    metrics_collector: Any = None,
 ) -> APIRouter:
     """Build and return the system APIRouter.
 
@@ -28,6 +29,10 @@ def build_system_router(
         The :class:`~tmux_orchestrator.orchestrator.Orchestrator` instance.
     auth:
         Authentication dependency callable (combined session + API key).
+    metrics_collector:
+        Optional :class:`~tmux_orchestrator.infrastructure.metrics_collector.MetricsCollector`
+        instance.  When ``None``, the ``GET /metrics/time-series`` and
+        ``GET /metrics/agents/{id}`` endpoints return disabled stubs.
     """
     router = APIRouter()
 
@@ -526,5 +531,85 @@ def build_system_router(
     
         output = generate_latest(registry)
         return Response(content=output, media_type=CONTENT_TYPE_LATEST)
+
+    # ------------------------------------------------------------------
+    # Metrics time-series endpoints (JSON, ring buffer)
+    # Reference: DESIGN.md §10.92 (v1.2.16)
+    # ------------------------------------------------------------------
+
+    @router.get(
+        "/metrics/time-series",
+        summary="Agent and queue metrics time series (ring buffer)",
+        dependencies=[Depends(auth)],
+    )
+    async def get_metrics_time_series(last_n: int = 60) -> dict:
+        """Return the last *last_n* metric snapshots from the ring buffer.
+
+        Each snapshot is collected every ``metrics_interval_s`` seconds
+        (default 10 s, configured via ``OrchestratorConfig.metrics_interval_s``).
+
+        The default ``last_n=60`` returns the last 10 minutes of history at
+        the default 10-second collection interval.
+
+        Response structure:
+        - ``enabled``: ``false`` when ``metrics_enabled: false`` in config.
+        - ``interval_s``: collection interval (seconds).
+        - ``count``: number of snapshots returned.
+        - ``snapshots``: list of ``{timestamp, queue_depth, active_agents, idle_agents,
+          tasks_completed_total, tasks_failed_total}``.
+        - ``latest``: most-recent snapshot with full ``per_agent`` detail, or ``null``.
+
+        Design reference: DESIGN.md §10.92 (v1.2.16)
+        """
+        from dataclasses import asdict  # noqa: PLC0415
+        if metrics_collector is None:
+            return {"enabled": False, "interval_s": 10, "count": 0, "snapshots": [], "latest": None}
+        snapshots = metrics_collector.get_snapshots(last_n=last_n)
+        latest_snap = metrics_collector.get_latest()
+        return {
+            "enabled": True,
+            "interval_s": metrics_collector.interval_s,
+            "count": len(snapshots),
+            "snapshots": [
+                {
+                    "timestamp": s.timestamp,
+                    "queue_depth": s.queue_depth,
+                    "active_agents": s.active_agents,
+                    "idle_agents": s.idle_agents,
+                    "tasks_completed_total": s.tasks_completed_total,
+                    "tasks_failed_total": s.tasks_failed_total,
+                }
+                for s in snapshots
+            ],
+            "latest": asdict(latest_snap) if latest_snap is not None else None,
+        }
+
+    @router.get(
+        "/metrics/agents/{agent_id}",
+        summary="Per-agent metrics time series",
+        dependencies=[Depends(auth)],
+    )
+    async def get_agent_metrics_series(agent_id: str, last_n: int = 60) -> dict:
+        """Return per-agent metric time series for *agent_id*.
+
+        Each entry in ``series`` contains ``{timestamp, status}`` plus any
+        per-agent stats available at collection time (``tasks_completed``,
+        ``tasks_failed``, ``error_rate``).
+
+        Returns a 404 when the agent has never appeared in any snapshot.
+
+        Design reference: DESIGN.md §10.92 (v1.2.16)
+        """
+        if metrics_collector is None:
+            return {"enabled": False, "agent_id": agent_id, "series": []}
+        snapshots = metrics_collector.get_snapshots(last_n=last_n)
+        series = [
+            {
+                "timestamp": s.timestamp,
+                **s.per_agent.get(agent_id, {"status": "unknown"}),
+            }
+            for s in snapshots
+        ]
+        return {"enabled": True, "agent_id": agent_id, "series": series}
 
     return router

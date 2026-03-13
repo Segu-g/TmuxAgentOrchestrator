@@ -108,6 +108,17 @@ from tmux_orchestrator.application.scratchpad_store import ScratchpadStore  # no
 
 _scratchpad: ScratchpadStore = ScratchpadStore()  # in-memory until create_app() wires persist_dir
 
+# ---------------------------------------------------------------------------
+# MetricsCollector — time-series ring buffer (v1.2.16+)
+#
+# Module-level singleton so it is shared across create_app() calls in the same
+# process (mirrors _scratchpad pattern).  Wired with orchestrator getters and
+# started/stopped in the FastAPI lifespan context.
+#
+# Reference: DESIGN.md §10.92 (v1.2.16)
+# ---------------------------------------------------------------------------
+_metrics_collector: "Any" = None  # set in create_app() when metrics_enabled=True
+
 
 def _new_session() -> str:
     token = secrets.token_urlsafe(32)
@@ -260,6 +271,15 @@ def create_app(
     async def _lifespan(application: FastAPI):  # noqa: ARG001
         await hub.start()
         logger.info("WebSocket hub started")
+        # Start metrics collector if enabled (v1.2.16).
+        if _metrics_collector is not None:
+            _mc_interval = getattr(
+                getattr(orchestrator, "config", None),
+                "metrics_interval_s",
+                10.0,
+            )
+            await _metrics_collector.start(interval_s=_mc_interval)
+            logger.info("MetricsCollector started (interval=%.1fs)", _mc_interval)
         # Signal the orchestrator to defer agent process startup so that
         # start_agents() can be called AFTER the server begins accepting
         # requests.  This prevents the SessionStart hook deadlock: agents call
@@ -282,6 +302,9 @@ def create_app(
         if _agents_task and not _agents_task.done():
             _agents_task.cancel()
             await asyncio.gather(_agents_task, return_exceptions=True)
+        # Stop metrics collector (v1.2.16).
+        if _metrics_collector is not None:
+            await _metrics_collector.stop()
         if on_shutdown is not None:
             await on_shutdown()
         await hub.stop()
@@ -517,8 +540,37 @@ def create_app(
     app.include_router(
         build_scratchpad_router(auth, _scratchpad),
     )
+    # ------------------------------------------------------------------
+    # MetricsCollector — time-series ring buffer (v1.2.16+)
+    # Initialise when metrics_enabled=True (default).  The collector is
+    # wired with getter lambdas rather than a direct orchestrator reference
+    # to keep infrastructure/application layer separation.
+    # Reference: DESIGN.md §10.92 (v1.2.16)
+    # ------------------------------------------------------------------
+    global _metrics_collector
+    _orch_config_mc = getattr(orchestrator, "config", None)
+    _metrics_enabled_raw = getattr(_orch_config_mc, "metrics_enabled", True)
+    # Only enable when the value is a real bool True (not a MagicMock or other truthy).
+    # Mock orchestrator configs return MagicMock attributes; skip metrics in that case.
+    _metrics_enabled: bool = _metrics_enabled_raw is True
+    if _metrics_enabled and hasattr(orchestrator, "queue_size"):
+        from tmux_orchestrator.infrastructure.metrics_collector import MetricsCollector  # noqa: PLC0415
+        _max_snaps_raw = getattr(_orch_config_mc, "metrics_max_snapshots", 360)
+        try:
+            _max_snaps: int = int(_max_snaps_raw)
+        except (TypeError, ValueError):
+            _max_snaps = 360
+        _metrics_collector = MetricsCollector(
+            get_queue_depth=orchestrator.queue_size,
+            get_agent_statuses=orchestrator.get_all_agent_statuses,
+            get_cumulative_stats=orchestrator.get_cumulative_stats,
+            max_snapshots=_max_snaps,
+        )
+    else:
+        _metrics_collector = None
+
     app.include_router(
-        build_system_router(orchestrator, auth),
+        build_system_router(orchestrator, auth, metrics_collector=_metrics_collector),
     )
     app.include_router(
         build_webhooks_router(orchestrator, auth),

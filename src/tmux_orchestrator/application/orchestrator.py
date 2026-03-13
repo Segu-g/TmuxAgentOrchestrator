@@ -751,6 +751,58 @@ class Orchestrator:
         """Return the number of tasks currently waiting in the priority queue."""
         return self._task_queue.qsize()
 
+    def queue_size(self) -> int:
+        """Alias for :meth:`queue_depth` — returns pending task count.
+
+        Provided for metrics-collector getter injection compatibility.
+        Design reference: DESIGN.md §10.92 (v1.2.16)
+        """
+        return self._task_queue.qsize()
+
+    def get_all_agent_statuses(self) -> dict[str, str]:
+        """Return a mapping of ``{agent_id: status_string}`` for all agents.
+
+        Used by the ``MetricsCollector`` getter injection.
+
+        Design reference: DESIGN.md §10.92 (v1.2.16)
+        """
+        agents = self.list_agents()
+        return {a["id"]: a.get("status", "UNKNOWN") for a in agents}
+
+    def get_cumulative_stats(self) -> dict:
+        """Return cumulative task completion statistics across all agents.
+
+        Returns a dict with:
+        - ``tasks_completed_total``: total tasks completed with status "success"
+        - ``tasks_failed_total``: total tasks completed with status "error"
+        - ``per_agent``: ``{agent_id: {tasks_completed, tasks_failed, error_rate}}``
+
+        Derived from the in-memory ``_agent_history`` dict (capped at 200 per agent).
+        Counts reflect only the entries currently in the ring buffer, which is
+        sufficient for trend monitoring over typical agent lifetimes.
+
+        Design reference: DESIGN.md §10.92 (v1.2.16)
+        """
+        total_completed = 0
+        total_failed = 0
+        per_agent: dict[str, dict] = {}
+        for agent_id, history in self._agent_history.items():
+            completed = sum(1 for r in history if r.get("status") == "success")
+            failed = sum(1 for r in history if r.get("status") == "error")
+            total = completed + failed
+            per_agent[agent_id] = {
+                "tasks_completed": completed,
+                "tasks_failed": failed,
+                "error_rate": round(failed / total, 3) if total > 0 else 0.0,
+            }
+            total_completed += completed
+            total_failed += failed
+        return {
+            "tasks_completed_total": total_completed,
+            "tasks_failed_total": total_failed,
+            "per_agent": per_agent,
+        }
+
     # ------------------------------------------------------------------
     # Autoscaler
     # ------------------------------------------------------------------

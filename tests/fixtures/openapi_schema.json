@@ -3743,6 +3743,101 @@
         "summary": "Remove an agent from a group"
       }
     },
+    "/metrics/agents/{agent_id}": {
+      "get": {
+        "description": "Return per-agent metric time series for *agent_id*.\n\nEach entry in ``series`` contains ``{timestamp, status}`` plus any\nper-agent stats available at collection time (``tasks_completed``,\n``tasks_failed``, ``error_rate``).\n\nReturns a 404 when the agent has never appeared in any snapshot.\n\nDesign reference: DESIGN.md \u00a710.92 (v1.2.16)",
+        "operationId": "get_agent_metrics_series_metrics_agents__agent_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_id",
+            "required": true,
+            "schema": {
+              "title": "Agent Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "last_n",
+            "required": false,
+            "schema": {
+              "default": 60,
+              "title": "Last N",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Agent Metrics Series Metrics Agents  Agent Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Per-agent metrics time series"
+      }
+    },
+    "/metrics/time-series": {
+      "get": {
+        "description": "Return the last *last_n* metric snapshots from the ring buffer.\n\nEach snapshot is collected every ``metrics_interval_s`` seconds\n(default 10 s, configured via ``OrchestratorConfig.metrics_interval_s``).\n\nThe default ``last_n=60`` returns the last 10 minutes of history at\nthe default 10-second collection interval.\n\nResponse structure:\n- ``enabled``: ``false`` when ``metrics_enabled: false`` in config.\n- ``interval_s``: collection interval (seconds).\n- ``count``: number of snapshots returned.\n- ``snapshots``: list of ``{timestamp, queue_depth, active_agents, idle_agents,\n  tasks_completed_total, tasks_failed_total}``.\n- ``latest``: most-recent snapshot with full ``per_agent`` detail, or ``null``.\n\nDesign reference: DESIGN.md \u00a710.92 (v1.2.16)",
+        "operationId": "get_metrics_time_series_metrics_time_series_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "last_n",
+            "required": false,
+            "schema": {
+              "default": 60,
+              "title": "Last N",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Metrics Time Series Metrics Time Series Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Agent and queue metrics time series (ring buffer)"
+      }
+    },
     "/orchestrator/autoscaler": {
       "get": {
         "description": "Return the current autoscaler state.\n\nReturns ``{\"enabled\": false, ...}`` when autoscaling is not configured\n(``autoscale_max=0`` in config).",
