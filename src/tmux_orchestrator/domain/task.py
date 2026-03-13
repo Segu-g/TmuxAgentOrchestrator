@@ -73,6 +73,18 @@ class Task:
     # Reference: Temporal per-activity schedule_to_close_timeout (2025);
     # DESIGN.md §10.63 (v1.1.31)
     timeout: int | None = None
+    # Task timeout escalation (v1.2.13): when task_escalation_enabled=True and
+    # this task times out (watchdog_timeout), it is re-queued instead of failed.
+    # escalation_count tracks how many times it has been escalated (re-queued after
+    # a timeout); after max_task_escalations it is dead-lettered.
+    # excluded_agents accumulates the IDs of agents that have already timed out this
+    # task so the dispatch loop avoids re-dispatching to the same agent.
+    # Reference: GitGuardian "Celery Task Resilience" (2024) — escalating retry;
+    # Temporal WorkflowTaskTimeout reassignment (2024) — avoid stuck worker;
+    # Wikipedia "Aging (scheduling)" — priority bump on re-queue;
+    # DESIGN.md §10.89 (v1.2.13)
+    escalation_count: int = 0
+    excluded_agents: list[str] = field(default_factory=list)
 
     def __lt__(self, other: "Task") -> bool:
         return self.priority < other.priority
@@ -96,6 +108,8 @@ class Task:
             "ttl": self.ttl,
             "expires_at": self.expires_at,
             "timeout": self.timeout,
+            "escalation_count": self.escalation_count,
+            **({"excluded_agents": self.excluded_agents} if self.excluded_agents else {}),
             **({"metadata": self.metadata} if self.metadata else {}),
         }
         return d

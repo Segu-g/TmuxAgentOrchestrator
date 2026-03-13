@@ -112,6 +112,7 @@ class AgentRegistry:
         self,
         required_tags: list[str] | None = None,
         allowed_agent_ids: set[str] | None = None,
+        excluded_agent_ids: set[str] | None = None,
     ) -> Any | None:
         """Return the first IDLE worker whose circuit is not OPEN, or None.
 
@@ -121,11 +122,17 @@ class AgentRegistry:
         When *allowed_agent_ids* is non-None, only agents whose ID appears in
         that set are eligible (used to implement named group dispatch).
 
+        When *excluded_agent_ids* is non-None, agents in that set are skipped
+        even if they are idle and capable.  Used by the task-timeout escalation
+        path (v1.2.13) to avoid re-dispatching an escalated task to an agent
+        that already timed it out.
+
         Design reference:
         - FIPA Directory Facilitator (2002) — capability-based agent selection.
         - Kubernetes Node Affinity nodeSelector — label-set subset matching.
         - Kubernetes Node Pools / Node Groups — restrict scheduling to a pool.
-        - DESIGN.md §10.14 (v0.18.0, 2026-03-05); §10.26 (v0.31.0).
+        - Temporal WorkflowTaskTimeout reassignment — avoid stuck worker.
+        - DESIGN.md §10.14 (v0.18.0, 2026-03-05); §10.26 (v0.31.0); §10.89 (v1.2.13).
         """
         needed: set[str] = set(required_tags) if required_tags else set()
         for agent in self._agents.values():
@@ -138,6 +145,8 @@ class AgentRegistry:
             if needed and not needed.issubset(set(getattr(agent, "tags", []))):
                 continue
             if allowed_agent_ids is not None and agent.id not in allowed_agent_ids:
+                continue
+            if excluded_agent_ids is not None and agent.id in excluded_agent_ids:
                 continue
             return agent
         return None

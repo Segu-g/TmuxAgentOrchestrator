@@ -6592,3 +6592,76 @@ Added `restart_count: int` field.
 - `pyproject.toml`: version `1.2.12`
 
 **テスト数**: 3126+ → 3158+
+
+
+## §10.89 — v1.2.13: タスクタイムアウト エスカレーション (Task Timeout Escalation)
+
+### 選択理由 (Selection Rationale)
+
+**選択**: Task Timeout Escalation — re-queue timed-out tasks at higher priority, excluding the agent that timed out.
+
+**理由**: v1.2.12 introduced agent auto-restart for consecutive failures, but tasks themselves are permanently lost on timeout. This is a data loss scenario for critical long-running tasks. Escalation (re-queue + priority bump + excluded_agents) recovers the task without relying on the user to resubmit manually. This is the natural complement to agent auto-restart.
+
+**選択しなかったもの**: Distributed tracing improvements, workflow visualisation — still lower priority.
+
+### Research Findings
+
+**1. Queue-Based Escalating Retry Pattern (GitGuardian, "Celery Task Resilience", 2024)**
+- Tasks that exceed time limit are re-scheduled on a separate queue processed by more powerful workers with longer timeouts.
+- Key insight: "escalating retry" = different queue / different worker on each retry attempt.
+- Reference: https://blog.gitguardian.com/celery-tasks-retries-errors/
+
+**2. Temporal WorkflowTaskTimeout and task reassignment (Temporal Community Forum, 2024)**
+- When a workflow task times out, Temporal marks it TIMED_OUT and schedules a new instance based on retry config.
+- Sticky execution after Worker shutdown causes "Workflow Task Timed Out" → reassigned to fresh worker.
+- The `excluded_agents` list implements this "avoid the stuck worker" pattern.
+- Reference: https://community.temporal.io/t/handling-workflow-task-timeout-due-to-sticky-queue-task-timeout/16443
+
+**3. Aging / Priority Escalation (Wikipedia "Aging (scheduling)"; GeeksforGeeks, 2024)**
+- Aging = gradually increase priority of a waiting/retrying process to prevent starvation.
+- "Aging dynamically adjusts priorities based on waiting duration, typically by decrementing the priority number at regular intervals."
+- Priority bump on each escalation (lower number = higher urgency) mirrors this pattern.
+- Reference: https://en.wikipedia.org/wiki/Aging_(scheduling)
+
+**4. AWS Builders Library — Timeouts, retries and backoff with jitter (Amazon, 2022)**
+- "Timeout management requires setting visibility timeout greater than processing time plus retry delay."
+- Combining timeouts with retries is standard; the escalation count acts as a bounded retry counter.
+- Reference: https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/
+
+### 実装内容 (Implementation)
+
+#### `Task.escalation_count: int = 0`
+How many times this task has been escalated due to timeout. Added to `Task` dataclass and `to_dict()`.
+
+#### `Task.excluded_agents: list[str]`
+Agent IDs that have already timed out this task and should not receive it again. Default `[]`.
+
+#### `OrchestratorConfig.task_escalation_enabled: bool = True`
+Global on/off switch. When `False`, timeout → immediate failure (v1.2.12 behaviour).
+
+#### `OrchestratorConfig.max_task_escalations: int = 2`
+After this many escalations, the task is finally marked as failed (dead-lettered).
+
+#### `Orchestrator._handle_task_timeout(task, timed_out_agent_id)`
+Called from `_route_loop` when a RESULT with `error="watchdog_timeout"` arrives.
+- If escalation disabled or count >= max: call existing failure path.
+- Otherwise: `dataclasses.replace(task, escalation_count+1, excluded_agents+agent_id, priority-1)`; re-enqueue; publish `task_escalated` STATUS event.
+
+#### `_dispatch_loop` excluded_agents filter
+`find_idle_worker()` gains an optional `excluded_agent_ids` parameter.
+When `task.excluded_agents` is non-empty, those agents are skipped during dispatch.
+
+#### `GET /tasks/{id}` enhancement
+`escalation_count` and `excluded_agents` added to in-progress and waiting task responses.
+
+#### `load_config()` reads `task_escalation_enabled` and `max_task_escalations` from YAML.
+
+### 実装変更ファイル (Implementation Files)
+
+- `src/tmux_orchestrator/domain/task.py`: `escalation_count`, `excluded_agents` fields + `to_dict()`
+- `src/tmux_orchestrator/application/config.py`: `OrchestratorConfig.task_escalation_enabled`, `max_task_escalations`
+- `src/tmux_orchestrator/application/registry.py`: `find_idle_worker(excluded_agent_ids=...)`
+- `src/tmux_orchestrator/application/orchestrator.py`: `_handle_task_timeout()`, hook in `_route_loop`, excluded_agents dispatch filter
+- `src/tmux_orchestrator/web/routers/tasks.py`: expose `escalation_count`, `excluded_agents`
+- `tests/test_task_escalation.py`: 12+ new tests
+- `pyproject.toml`: version `1.2.13`

@@ -403,6 +403,25 @@ class OrchestratorConfig:
     # Reference: Erlang OTP supervisor behaviour — intensity/period limit;
     #   DESIGN.md §10.88 (v1.2.12)
     supervision_enabled: bool = True
+    # --- Task timeout escalation (v1.2.13) ---
+    # task_escalation_enabled: when True (default), a task that is timed out by the
+    #   watchdog is re-queued instead of immediately failed.  The re-queued task has
+    #   its priority bumped (lower number = higher urgency) and the agent that timed
+    #   it out is added to excluded_agents so it is not dispatched there again.
+    #   After max_task_escalations escalations the task is finally dead-lettered.
+    #   Set to False to restore the pre-v1.2.13 behaviour (immediate failure on
+    #   watchdog_timeout).
+    #
+    # max_task_escalations: maximum number of times a single task may be re-queued
+    #   due to timeout before being permanently failed.  Default 2.
+    #
+    # Reference: GitGuardian "Celery Task Resilience" (2024) — escalating retry;
+    #   Temporal WorkflowTaskTimeout reassignment (2024) — avoid stuck worker;
+    #   Wikipedia "Aging (scheduling)" — priority bump on re-queue;
+    #   AWS Builders Library "Timeouts, retries and backoff with jitter" (2022);
+    #   DESIGN.md §10.89 (v1.2.13)
+    task_escalation_enabled: bool = True
+    max_task_escalations: int = 2
     # --- Workflow branch cleanup on completion ---
     # workflow_branch_cleanup: when True (default), the orchestrator automatically
     #   deletes worktree branches accumulated by ephemeral agents once the workflow
@@ -613,4 +632,6 @@ def load_config(path: str | Path, cwd: Path | str | None = None) -> Orchestrator
         repo_root=Path(data["repo_root"]).expanduser().resolve() if data.get("repo_root") else None,
         supervision_enabled=data.get("supervision_enabled", True),
         workflow_branch_cleanup=data.get("workflow_branch_cleanup", True),
+        task_escalation_enabled=data.get("task_escalation_enabled", True),
+        max_task_escalations=data.get("max_task_escalations", 2),
     )

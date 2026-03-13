@@ -233,6 +233,8 @@ def build_tasks_router(
                 "ttl": waiting_task.ttl,
                 "expires_at": waiting_task.expires_at,
                 "timeout": waiting_task.timeout,
+                "escalation_count": getattr(waiting_task, "escalation_count", 0),
+                "excluded_agents": getattr(waiting_task, "excluded_agents", []),
             }
             if blocking:
                 resp["blocking"] = blocking
@@ -260,6 +262,8 @@ def build_tasks_router(
                     "ttl": item.get("ttl"),
                     "expires_at": item.get("expires_at"),
                     "timeout": active.timeout if active else item.get("timeout"),
+                    "escalation_count": getattr(active, "escalation_count", 0) if active else 0,
+                    "excluded_agents": getattr(active, "excluded_agents", []) if active else [],
                 }
                 if blocking:
                     resp["blocking"] = blocking
@@ -290,6 +294,8 @@ def build_tasks_router(
                         "ttl": ct.ttl,
                         "expires_at": ct.expires_at,
                         "timeout": ct.timeout,
+                        "escalation_count": getattr(ct, "escalation_count", 0),
+                        "excluded_agents": getattr(ct, "excluded_agents", []),
                     }
                     if blocking:
                         resp["blocking"] = blocking

@@ -1647,6 +1647,7 @@ class Orchestrator:
                 agent = self.registry.find_idle_worker(
                     required_tags=task.required_tags,
                     allowed_agent_ids=group_members,
+                    excluded_agent_ids=set(task.excluded_agents) if task.excluded_agents else None,
                 )
             if agent is None:
                 retry_count = task.metadata.get("_retry_count", 0) + 1
@@ -1827,6 +1828,93 @@ class Orchestrator:
                     from_id=agent_id,
                     payload={"task_id": task_id, "error": "watchdog_timeout", "output": None},
                 ))
+
+    # ------------------------------------------------------------------
+    # Task timeout escalation (v1.2.13)
+    # ------------------------------------------------------------------
+
+    async def _handle_task_timeout(self, task: "Task", timed_out_agent_id: str) -> None:
+        """Re-queue or fail a timed-out task based on escalation policy.
+
+        When ``task_escalation_enabled=True`` and the task has not yet reached
+        ``max_task_escalations``, the task is re-queued at higher priority
+        (priority - 1) with the timed-out agent added to ``excluded_agents``.
+        A ``task_escalated`` STATUS event is published so webhooks and the TUI
+        can observe the escalation.
+
+        When escalation is disabled or exhausted, the task is allowed to fall
+        through to the normal failure path (caller handles this by returning
+        ``True`` = "escalated" / ``False`` = "must fail").
+
+        Returns
+        -------
+        bool
+            ``True`` if the task was escalated (re-queued), ``False`` if it
+            must be treated as a final failure.
+
+        Design reference:
+        - GitGuardian "Celery Task Resilience" (2024) — escalating retry;
+        - Temporal WorkflowTaskTimeout reassignment (2024) — avoid stuck worker;
+        - Wikipedia "Aging (scheduling)" — priority bump on re-queue;
+        - AWS Builders Library "Timeouts, retries and backoff with jitter" (2022);
+        - DESIGN.md §10.89 (v1.2.13)
+        """
+        import dataclasses as _dc  # noqa: PLC0415
+
+        cfg = self.config
+        if (
+            not cfg.task_escalation_enabled
+            or task.escalation_count >= cfg.max_task_escalations
+        ):
+            return False
+
+        new_priority = max(0, task.priority - 1)
+        escalated = _dc.replace(
+            task,
+            escalation_count=task.escalation_count + 1,
+            excluded_agents=list(task.excluded_agents) + [timed_out_agent_id],
+            priority=new_priority,
+        )
+        self._task_seq += 1
+        await self._task_queue.put((new_priority, self._task_seq, escalated))
+        # Update priority tracking for inheritance.
+        self._task_priorities[escalated.id] = new_priority
+        # Keep active task reference updated.
+        self._active_tasks[escalated.id] = escalated
+
+        await self.bus.publish(Message(
+            type=MessageType.STATUS,
+            from_id="__orchestrator__",
+            payload={
+                "event": "task_escalated",
+                "task_id": task.id,
+                "escalation_count": escalated.escalation_count,
+                "excluded_agents": escalated.excluded_agents,
+                "new_priority": new_priority,
+                "timed_out_agent_id": timed_out_agent_id,
+            },
+        ))
+        # Webhook: task_escalated event
+        asyncio.create_task(
+            self._webhook_manager.deliver("task_escalated", {
+                "task_id": task.id,
+                "escalation_count": escalated.escalation_count,
+                "excluded_agents": escalated.excluded_agents,
+                "new_priority": new_priority,
+                "timed_out_agent_id": timed_out_agent_id,
+            }),
+            name=f"wh-task-escalated-{task.id[:8]}",
+        )
+        logger.info(
+            "Task %s escalated (attempt %d/%d) — re-queued at priority %d "
+            "excluding agent %s",
+            task.id,
+            escalated.escalation_count,
+            cfg.max_task_escalations,
+            new_priority,
+            timed_out_agent_id,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # ERROR state recovery loop
@@ -2093,6 +2181,23 @@ class Orchestrator:
                     # Apache Spark DAG scheduler. DESIGN.md §10.24 (v0.29.0)
                     await self._on_dep_satisfied(task_id)
                 elif error and task_id:
+                    # Task timeout escalation (v1.2.13): for watchdog_timeout errors,
+                    # attempt to escalate (re-queue at higher priority, exclude the
+                    # timed-out agent) before falling through to the failure path.
+                    # Normal retries (max_retries) are separate from escalations —
+                    # escalation is a "try a different agent" mechanism, retries are
+                    # "try again on any agent".
+                    task_for_escalation = self._active_tasks.get(task_id)
+                    if (
+                        error == "watchdog_timeout"
+                        and task_for_escalation is not None
+                    ):
+                        escalated = await self._handle_task_timeout(
+                            task_for_escalation, msg.from_id
+                        )
+                        if escalated:
+                            self._bus_queue.task_done()
+                            continue
                     # Check if task has retries remaining before dead-lettering.
                     task = self._active_tasks.get(task_id)
                     if task is not None and task.retry_count < task.max_retries:
