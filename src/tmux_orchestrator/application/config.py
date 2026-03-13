@@ -35,6 +35,24 @@ class AgentConfig:
     # Matched files are copied into the agent worktree at agent start time.
     # Recommended location: .claude/specs/ (architecture.md, decisions/*.md, etc.)
     context_spec_files: list[str] = field(default_factory=list)
+    # spec_files: paths to YAML convention/constraint files whose rules are injected
+    # into the agent's CLAUDE.md under a "## Codified Specs" section (hot-memory).
+    # Each file must be a YAML document with optional fields:
+    #   name: str, description: str, rules: list[str], examples: list[str]
+    # Paths are resolved relative to cwd (or absolute).
+    #
+    # Rationale (hot-memory vs cold-memory):
+    #   context_spec_files copies raw YAML files into the worktree — the agent must
+    #   explicitly read them (cold-memory, Tier-3 in Vasilopoulos arXiv:2602.20478).
+    #   spec_files injects parsed rule text directly into CLAUDE.md so every agent
+    #   sees the conventions on its very first context load without extra I/O.
+    #
+    # Reference:
+    #   Vasilopoulos et al. arXiv:2602.20478 §3 "Hot-memory constitution" (2026)
+    #   Thoughtworks "Spec-driven development" (2025)
+    #   arXiv:2602.02584 "Constitutional Spec-Driven Development" (2026)
+    #   DESIGN.md §10.86 (v1.2.10)
+    spec_files: list[str] = field(default_factory=list)
     # --- Capability tags for smart dispatch ---
     # Tasks with required_tags are only dispatched to agents whose tags include
     # ALL required tags.  Reference: FIPA Directory Facilitator (2002),
@@ -469,6 +487,7 @@ def load_config(path: str | Path, cwd: Path | str | None = None) -> Orchestrator
             system_prompt_file=a.get("system_prompt_file"),
             context_files=a.get("context_files", []),
             context_spec_files=a.get("context_spec_files", []),
+            spec_files=a.get("spec_files", []),
             tags=a.get("tags", []),
             groups=a.get("groups", []),
             merge_on_stop=a.get("merge_on_stop", False),

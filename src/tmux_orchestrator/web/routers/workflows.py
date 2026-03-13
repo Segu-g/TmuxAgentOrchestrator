@@ -23,6 +23,7 @@ from tmux_orchestrator.web.schemas import (
     IterativeReviewWorkflowSubmit,
     LoopBlockModel,
     MobReviewWorkflowSubmit,
+    PairCoderWorkflowSubmit,
     PairWorkflowSubmit,
     ParallelBlockModel,
     PdcaWorkflowSubmit,
@@ -4805,6 +4806,326 @@ def build_workflows_router(
             "scratchpad_prefix": sp,
             "loop_block_name": "pdca_cycle",
             "max_cycles": body.max_cycles,
+        }
+
+    # -------------------------------------------------------------------------
+    # POST /workflows/paircoder
+    # PairCoder writer→reviewer loop (Codified Context hot-memory pattern)
+    # -------------------------------------------------------------------------
+
+    @router.post(
+        "/workflows/paircoder",
+        summary="Submit a PairCoder writer→reviewer loop workflow",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_paircoder_workflow(body: PairCoderWorkflowSubmit) -> dict:
+        """Submit a PairCoder writer→reviewer loop Workflow DAG.
+
+        The PairCoder pattern implements the Generator-and-Critic (Ralph Loop)
+        methodology in which two agents iterate: a **writer** implements the task
+        and a **reviewer** checks the output against codified conventions, providing
+        structured PASS/FAIL feedback.  The writer revises until the reviewer is
+        satisfied or ``max_rounds`` is reached.
+
+        Workflow topology (max_rounds=N, strictly sequential)::
+
+            write_r1 → review_r1 → write_r2 → review_r2 → … → review_rN
+
+        Scratchpad keys (Blackboard pattern):
+
+        - ``{prefix}_impl_r{n}``     : path to writer's implementation file for round N
+        - ``{prefix}_feedback_r{n}`` : reviewer's PASS/FAIL feedback for round N
+        - ``{prefix}_verdict``       : final PASS or FAIL verdict (written by last reviewer)
+
+        Returns:
+        - ``workflow_id``: workflow run UUID for status polling
+        - ``name``: human-readable name (``paircoder/<task[:40]>``)
+        - ``task_ids``: ordered dict ``{write_r1, review_r1, write_r2, review_r2, …}``
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+
+        Design references:
+        - Geoffrey Huntley "The Ralph Loop" — external review loop for coding agents (2025)
+          https://dev.to/yw1975/after-2-years-of-ai-assisted-coding-i-automated-the-one-thing
+        - Google ADK "Generator-and-Critic pattern" (developers.googleblog.com, 2025)
+          https://developers.googleblog.com/developers-guide-to-multi-agent-patterns-in-adk/
+        - Vasilopoulos et al. arXiv:2602.20478 "Codified Context" §3 (2026)
+        - DESIGN.md §10.86 (v1.2.10)
+        """
+
+        wm = orchestrator.get_workflow_manager()
+        task_slug = body.task[:40].replace(" ", "_").replace("/", "_")
+        wf_name = f"paircoder/{task_slug}"
+
+        pre_run_id = str(uuid.uuid4())
+        if body.scratchpad_prefix:
+            scratchpad_prefix = body.scratchpad_prefix
+        else:
+            scratchpad_prefix = f"paircoder_{pre_run_id[:8]}"
+
+        lang = body.language
+        # File extension for implementation output
+        _ext_map = {
+            "python": "py",
+            "javascript": "js",
+            "typescript": "ts",
+            "rust": "rs",
+            "go": "go",
+            "java": "java",
+            "c": "c",
+            "cpp": "cpp",
+        }
+        ext = _ext_map.get(lang.lower(), "py")
+
+        # Shared bash snippet for reading orchestrator context and API key
+        _ctx_snippet = (
+            "WEB_BASE_URL=$(python3 -c \""
+            "import json; d=json.load(open('__orchestrator_context__.json')); "
+            "print(d['web_base_url'])\")\n"
+            "   API_KEY=$(cat __orchestrator_api_key__ 2>/dev/null || "
+            "echo \"$TMUX_ORCHESTRATOR_API_KEY\")"
+        )
+
+        def _write_snippet(key: str, filename: str) -> str:
+            """Python3-based snippet to safely write a file's content to scratchpad."""
+            return (
+                f"   python3 -c \"\n"
+                f"import json, urllib.request, os\n"
+                f"content = open('{filename}', 'r', errors='replace').read()\n"
+                f"payload = json.dumps({{'value': content}}).encode()\n"
+                f"api_key = os.environ.get('TMUX_ORCHESTRATOR_API_KEY', '')\n"
+                f"if not api_key:\n"
+                f"    try: api_key = open('__orchestrator_api_key__').read().strip()\n"
+                f"    except: pass\n"
+                f"ctx = json.load(open('__orchestrator_context__.json'))\n"
+                f"base_url = ctx['web_base_url']\n"
+                f"req = urllib.request.Request(base_url + '/scratchpad/{key}', data=payload, method='PUT')\n"
+                f"req.add_header('Content-Type', 'application/json')\n"
+                f"req.add_header('X-API-Key', api_key)\n"
+                f"urllib.request.urlopen(req, timeout=15)\n"
+                f"print('Stored to scratchpad: {key}')\n"
+                f"\"  "
+            )
+
+        def _write_value_snippet(key: str, value_expr: str) -> str:
+            """Python3-based snippet to write a string value to scratchpad."""
+            return (
+                f"   python3 -c \"\n"
+                f"import json, urllib.request, os\n"
+                f"payload = json.dumps({{'value': {value_expr}}}).encode()\n"
+                f"api_key = os.environ.get('TMUX_ORCHESTRATOR_API_KEY', '')\n"
+                f"if not api_key:\n"
+                f"    try: api_key = open('__orchestrator_api_key__').read().strip()\n"
+                f"    except: pass\n"
+                f"ctx = json.load(open('__orchestrator_context__.json'))\n"
+                f"base_url = ctx['web_base_url']\n"
+                f"req = urllib.request.Request(base_url + '/scratchpad/{key}', data=payload, method='PUT')\n"
+                f"req.add_header('Content-Type', 'application/json')\n"
+                f"req.add_header('X-API-Key', api_key)\n"
+                f"urllib.request.urlopen(req, timeout=15)\n"
+                f"print('Stored verdict to scratchpad: {key}')\n"
+                f"\"  "
+            )
+
+        def _read_snippet(key: str, varname: str) -> str:
+            """Bash snippet that reads scratchpad key into $varname."""
+            return (
+                f"   {varname}=$(curl -s -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_BASE_URL/scratchpad/{key}\" \\\n"
+                f"     | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"value\"])')\n"
+            )
+
+        # Spec keys section for reviewer: read each spec_key from scratchpad
+        spec_keys_section = ""
+        if body.spec_keys:
+            spec_keys_section = (
+                f"\n4. Read the following convention/spec keys from scratchpad:\n"
+                f"   ```bash\n"
+                f"   {_ctx_snippet}\n"
+            )
+            for sk in body.spec_keys:
+                spec_keys_section += _read_snippet(sk, f"SPEC_{sk.upper().replace('-', '_')}")
+            spec_keys_section += "   ```\n   Check the implementation against these specifications.\n"
+
+        # Build writer and reviewer tasks for each round
+        task_specs: list[dict] = []
+
+        for rnd in range(1, body.max_rounds + 1):
+            impl_key = f"{scratchpad_prefix}_impl_r{rnd}"
+            feedback_key = f"{scratchpad_prefix}_feedback_r{rnd}"
+            verdict_key = f"{scratchpad_prefix}_verdict"
+            is_first_round = rnd == 1
+            is_last_round = rnd == body.max_rounds
+
+            write_local_id = f"write_r{rnd}"
+            review_local_id = f"review_r{rnd}"
+
+            # Dependency: write_r1 depends on nothing; subsequent writes depend on review_r{n-1}
+            write_deps = [] if is_first_round else [f"review_r{rnd - 1}"]
+            # Review always depends on the same-round write
+            review_deps = [write_local_id]
+
+            # ----------------------------------------------------------------
+            # Writer prompt
+            # ----------------------------------------------------------------
+            feedback_preamble = ""
+            if not is_first_round:
+                prev_feedback_key = f"{scratchpad_prefix}_feedback_r{rnd - 1}"
+                feedback_preamble = (
+                    f"\nThis is ROUND {rnd} of {body.max_rounds}. Read the reviewer's feedback "
+                    f"from the previous round and address ALL points.\n\n"
+                    f"Steps to read previous feedback:\n"
+                    f"```bash\n"
+                    f"{_ctx_snippet}\n"
+                    + _read_snippet(prev_feedback_key, "PREV_FEEDBACK")
+                    + f'echo "Previous feedback:"\necho "$PREV_FEEDBACK"\n'
+                    f"```\n"
+                    f"Address every issue raised before writing your revised implementation.\n"
+                )
+            else:
+                feedback_preamble = f"\nThis is ROUND {rnd} of {body.max_rounds} (initial implementation).\n"
+
+            writer_prompt = (
+                f"You are the WRITER agent in a PairCoder writer→reviewer loop.\n"
+                f"\n"
+                f"**Task:** {body.task}\n"
+                f"**Language:** {lang}\n"
+                f"{feedback_preamble}\n"
+                f"Steps:\n"
+                f"1. Write the complete {lang} implementation to `impl.{ext}` in your working directory.\n"
+                f"   - Add type hints to ALL function parameters and return values\n"
+                f"   - Add docstrings to ALL public functions\n"
+                f"   - Handle edge cases (empty input, boundary values, error conditions)\n"
+                f"   - Follow the conventions in your CLAUDE.md (## Codified Specs section if present)\n"
+                f"2. Verify your implementation parses/compiles:\n"
+                f"   ```bash\n"
+                f"   python3 -m py_compile impl.{ext} && echo 'Syntax OK'\n"
+                f"   ```\n"
+                f"3. Commit your implementation:\n"
+                f"   ```bash\n"
+                f"   git add impl.{ext}\n"
+                f"   git commit -m 'impl: round {rnd}'\n"
+                f"   ```\n"
+                f"4. Store the file path in the shared scratchpad:\n"
+                f"   ```python\n"
+                + _write_value_snippet(impl_key, f"'impl.{ext}'")
+                + f"\n"
+                f"   ```\n"
+                f"\n"
+                f"Be thorough. The reviewer will check your implementation against coding conventions.\n"
+                f"Call `/task-complete` when done."
+            )
+
+            # ----------------------------------------------------------------
+            # Reviewer prompt
+            # ----------------------------------------------------------------
+            verdict_instruction = ""
+            if is_last_round:
+                verdict_instruction = (
+                    f"\n5. Write the final verdict (PASS or FAIL) to scratchpad key `{verdict_key}`:\n"
+                    f"   ```python\n"
+                    + _write_value_snippet(verdict_key, "verdict")
+                    + f"\n"
+                    f"   ```\n"
+                    f"   where `verdict` is the Python string 'PASS' or 'FAIL'.\n"
+                )
+
+            reviewer_prompt = (
+                f"You are the REVIEWER agent in a PairCoder writer→reviewer loop.\n"
+                f"\n"
+                f"**Task being reviewed:** {body.task}\n"
+                f"**Language:** {lang}\n"
+                f"**Round:** {rnd} of {body.max_rounds}\n"
+                f"\n"
+                f"Steps:\n"
+                f"1. Read the implementation file path from the scratchpad:\n"
+                f"   ```bash\n"
+                f"   {_ctx_snippet}\n"
+                + _read_snippet(impl_key, "IMPL_PATH")
+                + f"   echo \"Implementation path: $IMPL_PATH\"\n"
+                f"   ```\n"
+                f"2. Read the implementation file:\n"
+                f"   ```bash\n"
+                f"   cat impl.{ext}\n"
+                f"   ```\n"
+                f"   (If the path in $IMPL_PATH is not `impl.{ext}`, read from $IMPL_PATH)\n"
+                f"3. Review the implementation carefully against these criteria:\n"
+                f"   - Type hints present on ALL function parameters and return values\n"
+                f"   - Docstrings on ALL public functions\n"
+                f"   - No bare `except` clauses — specific exception types required\n"
+                f"   - f-strings used for string formatting (not .format() or %)\n"
+                f"   - Edge cases handled (empty input, None values, boundary conditions)\n"
+                f"   - Logic is correct and implements the task as described\n"
+                + spec_keys_section
+                + f"4. Write your feedback to scratchpad key `{feedback_key}`:\n"
+                f"   Start with **PASS** or **FAIL**, then list specific issues.\n"
+                f"   Format:\n"
+                f"   ```\n"
+                f"   PASS  (or FAIL)\n"
+                f"   \n"
+                f"   Issues found:\n"
+                f"   - [issue 1]\n"
+                f"   - [issue 2]\n"
+                f"   \n"
+                f"   Recommendations:\n"
+                f"   - [recommendation]\n"
+                f"   ```\n"
+                f"   Store feedback:\n"
+                f"   ```python\n"
+                + _write_snippet(feedback_key, f"feedback.txt")
+                + f"\n"
+                f"   ```\n"
+                f"   (Write the feedback text to `feedback.txt` first, then store it)\n"
+                + verdict_instruction
+                + f"\n"
+                f"Be thorough but fair. Your feedback drives the next revision round.\n"
+                f"Call `/task-complete` when done."
+            )
+
+            task_specs.append({
+                "local_id": write_local_id,
+                "prompt": writer_prompt,
+                "depends_on": write_deps,
+                "required_tags": list(body.writer_tags),
+                "timeout": body.agent_timeout,
+            })
+            task_specs.append({
+                "local_id": review_local_id,
+                "prompt": reviewer_prompt,
+                "depends_on": review_deps,
+                "required_tags": list(body.reviewer_tags),
+                "timeout": body.agent_timeout,
+            })
+
+        # Validate DAG (no cycles, no unknown local_ids)
+        try:
+            from tmux_orchestrator.workflow_manager import validate_dag  # noqa: PLC0415
+            ordered = validate_dag(task_specs, local_id_key="local_id", deps_key="depends_on")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        local_to_global: dict[str, str] = {}
+        global_task_ids: list[str] = []
+
+        for spec in ordered:
+            global_deps = [local_to_global[lid] for lid in spec.get("depends_on", [])]
+            task = await orchestrator.submit_task(
+                spec["prompt"],
+                priority=0,
+                depends_on=global_deps or None,
+                required_tags=spec.get("required_tags") or None,
+                timeout=spec.get("timeout"),
+            )
+            local_to_global[spec["local_id"]] = task.id
+            global_task_ids.append(task.id)
+
+        run = wm.submit(name=wf_name, task_ids=global_task_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": local_to_global,
+            "scratchpad_prefix": scratchpad_prefix,
+            "max_rounds": body.max_rounds,
         }
 
     return router

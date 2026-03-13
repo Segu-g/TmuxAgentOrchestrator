@@ -64,6 +64,12 @@ class ClaudeCodeAgent(Agent):
         # Reference: Vasilopoulos arXiv:2602.20478 "Codified Context" (2026).
         context_spec_files: list[str] | None = None,
         context_spec_files_root: Path | None = None,
+        # spec_files: YAML convention files injected into CLAUDE.md (hot-memory).
+        # Rules from each file appear in a ## Codified Specs section so agents see
+        # them on their very first context load without extra explicit I/O.
+        # Reference: DESIGN.md §10.86 (v1.2.10).
+        spec_files: list[str] | None = None,
+        spec_files_root: Path | None = None,
         # --- Capability tags ---
         tags: list[str] | None = None,
         # --- Worktree lifecycle ---
@@ -118,6 +124,10 @@ class ClaudeCodeAgent(Agent):
         # Cold-memory spec files: glob patterns for specification documents.
         self._context_spec_files: list[str] = context_spec_files or []
         self._context_spec_files_root: Path | None = context_spec_files_root
+        # Hot-memory spec files: YAML convention files injected into CLAUDE.md.
+        # Reference: Vasilopoulos arXiv:2602.20478 "Codified Context" §3 (2026).
+        self._spec_files: list[str] = spec_files or []
+        self._spec_files_root: Path | None = spec_files_root
         # Capability tags: advertised capabilities used for smart dispatch.
         self.tags: list[str] = tags or []
         # Working directory set after worktree setup; passed to completion strategy.
@@ -299,6 +309,72 @@ class ClaudeCodeAgent(Agent):
     # Context localization — writes agent-specific files to worktree
     # ------------------------------------------------------------------
 
+    def _load_spec_files(self) -> str:
+        """Load YAML spec files and format as a ## Codified Specs CLAUDE.md section.
+
+        Each YAML file may contain any combination of:
+          - ``name``: section heading (falls back to filename stem)
+          - ``description``: one-line summary
+          - ``rules``: list of constraint strings — each rendered as a bullet
+          - ``examples``: list of short code examples — each rendered as sub-bullet
+
+        Files that do not exist or fail to parse are silently skipped.  The whole
+        section is omitted (empty string returned) when ``spec_files`` is empty.
+
+        Root resolution:
+          When ``spec_files_root`` is set, relative paths are resolved against it.
+          When ``spec_files_root`` is None (no worktree set yet), relative paths
+          are resolved against ``Path.cwd()`` at call time.  Absolute paths are
+          used as-is in both cases.
+
+        References:
+          Vasilopoulos et al. arXiv:2602.20478 §3 "Hot-memory constitution" (2026)
+          arXiv:2602.02584 "Constitutional Spec-Driven Development" (2026)
+          DESIGN.md §10.86 (v1.2.10)
+        """
+        if not self._spec_files:
+            return ""
+        import yaml as _yaml  # noqa: PLC0415 — optional dep, already in pyproject.toml
+
+        lines: list[str] = [
+            "\n## Codified Specs\n\n",
+            "The following project conventions MUST be followed:\n",
+        ]
+        root = self._spec_files_root or Path.cwd()
+        for spec_path_str in self._spec_files:
+            path = Path(spec_path_str)
+            if not path.is_absolute():
+                path = root / spec_path_str
+            if not path.exists():
+                logger.debug(
+                    "Agent %s: spec_file %r not found at %s — skipping",
+                    self.id, spec_path_str, path,
+                )
+                continue
+            try:
+                spec = _yaml.safe_load(path.read_text())
+            except Exception:  # noqa: BLE001 — tolerate malformed YAML
+                logger.warning(
+                    "Agent %s: failed to parse spec_file %s — skipping", self.id, path
+                )
+                continue
+            if not isinstance(spec, dict):
+                continue
+            section_name = spec.get("name") or path.stem
+            lines.append(f"\n### {section_name}\n")
+            if desc := spec.get("description"):
+                lines.append(f"{desc}\n\n")
+            rules = spec.get("rules")
+            if rules and isinstance(rules, list):
+                for rule in rules:
+                    lines.append(f"- {rule}\n")
+            examples = spec.get("examples")
+            if examples and isinstance(examples, list):
+                lines.append("\nExamples:\n")
+                for ex in examples:
+                    lines.append(f"  - `{ex}`\n")
+        return "".join(lines)
+
     def _write_agent_claude_md(self, cwd: Path) -> None:
         """Write an agent-specific CLAUDE.md to the worktree.
 
@@ -458,6 +534,12 @@ git show worktree/{self.id}:<path/to/file>
 or by branching from your branch (chain_branch workflow).
 """
 
+        # Codified Specs section: injected when spec_files are configured.
+        # spec_files_root is set to cwd at write time so relative paths resolve correctly.
+        # Reference: DESIGN.md §10.86 (v1.2.10)
+        self._spec_files_root = cwd
+        codified_specs_section = self._load_spec_files()
+
         content = f"""\
 # Agent: {self.id}
 
@@ -523,7 +605,7 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
 - Notes file: `NOTES.md` (your structured scratchpad — keep it updated)
 - Plan file: `PLAN.md` (created by `/plan`, deleted when task is done)
 - Slash commands: available in `.claude/commands/` — use plain `/task-complete` etc.
-{context_files_section}{custom_section}{context_strategies_section}{artifact_persistence_section}
+{context_files_section}{custom_section}{context_strategies_section}{artifact_persistence_section}{codified_specs_section}
 ## Slash Command Reference
 
 Slash commands are copied into `.claude/commands/` at agent startup so you can

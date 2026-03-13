@@ -6347,3 +6347,110 @@ v1.1.38でWorkflowManagerはフェーズ完了トラッキングを実装した�
 - `tests/test_workflow_phase_webhooks.py`: 12+ テスト
 
 **テスト数**: 3083 → 3095+
+
+## §10.86 — v1.2.10: Codified Context spec file injection + PairCoder writer→reviewer loop
+
+### 選定理由 (Selection Rationale)
+
+**What was chosen**: Codified Context spec file injection into CLAUDE.md (`spec_files` field on `AgentConfig`)
+and a PairCoder workflow (`POST /workflows/paircoder`) that drives a writer→reviewer loop until the
+reviewer approves the implementation against the project's codified conventions.
+
+**Why this**: The previous `context_spec_files` field (v1.0.x) copies raw YAML spec files into the agent's
+worktree (cold-memory pattern), but does not inject the spec content into the agent's CLAUDE.md (hot-memory).
+Agents must explicitly read those files — they are not guaranteed to do so. Injecting spec rules directly
+into CLAUDE.md ensures every agent sees them on its very first context load (hot-memory, always-loaded pattern).
+The PairCoder workflow provides a concrete validation of the spec injection mechanism and the iterative
+review pattern identified in the research.
+
+**What was NOT chosen**: Dynamic short-circuit of max_rounds (skipping round 2 if reviewer passes round 1) —
+this requires runtime scratchpad polling and is deferred; static pre-expansion (all rounds submitted to
+DAG upfront) is simpler and consistent with the LoopBlock pattern already in place.
+
+### Research Findings
+
+#### Query 1: "codified context AI agent conventions specification YAML machine readable 2025 2026"
+
+**Vasilopoulos et al., "Codified Context: Infrastructure for AI Agents in a Complex Codebase"**,
+arXiv:2602.20478 (February 2026). URL: https://arxiv.org/abs/2602.20478
+
+Key contribution: a three-tier codified context infrastructure developed during construction of a
+108,000-line C# distributed system: (1) hot-memory constitution (always-loaded rules and conventions
+encoding orchestration protocols); (2) 19 specialised domain-expert agents; (3) cold-memory knowledge
+base of 34 on-demand specification documents.  The paper distinguishes hot-memory (always injected —
+maps to CLAUDE.md) from cold-memory (retrieved on demand — maps to context_spec_files).
+
+**ContextCov: Deriving and Enforcing Executable Constraints from Agent Instruction Files**,
+arXiv:2603.00822. URL: https://arxiv.org/html/2603.00822
+
+Proposes automatic derivation of executable constraints from AGENTS.md/CLAUDE.md files.  Validates
+that constraint-aware agents achieve higher instruction-following rates.
+
+**Scaling your coding agent's context beyond a single AGENTS.md file**,
+ursula8sciform.substack.com (2025). URL: https://ursula8sciform.substack.com/p/scaling-your-coding-agents-context
+
+Recommends a multi-file convention hierarchy: AGENTS.md root → per-directory AGENTS.md → per-role
+spec files.  Maps directly to our `spec_files: list[str]` + CLAUDE.md injection approach.
+
+#### Query 2: "pair programming AI agents reviewer writer loop pattern multi-agent code review 2025"
+
+**"The Ralph Loop" (Geoffrey Huntley)**. Referenced in:
+"After 2 years of AI-assisted coding, I automated the one thing that actually improved quality: AI Pair Programming",
+dev.to/yw1975 (2025). URL: https://dev.to/yw1975/after-2-years-of-ai-assisted-coding-i-automated-the-one-thing-that-actually-improved-quality-ai-2njh
+
+The Ralph Loop wraps a coding agent in an external loop so it keeps iterating. Core insight: a single
+agent cannot reliably catch its own mistakes (writes code AND judges whether the code is good — like
+grading your own exam). Separation of Generator (writer) from Critic (reviewer) breaks this symmetry.
+
+**"The Art of AI Pair Programming: Patterns That Actually Work"**, Groundy (2025).
+URL: https://groundy.com/articles/art-ai-pair-programming-patterns-that-actually-work/
+
+Dual-agent workflow: one agent writes, another watches and reviews. The same principle applies to
+automated agents — the reviewer needs to check the writer's output against specific, hard-coded
+criteria (spec compliance).
+
+**Developer's guide to multi-agent patterns in ADK**, Google Developers Blog (2025).
+URL: https://developers.googleblog.com/developers-guide-to-multi-agent-patterns-in-adk/
+
+Generator-and-Critic pattern: separates creation from validation. The Critic checks against
+specific criteria, returning structured PASS/FAIL feedback that the Generator uses for revision.
+
+#### Query 3: "spec-driven agent constraints machine readable coding conventions LLM compliance 2025"
+
+**"Spec-driven development: Unpacking one of 2025's key new AI-assisted engineering practices"**,
+Thoughtworks (2025). URL: https://www.thoughtworks.com/en-us/insights/blog/agile-engineering-practices/spec-driven-development-unpacking-2025-new-engineering-practices
+
+Machine-readable specs serve as runtime invariants, not aspirational documentation.  Spec-driven development
+treats specifications as first-class citizens that LLMs use as grounding constraints.
+
+**"Constitutional Spec-Driven Development: Enforcing Security by Construction in AI-Assisted Code Generation"**,
+arXiv:2602.02584 (2026). URL: https://arxiv.org/html/2602.02584v1
+
+Embeds non-negotiable principles into the specification layer, ensuring AI-generated code adheres to
+conventions by construction (via CLAUDE.md injection) rather than by inspection (post-hoc review).
+Maps to our `spec_files` injection into CLAUDE.md — the writer sees rules before generating code.
+
+**AgentSpec: Customizable Runtime Enforcement for Safe and Reliable LLM Agents**,
+arXiv:2503.18666 (2025). URL: https://arxiv.org/abs/2503.18666
+
+Lightweight DSL for specifying and enforcing runtime constraints on LLM agents (triggers, predicates,
+enforcement mechanisms).  Demonstrates >90% unsafe execution prevention.  Our YAML spec format
+(name/description/rules/examples) is a simplified subset of this DSL — human-readable and LLM-parseable.
+
+### 実装変更ファイル (Implementation Files)
+
+- `src/tmux_orchestrator/agents/claude_code.py`:
+  - `_load_spec_files(self) -> str`: new method — loads YAML spec files, formats as ## Codified Specs section
+  - `_write_agent_claude_md()`: appends `_load_spec_files()` output before Slash Command Reference
+  - New `spec_files: list[str]` and `spec_files_root: Path | None` instance fields
+- `src/tmux_orchestrator/application/config.py`:
+  - `AgentConfig.spec_files: list[str] = field(default_factory=list)` — paths to YAML spec files
+  - `load_config()`: reads `spec_files` from YAML config
+- `src/tmux_orchestrator/web/schemas.py`: `PairCoderWorkflowSubmit` model
+- `src/tmux_orchestrator/web/routers/workflows.py`: `POST /workflows/paircoder` endpoint
+- `examples/specs/python_style.yaml` + `examples/specs/testing_conventions.yaml`: sample spec files
+- `examples/workflows/paircoder.yaml`: workflow YAML template
+- `tests/test_workflow_paircoder.py`: 12+ tests
+- `pyproject.toml`: version `1.2.10`
+
+**テスト数**: 3102 → 3114+

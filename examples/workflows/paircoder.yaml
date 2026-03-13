@@ -1,0 +1,63 @@
+name: PairCoder Writer→Reviewer Loop
+description: |
+  Two-agent iterative code refinement using the Generator-and-Critic (Ralph Loop) pattern.
+  A writer agent implements the task; a reviewer checks it against codified conventions and
+  provides structured PASS/FAIL feedback. The writer revises until the reviewer approves or
+  max_rounds is reached.
+
+  Workflow topology (max_rounds=2):
+    write_r1 → review_r1 → write_r2 → review_r2
+
+  Scratchpad keys:
+    {prefix}_impl_r{n}     - path to writer's implementation file for round N
+    {prefix}_feedback_r{n} - reviewer's PASS/FAIL feedback for round N
+    {prefix}_verdict       - final PASS or FAIL verdict
+
+  Agent tags:
+    writer   → paircoder_writer
+    reviewer → paircoder_reviewer
+
+endpoint: POST /workflows/paircoder
+
+parameters:
+  task: string (required) - What to implement
+  language: string (default "python") - Programming language
+  spec_keys: list[str] (default []) - Scratchpad keys with additional conventions
+  max_rounds: int (default 2, range 1-5) - Max writer→reviewer iterations
+  scratchpad_prefix: string (default auto-generated) - Scratchpad namespace
+  writer_tags: list[str] (default ["paircoder_writer"]) - Tags for writer tasks
+  reviewer_tags: list[str] (default ["paircoder_reviewer"]) - Tags for reviewer tasks
+  agent_timeout: int (default 300) - Per-task timeout in seconds
+  reply_to: string|null (default null) - Agent that receives final RESULT in mailbox
+
+example_config:
+  session_name: paircoder_demo
+  task_timeout: 900
+  watchdog_poll: 30
+  agents:
+    - id: writer
+      type: claude_code
+      isolate: true
+      role: worker
+      tags: [paircoder_writer]
+      spec_files:
+        - examples/specs/python_style.yaml
+    - id: reviewer
+      type: claude_code
+      isolate: true
+      role: worker
+      tags: [paircoder_reviewer]
+
+example_request:
+  task: "Implement a function that calculates the Fibonacci sequence up to n terms"
+  language: python
+  max_rounds: 2
+  writer_tags: [paircoder_writer]
+  reviewer_tags: [paircoder_reviewer]
+  agent_timeout: 300
+
+references:
+  - "Geoffrey Huntley 'The Ralph Loop' — external review loop for coding agents (2025)"
+  - "Google ADK 'Generator-and-Critic pattern' (developers.googleblog.com, 2025)"
+  - "Vasilopoulos et al. arXiv:2602.20478 'Codified Context' §3 hot-memory (2026)"
+  - "DESIGN.md §10.86 (v1.2.10)"

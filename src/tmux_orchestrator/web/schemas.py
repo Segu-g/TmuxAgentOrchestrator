@@ -1736,3 +1736,71 @@ class AgentmeshWorkflowSubmit(BaseModel):
         if not v.strip():
             raise ValueError("feature_request must not be empty")
         return v
+
+
+class PairCoderWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/paircoder — PairCoder writer→reviewer loop.
+
+    Implements the Generator-and-Critic (Ralph Loop) pattern:
+    - **writer**: implements the task in ``language``, writes output to ``impl.{ext}``,
+      stores the file path in ``{scratchpad_prefix}_impl_r{n}``.
+    - **reviewer**: reads the implementation, checks it against any ``spec_keys``
+      conventions, writes structured PASS/FAIL feedback to
+      ``{scratchpad_prefix}_feedback_r{n}``.
+    - Rounds iterate up to ``max_rounds`` times.
+    - The reviewer writes the final verdict to ``{scratchpad_prefix}_verdict``.
+
+    Workflow topology (max_rounds=2)::
+
+        write_r1 -> review_r1 -> write_r2 -> review_r2
+
+    Scratchpad keys (Blackboard pattern):
+
+    - ``{scratchpad_prefix}_impl_r{n}``     : path to writer's implementation file for round N
+    - ``{scratchpad_prefix}_feedback_r{n}`` : reviewer's PASS/FAIL feedback for round N
+    - ``{scratchpad_prefix}_verdict``       : final PASS or FAIL verdict
+
+    Agent routing:
+    - writer   -> ``paircoder_writer``  (customised via ``writer_tags``)
+    - reviewer -> ``paircoder_reviewer`` (customised via ``reviewer_tags``)
+
+    Design references:
+    - Geoffrey Huntley "The Ralph Loop" — external review loop for coding agents (2025)
+    - Google ADK "Generator-and-Critic pattern" (developers.googleblog.com, 2025)
+    - Vasilopoulos et al. arXiv:2602.20478 "Codified Context" §3 hot-memory (2026)
+    - DESIGN.md §10.86 (v1.2.10)
+    """
+
+    # What to implement
+    task: str
+    # Programming language for code generation
+    language: str = "python"
+    # Scratchpad keys whose values contain additional conventions/constraints
+    # to be shown to the reviewer (e.g. keys from a previous spec-writing phase)
+    spec_keys: list[str] = []
+    # Maximum number of writer→reviewer rounds (1 = single pass, 2 = one revision)
+    max_rounds: int = Field(default=2, ge=1, le=5)
+    # Scratchpad namespace prefix (no slashes); auto-generated when empty
+    scratchpad_prefix: str = ""
+    # required_tags for writer tasks
+    writer_tags: list[str] = ["paircoder_writer"]
+    # required_tags for reviewer tasks
+    reviewer_tags: list[str] = ["paircoder_reviewer"]
+    # Per-task timeout in seconds
+    agent_timeout: int = 300
+    # When set, the final reviewer RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    @field_validator("task")
+    @classmethod
+    def task_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("task must not be empty")
+        return v
+
+    @field_validator("language")
+    @classmethod
+    def language_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("language must not be empty")
+        return v

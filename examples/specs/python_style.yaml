@@ -1,0 +1,14 @@
+name: Python Style Conventions
+description: Code style rules for all Python files in this project
+rules:
+  - Use type hints for all function parameters and return values
+  - Maximum line length is 88 characters (Black formatter)
+  - All public functions must have docstrings
+  - Use f-strings, not .format() or %
+  - No bare except clauses — always catch specific exceptions
+  - Prefer list/dict comprehensions over map()/filter() for readability
+  - Use pathlib.Path instead of os.path for filesystem operations
+examples:
+  - "def process(data: list[str]) -> dict[str, int]:"
+  - 'raise ValueError(f"Invalid input: {data!r}")'
+  - 'result_path = Path(output_dir) / "result.json"'

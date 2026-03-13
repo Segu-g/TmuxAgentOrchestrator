@@ -1020,6 +1020,81 @@
         "title": "MobReviewWorkflowSubmit",
         "type": "object"
       },
+      "PairCoderWorkflowSubmit": {
+        "description": "Request body for POST /workflows/paircoder \u2014 PairCoder writer\u2192reviewer loop.\n\nImplements the Generator-and-Critic (Ralph Loop) pattern:\n- **writer**: implements the task in ``language``, writes output to ``impl.{ext}``,\n  stores the file path in ``{scratchpad_prefix}_impl_r{n}``.\n- **reviewer**: reads the implementation, checks it against any ``spec_keys``\n  conventions, writes structured PASS/FAIL feedback to\n  ``{scratchpad_prefix}_feedback_r{n}``.\n- Rounds iterate up to ``max_rounds`` times.\n- The reviewer writes the final verdict to ``{scratchpad_prefix}_verdict``.\n\nWorkflow topology (max_rounds=2)::\n\n    write_r1 -> review_r1 -> write_r2 -> review_r2\n\nScratchpad keys (Blackboard pattern):\n\n- ``{scratchpad_prefix}_impl_r{n}``     : path to writer's implementation file for round N\n- ``{scratchpad_prefix}_feedback_r{n}`` : reviewer's PASS/FAIL feedback for round N\n- ``{scratchpad_prefix}_verdict``       : final PASS or FAIL verdict\n\nAgent routing:\n- writer   -> ``paircoder_writer``  (customised via ``writer_tags``)\n- reviewer -> ``paircoder_reviewer`` (customised via ``reviewer_tags``)\n\nDesign references:\n- Geoffrey Huntley \"The Ralph Loop\" \u2014 external review loop for coding agents (2025)\n- Google ADK \"Generator-and-Critic pattern\" (developers.googleblog.com, 2025)\n- Vasilopoulos et al. arXiv:2602.20478 \"Codified Context\" \u00a73 hot-memory (2026)\n- DESIGN.md \u00a710.86 (v1.2.10)",
+        "properties": {
+          "agent_timeout": {
+            "default": 300,
+            "title": "Agent Timeout",
+            "type": "integer"
+          },
+          "language": {
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "max_rounds": {
+            "default": 2,
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "title": "Max Rounds",
+            "type": "integer"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "reviewer_tags": {
+            "default": [
+              "paircoder_reviewer"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "title": "Reviewer Tags",
+            "type": "array"
+          },
+          "scratchpad_prefix": {
+            "default": "",
+            "title": "Scratchpad Prefix",
+            "type": "string"
+          },
+          "spec_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Spec Keys",
+            "type": "array"
+          },
+          "task": {
+            "title": "Task",
+            "type": "string"
+          },
+          "writer_tags": {
+            "default": [
+              "paircoder_writer"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "title": "Writer Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "task"
+        ],
+        "title": "PairCoderWorkflowSubmit",
+        "type": "object"
+      },
       "PairWorkflowSubmit": {
         "description": "Request body for POST /workflows/pair \u2014 PairCoder (Navigator + Driver) workflow.\n\nSubmits a 2-agent Pair Programming Workflow DAG modelled on the Navigator /\nDriver pattern from Extreme Programming (Beck & Fowler 1999):\n\n  - **navigator**: reads the task description, produces a structured\n    ``PLAN.md`` (architecture, interfaces, acceptance criteria, step-by-step\n    implementation guide) and stores it in the shared scratchpad.\n  - **driver**: reads the navigator's PLAN.md, implements the code, writes\n    tests, runs them, and stores the implementation summary in the scratchpad.\n\nScratchpad keys (Blackboard pattern):\n\n- ``{scratchpad_prefix}_plan``   : navigator's PLAN.md content\n- ``{scratchpad_prefix}_result`` : driver's implementation summary\n\nArtifacts produced by agents:\n\n- ``PLAN.md``           \u2014 navigator's structured plan (in navigator worktree)\n- ``<impl_file>.py``    \u2014 driver's implementation (in driver worktree)\n- ``test_<impl>.py``    \u2014 driver's tests (in driver worktree)\n- ``driver_summary.md`` \u2014 driver's completion summary (in driver worktree)\n\nDesign references:\n- Beck & Fowler \"Extreme Programming Explained\" (1999): Navigator/Driver roles.\n- FlowHunt \"TDD with AI Agents\" (2025): PairCoder improves code quality vs\n  single-agent baseline.\n- Tweag \"Agentic Coding Handbook \u2014 TDD\" (2025): context-separated pair\n  programming approach.\n- DESIGN.md \u00a710.27 (v1.0.27)",
         "properties": {
@@ -5128,6 +5203,47 @@
           }
         },
         "summary": "Submit a 2-agent PairCoder (Navigator + Driver) workflow"
+      }
+    },
+    "/workflows/paircoder": {
+      "post": {
+        "description": "Submit a PairCoder writer\u2192reviewer loop Workflow DAG.\n\nThe PairCoder pattern implements the Generator-and-Critic (Ralph Loop)\nmethodology in which two agents iterate: a **writer** implements the task\nand a **reviewer** checks the output against codified conventions, providing\nstructured PASS/FAIL feedback.  The writer revises until the reviewer is\nsatisfied or ``max_rounds`` is reached.\n\nWorkflow topology (max_rounds=N, strictly sequential)::\n\n    write_r1 \u2192 review_r1 \u2192 write_r2 \u2192 review_r2 \u2192 \u2026 \u2192 review_rN\n\nScratchpad keys (Blackboard pattern):\n\n- ``{prefix}_impl_r{n}``     : path to writer's implementation file for round N\n- ``{prefix}_feedback_r{n}`` : reviewer's PASS/FAIL feedback for round N\n- ``{prefix}_verdict``       : final PASS or FAIL verdict (written by last reviewer)\n\nReturns:\n- ``workflow_id``: workflow run UUID for status polling\n- ``name``: human-readable name (``paircoder/<task[:40]>``)\n- ``task_ids``: ordered dict ``{write_r1, review_r1, write_r2, review_r2, \u2026}``\n- ``scratchpad_prefix``: scratchpad namespace for this run\n\nDesign references:\n- Geoffrey Huntley \"The Ralph Loop\" \u2014 external review loop for coding agents (2025)\n  https://dev.to/yw1975/after-2-years-of-ai-assisted-coding-i-automated-the-one-thing\n- Google ADK \"Generator-and-Critic pattern\" (developers.googleblog.com, 2025)\n  https://developers.googleblog.com/developers-guide-to-multi-agent-patterns-in-adk/\n- Vasilopoulos et al. arXiv:2602.20478 \"Codified Context\" \u00a73 (2026)\n- DESIGN.md \u00a710.86 (v1.2.10)",
+        "operationId": "submit_paircoder_workflow_workflows_paircoder_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairCoderWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Paircoder Workflow Workflows Paircoder Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a PairCoder writer\u2192reviewer loop workflow"
       }
     },
     "/workflows/pdca": {

@@ -2852,6 +2852,8 @@ class Orchestrator:
             context_spec_files_root=(
                 _Path.cwd() if template_cfg.context_spec_files else None
             ),
+            spec_files=template_cfg.spec_files,
+            spec_files_root=_Path.cwd() if template_cfg.spec_files else None,
             tags=list(template_cfg.tags),
             merge_on_stop=False,  # ephemeral agents never merge
             cleanup_subdir=template_cfg.cleanup_subdir,

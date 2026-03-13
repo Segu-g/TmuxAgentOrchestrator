@@ -1,0 +1,13 @@
+name: Testing Conventions
+description: Rules for writing tests in this project
+rules:
+  - All test functions must start with test_
+  - Each test should have a clear, focused assertion
+  - Use pytest fixtures, not setUp/tearDown
+  - Mock external dependencies, never make real HTTP calls in tests
+  - Test file names must match test_{module_name}.py
+  - Use pytest.raises() context manager for exception testing
+  - Tests should be deterministic — no random seeds, no time-dependent logic without mocking
+examples:
+  - "def test_process_returns_counts(sample_data: list[str]) -> None:"
+  - "with pytest.raises(ValueError, match='Invalid input'):"
