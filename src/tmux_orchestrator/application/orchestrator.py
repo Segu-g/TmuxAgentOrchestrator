@@ -414,6 +414,14 @@ class Orchestrator:
         # by successor phases to resolve which branch to chain from.
         # Design reference: DESIGN.md §10.81
         self._task_ephemeral_agent: dict[str, str] = {}
+        # Workflow → branch list (v1.2.8): maps workflow_id → ordered list of
+        # "worktree/{agent_id}" branch names for ephemeral agents spawned during
+        # that workflow.  Populated in spawn_ephemeral_agent() when workflow_id
+        # is provided.  Consumed by cleanup_workflow_branches() after workflow
+        # reaches terminal state.  Branches are appended in spawn order so the
+        # LAST branch is the final phase's accumulated state.
+        # Design reference: DESIGN.md §10.84 (v1.2.8)
+        self._workflow_branches: dict[str, list[str]] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1533,9 +1541,16 @@ class Orchestrator:
                         if _candidate:
                             _source_branch = _candidate
                             break
+                # Workflow ID for branch tracking (v1.2.8): read from metadata
+                # if the router injected it during the POST /workflows submission.
+                _chain_wf_id: str | None = task.metadata.get("_chain_workflow_id")
+                if _chain_wf_id == "__pending__":
+                    _chain_wf_id = None  # not yet resolved; skip tracking
                 try:
                     _new_eph_id = await self.spawn_ephemeral_agent(
-                        _tmpl, source_branch=_source_branch
+                        _tmpl,
+                        source_branch=_source_branch,
+                        workflow_id=_chain_wf_id,
                     )
                     import dataclasses as _dc  # noqa: PLC0415
                     task = _dc.replace(task, target_agent=_new_eph_id)
@@ -1546,10 +1561,11 @@ class Orchestrator:
                     self._active_tasks[task.id] = task
                     logger.info(
                         "Deferred chain_branch spawn: task %s → ephemeral agent %s "
-                        "(source_branch=%s)",
+                        "(source_branch=%s, workflow_id=%s)",
                         task.id,
                         _new_eph_id,
                         _source_branch or "<none>",
+                        _chain_wf_id or "<none>",
                     )
                 except (ValueError, Exception) as _spawn_err:
                     logger.error(
@@ -2715,7 +2731,11 @@ class Orchestrator:
         return agent
 
     async def spawn_ephemeral_agent(
-        self, template_id: str, *, source_branch: str | None = None
+        self,
+        template_id: str,
+        *,
+        source_branch: str | None = None,
+        workflow_id: str | None = None,
     ) -> str:
         """Create, register, and start an ephemeral agent from a config template.
 
@@ -2756,7 +2776,18 @@ class Orchestrator:
         ValueError
             If no agent config with *template_id* is found.
 
-        Design reference: DESIGN.md §10.79 (v1.2.3), §10.81 (v1.2.5)
+        workflow_id:
+            Optional workflow run ID.  When provided and the agent uses
+            ``isolate=True``, the branch name is appended to
+            ``_workflow_branches[workflow_id]`` so that
+            :meth:`cleanup_workflow_branches` can delete all accumulated
+            branches when the workflow completes.
+
+            When ``None`` (default), branch tracking is skipped (existing
+            behaviour for agents spawned outside a workflow context).
+
+        Design reference: DESIGN.md §10.79 (v1.2.3), §10.81 (v1.2.5),
+        §10.84 (v1.2.8 — workflow_id for branch tracking)
         Research: Kubernetes Pod-per-Job pattern; ephemeral CI agent lifecycle;
         sequential git worktree branch handoff (dredyson.com, 2025).
         """
@@ -2848,6 +2879,16 @@ class Orchestrator:
         branch_name = f"worktree/{ephemeral_id}" if template_cfg.isolate else ""
         if branch_name:
             self._ephemeral_agent_branches[ephemeral_id] = branch_name
+            # Workflow branch tracking (v1.2.8): when a workflow_id is provided,
+            # record this branch so cleanup_workflow_branches() can delete it
+            # once the workflow reaches terminal state.
+            if workflow_id is not None:
+                self._workflow_branches.setdefault(workflow_id, []).append(branch_name)
+                logger.debug(
+                    "Workflow %s: tracking branch %s for cleanup on completion",
+                    workflow_id,
+                    branch_name,
+                )
 
         await self.bus.publish(Message(
             type=MessageType.STATUS,
@@ -2896,6 +2937,84 @@ class Orchestrator:
         Design reference: DESIGN.md §10.20 (v0.25.0).
         """
         return self._workflow_manager
+
+    async def cleanup_workflow_branches(
+        self, workflow_id: str, *, merge_final_to_main: bool = False
+    ) -> list[str]:
+        """Delete accumulated worktree branches for a completed workflow.
+
+        All ephemeral agents spawned with a matching *workflow_id* had their
+        branch names recorded in ``_workflow_branches[workflow_id]`` at spawn
+        time (via :meth:`spawn_ephemeral_agent`).  This method:
+
+        1. Pops the branch list for *workflow_id* from ``_workflow_branches``.
+        2. Optionally merges the LAST branch into the configured default branch
+           (``"main"``) when *merge_final_to_main* is ``True``.
+        3. Deletes all tracked branches via :meth:`WorktreeManager.delete_branch`.
+
+        When no WorktreeManager is configured (e.g. in tests or non-git
+        environments) the method returns an empty list without raising.
+
+        Parameters
+        ----------
+        workflow_id:
+            The workflow run ID whose branches should be cleaned up.
+        merge_final_to_main:
+            When ``True``, attempt to merge the last accumulated branch into
+            the default branch before deleting all branches.  Useful for
+            chain_branch workflows where the final phase's committed files
+            should land on ``main``.  Merge failures are logged but do not
+            prevent the cleanup from continuing.
+
+        Returns
+        -------
+        list[str]
+            Branch names that were successfully deleted.
+
+        Design reference: DESIGN.md §10.84 (v1.2.8)
+        Research: jessfraz/branch-cleanup-action (github.com, 2025);
+        Atlassian Trunk-based Development (atlassian.com, 2025);
+        JetBrains TeamCity branching strategy (jetbrains.com, 2025).
+        """
+        branches = self._workflow_branches.pop(workflow_id, [])
+        if not branches:
+            return []
+
+        wm = self._worktree_manager
+        if wm is None:
+            return []
+
+        loop = asyncio.get_event_loop()
+
+        if merge_final_to_main and branches:
+            final_branch = branches[-1]
+            try:
+                await loop.run_in_executor(
+                    None, lambda: wm.merge_branch_to_main(final_branch)
+                )
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "cleanup_workflow_branches: failed to merge final branch %r to main",
+                    final_branch,
+                )
+
+        deleted: list[str] = []
+        for branch in branches:
+            try:
+                await loop.run_in_executor(None, lambda b=branch: wm.delete_branch(b))
+                deleted.append(branch)
+                logger.info(
+                    "cleanup_workflow_branches: deleted branch %r (workflow %s)",
+                    branch,
+                    workflow_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.debug(
+                    "cleanup_workflow_branches: could not delete branch %r "
+                    "(may already be gone)",
+                    branch,
+                )
+        return deleted
 
     def checkpoint_workflow(self, run: "WorkflowRun") -> None:
         """Persist a workflow run snapshot to the checkpoint store (if enabled).

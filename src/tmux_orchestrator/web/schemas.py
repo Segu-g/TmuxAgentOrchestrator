@@ -784,6 +784,14 @@ class WorkflowSubmit(BaseModel):
     phases: list[Any] | None = None  # list[PhaseItemModel] — Any for forward-compat
     context: str = ""
     task_timeout: int | None = None
+    # merge_to_main_on_complete: when True, the orchestrator merges the LAST
+    #   ephemeral branch accumulated by this workflow into the main branch before
+    #   deleting all worktree branches.  Only meaningful for workflows that use
+    #   chain_branch=True phases.  Requires WorktreeManager to be configured.
+    #   Default False to preserve existing behaviour.
+    #
+    # Design reference: DESIGN.md §10.84 (v1.2.8)
+    merge_to_main_on_complete: bool = False
 
     @model_validator(mode="after")
     def tasks_or_phases_required(self) -> "WorkflowSubmit":

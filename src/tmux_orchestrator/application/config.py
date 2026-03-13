@@ -360,6 +360,23 @@ class OrchestratorConfig:
     #
     # Reference: DESIGN.md §10.17 (v1.0.0 — worktree cwd bug fix)
     repo_root: "Path | None" = None
+    # --- Workflow branch cleanup on completion ---
+    # workflow_branch_cleanup: when True (default), the orchestrator automatically
+    #   deletes worktree branches accumulated by ephemeral agents once the workflow
+    #   reaches "complete" or "failed" status.
+    #
+    # Background: ephemeral chain_branch agents use keep_branch_on_stop=True so
+    #   that successor phases can branch from their committed state (v1.2.6).
+    #   After the workflow completes, these branches are no longer needed and
+    #   accumulate indefinitely without this cleanup.
+    #
+    # Set workflow_branch_cleanup=False to preserve branches for post-mortem
+    #   inspection (debugging, audit trails, etc.).
+    #
+    # Reference: DESIGN.md §10.84 (v1.2.8)
+    # Research: jessfraz/branch-cleanup-action (github.com, 2025);
+    #   Jenkins Multibranch Pipeline stale branch hygiene (pankajaswal, 2025).
+    workflow_branch_cleanup: bool = True
 
     def __post_init__(self) -> None:
         """Validate cross-field constraints after dataclass initialisation.

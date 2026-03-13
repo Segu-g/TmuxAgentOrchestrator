@@ -559,6 +559,127 @@ class WorktreeManager:
         finally:
             self._restore_branch(original, target_branch)
 
+    def delete_branch(self, branch_name: str) -> None:
+        """Delete a git branch that is not attached to any live worktree.
+
+        Uses ``git branch -D`` (force delete) so the branch is removed even if
+        it has not been merged.  This is safe to call on worktree branches that
+        were kept via :meth:`keep_branch` after the worktree filesystem was
+        already removed.
+
+        No-op (best-effort) when the branch does not exist — the git error is
+        silently swallowed so that duplicate cleanup calls are idempotent.
+
+        Parameters
+        ----------
+        branch_name:
+            Full branch name, e.g. ``"worktree/worker-ephemeral-abc12345"``.
+
+        Design reference: DESIGN.md §10.84 (v1.2.8 — workflow branch cleanup)
+        Research: jessfraz/branch-cleanup-action (github.com, 2025);
+        Atlassian Trunk-based Development — delete short-lived branches on merge.
+        """
+        result = subprocess.run(
+            ["git", "branch", "-D", branch_name],
+            cwd=self._repo_root,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            logger.debug(
+                "delete_branch: git branch -D %r returned %d (may not exist)",
+                branch_name,
+                result.returncode,
+            )
+
+    def merge_branch_to_main(
+        self, branch_name: str, *, target: str = "main"
+    ) -> str | None:
+        """Merge *branch_name* into *target* with ``--no-ff`` and return the merge commit SHA.
+
+        Temporarily checks out *target*, runs ``git merge --no-ff``, then
+        restores the previously checked-out branch.  If *target* cannot be
+        checked out or the merge fails (conflict, missing commits, etc.) the
+        error is logged and ``None`` is returned — the caller should continue
+        cleanup regardless.
+
+        Parameters
+        ----------
+        branch_name:
+            The branch to merge (e.g. ``"worktree/worker-ephemeral-abc12345"``).
+        target:
+            Branch to merge into.  Defaults to ``"main"``.
+
+        Returns
+        -------
+        str | None
+            SHA of the resulting merge commit, or ``None`` on failure.
+
+        Design reference: DESIGN.md §10.84 (v1.2.8)
+        Research: JetBrains TeamCity branching strategy (jetbrains.com, 2025);
+        GitLab auto-merge after MR pipeline (docs.gitlab.com, 2025);
+        Atlassian Trunk-based Development (atlassian.com, 2025).
+        """
+        # Check whether the branch has any commits not yet in target.
+        diff = subprocess.run(
+            ["git", "log", f"{target}..{branch_name}", "--oneline"],
+            cwd=self._repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if diff.returncode != 0:
+            logger.warning(
+                "merge_branch_to_main: git log failed for %r -> %r: %s",
+                branch_name,
+                target,
+                diff.stderr.strip(),
+            )
+            return None
+        if not diff.stdout.strip():
+            logger.info(
+                "merge_branch_to_main: branch %r has no new commits over %r — skipping merge",
+                branch_name,
+                target,
+            )
+            return None
+
+        try:
+            original = self._checkout_branch(target)
+        except RuntimeError as exc:
+            logger.warning("merge_branch_to_main: cannot checkout %r: %s", target, exc)
+            return None
+
+        try:
+            commit_msg = f"merge: workflow final branch {branch_name} into {target}"
+            result = subprocess.run(
+                ["git", "merge", "--no-ff", "-m", commit_msg, branch_name],
+                cwd=self._repo_root,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                subprocess.run(
+                    ["git", "merge", "--abort"],
+                    cwd=self._repo_root,
+                    capture_output=True,
+                )
+                logger.warning(
+                    "merge_branch_to_main: merge of %r into %r failed: %s",
+                    branch_name,
+                    target,
+                    result.stderr.strip(),
+                )
+                return None
+            sha = self._resolve_head(target)
+            logger.info(
+                "merge_branch_to_main: merged %r into %r (commit %s)",
+                branch_name,
+                target,
+                sha,
+            )
+            return sha
+        finally:
+            self._restore_branch(original, target)
+
     def prune_stale(self) -> None:
         """Remove stale git worktree administrative files.
 

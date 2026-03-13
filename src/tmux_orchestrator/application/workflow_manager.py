@@ -29,6 +29,7 @@ Design references:
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from typing import TYPE_CHECKING, Any, Callable
@@ -40,6 +41,8 @@ from typing import TYPE_CHECKING, Any, Callable
 from tmux_orchestrator.domain.workflow import WorkflowRun  # noqa: F401
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable
+
     from tmux_orchestrator.domain.phase_strategy import LoopSpec
 
 
@@ -101,6 +104,11 @@ class WorkflowManager:
         # Cancel function injected by the orchestrator (callable[[str], None])
         # Called synchronously; should schedule async cancellation internally.
         self._cancel_task_fn: Callable[[str], None] | None = None
+        # Branch cleanup callback injected by the workflow router (v1.2.8).
+        # Called asynchronously when a workflow reaches "complete" or "failed".
+        # Signature: async (workflow_id: str) -> None
+        # Design reference: DESIGN.md §10.84 (v1.2.8)
+        self._branch_cleanup_fn: "Callable[[str], Awaitable[None]] | None" = None
 
     # ------------------------------------------------------------------
     # Submission
@@ -196,6 +204,30 @@ class WorkflowManager:
         Design reference: DESIGN.md §10.83 (v1.2.7)
         """
         self._cancel_task_fn = fn
+
+    def set_branch_cleanup_fn(
+        self, fn: "Callable[[str], Awaitable[None]]"
+    ) -> None:
+        """Inject the branch-cleanup callback called when a workflow reaches terminal state.
+
+        The callback is called with the workflow_id string once when the workflow
+        transitions to ``"complete"`` or ``"failed"``.  It should schedule
+        async deletion of the worktree branches accumulated by ephemeral agents
+        in that workflow.
+
+        Example callback::
+
+            async def cleanup(wf_id: str) -> None:
+                await orchestrator.cleanup_workflow_branches(wf_id)
+
+        Parameters
+        ----------
+        fn:
+            Async callable: ``async (workflow_id: str) -> None``
+
+        Design reference: DESIGN.md §10.84 (v1.2.8)
+        """
+        self._branch_cleanup_fn = fn
 
     def register_loop(
         self,
@@ -550,9 +582,18 @@ class WorkflowManager:
                     break
 
     def _update_status(self, run: WorkflowRun) -> None:
-        """Recompute and update the run's status field."""
+        """Recompute and update the run's status field.
+
+        When the workflow transitions to a terminal state (``"complete"`` or
+        ``"failed"``) for the first time (``completed_at`` transitions from
+        ``None``), the injected ``_branch_cleanup_fn`` (if any) is scheduled
+        as a fire-and-forget asyncio task.
+
+        Design reference: DESIGN.md §10.84 (v1.2.8)
+        """
         all_ids = set(run.task_ids)
         done = run._completed | run._failed
+        prev_completed_at = run.completed_at
 
         if run._failed:
             run.status = "failed"
@@ -566,6 +607,21 @@ class WorkflowManager:
             run.status = "running"
         else:
             run.status = "pending"
+
+        # Trigger branch cleanup on first transition to terminal state.
+        # prev_completed_at == None ensures we fire exactly once per workflow.
+        if (
+            prev_completed_at is None
+            and run.completed_at is not None
+            and run.status in ("complete", "failed")
+            and self._branch_cleanup_fn is not None
+        ):
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.ensure_future(self._branch_cleanup_fn(run.id))
+            except RuntimeError:
+                pass  # No running event loop — skip (sync test context)
 
 
 # ---------------------------------------------------------------------------

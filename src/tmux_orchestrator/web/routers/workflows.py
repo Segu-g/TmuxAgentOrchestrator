@@ -330,6 +330,9 @@ def build_workflows_router(
                     task_metadata["_ephemeral_template"] = agent_template
                     task_metadata["_chain_branch"] = True
                     task_metadata["_chain_pred_task_ids"] = pred_global_task_ids
+                    # _chain_workflow_id is filled in below after run.id is known.
+                    # Design reference: DESIGN.md §10.84 (v1.2.8 — branch tracking)
+                    task_metadata["_chain_workflow_id"] = "__pending__"
                     # No immediate spawn; target_agent stays None.
                     # _route_loop will spawn and set target_agent at dispatch time.
                     effective_target_agent = None
@@ -361,7 +364,34 @@ def build_workflows_router(
         # Register with WorkflowManager for status tracking
         wm = orchestrator.get_workflow_manager()
         run = wm.submit(name=body.name, task_ids=global_task_ids)
-    
+
+        # Workflow branch cleanup wiring (v1.2.8):
+        # Now that run.id is known, register branch tracking for immediately-spawned
+        # ephemeral agents (local_id_to_ephemeral) and configure the cleanup callback.
+        _eph_branches = getattr(orchestrator, "_ephemeral_agent_branches", {})
+        _wf_branches = getattr(orchestrator, "_workflow_branches", None)
+        if local_id_to_ephemeral and _wf_branches is not None:
+            # Register branches for immediately-spawned ephemeral agents.
+            for eph_id in local_id_to_ephemeral.values():
+                branch = _eph_branches.get(eph_id, "")
+                if branch:
+                    _wf_branches.setdefault(run.id, []).append(branch)
+        # Fix up _chain_workflow_id in any deferred chain_branch task metadata.
+        # Tasks already in the waiting queue need their metadata updated.
+        _waiting = getattr(orchestrator, "_waiting_tasks", {})
+        for task_obj in list(_waiting.values()):
+            if task_obj.metadata.get("_chain_workflow_id") == "__pending__":
+                task_obj.metadata["_chain_workflow_id"] = run.id
+        # Wire the branch cleanup callback to WorkflowManager (if cleanup enabled).
+        _config = getattr(orchestrator, "config", None)
+        _branch_cleanup_enabled = getattr(_config, "workflow_branch_cleanup", True) if _config is not None else False
+        _cleanup_fn = getattr(orchestrator, "cleanup_workflow_branches", None)
+        if _branch_cleanup_enabled and _cleanup_fn is not None:
+            merge_final = getattr(body, "merge_to_main_on_complete", False)
+            async def _branch_cleanup(wf_id: str, _mf: bool = merge_final) -> None:
+                await orchestrator.cleanup_workflow_branches(wf_id, merge_final_to_main=_mf)
+            wm.set_branch_cleanup_fn(_branch_cleanup)
+
         # Attach phase status trackers to the workflow run (if phases were used)
         if phase_statuses is not None:
             # Remap local_id → global_task_id for each phase's task_ids
