@@ -6928,3 +6928,78 @@ Note: existing `GET /metrics` serves Prometheus text format — new JSON endpoin
 - `DELETE /templates/{id}` — delete template
 - `POST /templates/{id}/render` — render with variables (preview, no submit)
 - `POST /templates/{id}/submit` — render + submit as task
+
+## §10.94 — v1.2.18: エージェント間共有ファイルステージング (Shared File Staging Area)
+
+### 選択理由
+
+前のイテレーション (v1.2.17) でタスクテンプレートを実装した。次の優先候補はファイルステージングエリア。
+
+**選択**: v1.2.18 — 共有ファイルステージングエリア (`POST/GET /staging`)
+
+**理由**:
+- スクラッチパッド (文字列KV) とgitワークツリー (commit必須) の間のギャップを埋める
+- エージェントがバイナリ/大規模ファイルをパイプラインで次のエージェントに引き渡す実用的な手段がない
+- CI/CD パイプラインの staging area パターン (Azure DevOps, GitHub Actions artifacts) は実績のあるパターン
+- マルチエージェント調整の中核的なユースケース: producer → staging → consumer
+
+**見送り**: 他の候補 (動的ワークフロー分岐、エージェントメッシュ強化) は本機能のインフラが整ってから実装しやすくなる。
+
+### 調査記録
+
+**調査 1: File Staging Area REST API パターン**
+- 出典: Microsoft Azure Pipelines Artifacts ドキュメント
+  URL: https://learn.microsoft.com/en-us/azure/devops/pipelines/artifacts/pipeline-artifacts
+- `$(Build.ArtifactStagingDirectory)` パターン: パイプラインの各ステージが成果物を共有ディレクトリに PUT し、後続ステージが GET する
+- REST API による個別ファイルのダウンロードには `PublishPipelineArtifact` (新) が必要。`PublishBuildArtifacts` (旧) は REST API 経由のダウンロード非対応
+- 設計決定: TmuxAgentOrchestrator では PUT/GET/DELETE の単純な REST API を提供し、file_id でアーティファクトを参照する
+
+**調査 2: エージェント間ファイル通信パターン**
+- 出典: "Agent-to-Agent Communication: Shared File Protocols Guide", Fast.io (2025)
+  URL: https://fast.io/resources/agent-to-agent-file-communication-protocols/
+- Blackboard パターン (Buschmann et al. 1996): エージェントが中央の共有領域に読み書きすることで間接的に協調
+- ファイルベース通信の利点: 非同期性、監査可能性 (100% 保存)、メモリ効率 (ストリーミング不要)
+- エージェント間の結合度を下げるため、送信側は file_id のみをスクラッチパッドに書き込み、受信側が pull する設計が適切
+- 出典: "A Survey of Agent Interoperability Protocols: MCP, ACP, A2A, ANP", arXiv:2505.02279 (2025)
+  URL: https://arxiv.org/html/2505.02279v1
+- A2A プロトコルでは artifacts を `{task_id, artifact, sequencing_metadata}` で表現し、チャンク転送をサポート
+- TmuxAgentOrchestrator は単純化した設計: file_id による単一ファイル参照、スクラッチパッドと組み合わせたパイプライン
+
+**調査 3: FastAPI multipart ファイルアップロード**
+- 出典: FastAPI 公式リファレンス "UploadFile class"
+  URL: https://fastapi.tiangolo.com/reference/uploadfile/
+- `UploadFile` の主要属性: `filename`, `content_type`, `size`
+- 非同期読み取り: `content = await file.read()` — 全内容をメモリに読み込む
+- 大規模ファイルには `shutil.copyfileobj(file.file, dest)` でストリーミングコピーを推奨
+- `python-multipart` が必要 (FastAPI の `File` / `UploadFile` 処理)
+- 出典: "Multi-Part File Uploads and Validation in FastAPI for Large Datasets", Medium (2025)
+  URL: https://medium.com/@bhagyarana80/multi-part-file-uploads-and-validation-in-fastapi-for-large-datasets-9a3a71f0c475
+- ファイルタイプ検証: `content_type` ヘッダーの検証と `python-magic` による実際の MIME タイプ確認
+
+### 設計決定
+
+1. **StagingStore** (`application/staging_store.py`): インメモリ + ディスク書き込みの単純な KV ストア
+   - ファイルは `{staging_dir}/{file_id}` に保存 (UUID ベース)
+   - メタデータはインメモリのみ (サーバー再起動で消える — 揮発性ステージング)
+   - `StagingFile` dataclass: `file_id`, `filename`, `content_type`, `size_bytes`, `uploaded_at`, `uploaded_by`, `path`
+
+2. **REST エンドポイント** (`web/routers/staging.py`):
+   - `POST /staging` — multipart アップロード、file_id を返す
+   - `GET /staging` — 全ファイルのメタデータ一覧
+   - `GET /staging/{file_id}` — ファイルコンテンツをダウンロード
+   - `GET /staging/{file_id}/meta` — メタデータのみ
+   - `DELETE /staging/{file_id}` — ファイル削除
+
+3. **エージェント連携**: CLAUDE.md に `## File Staging` セクションを追加し、curl コマンドを提供
+   - プロデューサー: `curl -X POST /staging -F file=@result.py` → file_id
+   - スクラッチパッドに file_id を書き込み: `PUT /scratchpad/artifact_id`
+   - コンシューマー: スクラッチパッドから file_id を読み、`curl /staging/{file_id} -o file.py`
+
+4. **実装ファイル**:
+   - `src/tmux_orchestrator/application/staging_store.py` (新規)
+   - `src/tmux_orchestrator/web/routers/staging.py` (新規)
+   - `src/tmux_orchestrator/application/config.py` — `staging_dir` フィールド追加
+   - `src/tmux_orchestrator/web/app.py` — `_staging_store` + router 登録
+   - `src/tmux_orchestrator/web/routers/__init__.py` — `build_staging_router` エクスポート追加
+   - `src/tmux_orchestrator/agents/claude_code.py` — CLAUDE.md に `## File Staging` 追加
+   - `tests/test_staging_store.py` (新規、≥12テスト)

@@ -453,6 +453,27 @@ class OrchestratorConfig:
     metrics_enabled: bool = True
     metrics_interval_s: float = 10.0
     metrics_max_snapshots: int = 360
+    # --- Shared file staging area (v1.2.18) ---
+    # staging_dir: directory where uploaded staging files are written.
+    #   Layout: {staging_dir}/{file_id}  (one file per upload, no subdirectories)
+    #   Files are written atomically via path.write_bytes().
+    #   Default is a project-relative path ".orchestrator/staging", resolved
+    #   at load_config() time against the server cwd (consistent with mailbox_dir
+    #   and scratchpad_dir).  Absolute paths (including ~ expansions) are used as-is.
+    #
+    # Rationale: agents need a way to pass large binary or text artifacts between
+    #   pipeline phases without the complexity of git commits or the string-length
+    #   limits of the scratchpad.  The staging area is intentionally transient
+    #   (metadata is in-memory; server restart clears the index) — it is a
+    #   short-lived courier between producer and consumer agents, not a store.
+    #
+    # Pattern references:
+    #   Azure Pipelines ArtifactStagingDirectory — per-stage artifact handoff
+    #   (https://learn.microsoft.com/en-us/azure/devops/pipelines/artifacts/)
+    #   Blackboard pattern (Buschmann et al. POSA 1996) — shared working memory
+    #   A2A Protocol artifacts (arXiv:2505.02279, 2025) — task + artifact + metadata
+    #   DESIGN.md §10.94 (v1.2.18)
+    staging_dir: str = ".orchestrator/staging"
 
     def __post_init__(self) -> None:
         """Validate cross-field constraints after dataclass initialisation.
@@ -651,4 +672,7 @@ def load_config(path: str | Path, cwd: Path | str | None = None) -> Orchestrator
         metrics_enabled=data.get("metrics_enabled", True),
         metrics_interval_s=float(data.get("metrics_interval_s", 10.0)),
         metrics_max_snapshots=int(data.get("metrics_max_snapshots", 360)),
+        staging_dir=_resolve_dir(
+            data.get("staging_dir", ".orchestrator/staging"), effective_cwd
+        ),
     )

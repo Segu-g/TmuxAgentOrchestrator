@@ -207,6 +207,20 @@
         "title": "AutoScalerUpdate",
         "type": "object"
       },
+      "Body_upload_file_staging_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_file_staging_post",
+        "type": "object"
+      },
       "BroadcastTaskSubmit": {
         "description": "Request body for POST /tasks/broadcast.\n\nSubmits the same task to multiple agents simultaneously, enabling\ncompetitive (race) or ensemble (gather) patterns.\n\nTarget resolution priority:\n1. ``agent_ids`` \u2014 explicit list of agent IDs (takes precedence)\n2. ``target_group`` \u2014 all agents in this named group\n3. ``target_tags`` \u2014 all agents whose tags include ALL of the listed tags\n\nDesign references:\n- Fan-out / Fan-in concurrency pattern (Go, DEV Community 2025)\n- Sakana AI ALE-Agent AHC058 \u2014 parallel trial-and-error with best-of-N\n- DESIGN.md \u00a710.91 (v1.2.15)",
         "properties": {
@@ -4452,6 +4466,209 @@
           }
         },
         "summary": "Write a value to the scratchpad"
+      }
+    },
+    "/staging": {
+      "get": {
+        "description": "Return metadata for all currently staged files.\n\nDoes NOT return file contents.  Use ``GET /staging/{file_id}`` to\ndownload a specific file.\n\nReference: DESIGN.md \u00a710.94 (v1.2.18)",
+        "operationId": "list_files_staging_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "title": "Response List Files Staging Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List all staged files (metadata only)"
+      },
+      "post": {
+        "description": "Stage a file for later retrieval by a downstream agent.\n\nAccepts a ``multipart/form-data`` request with a single ``file`` field.\n\nReturns a JSON object with ``file_id``, ``filename``, and\n``size_bytes``.  Store the ``file_id`` in the scratchpad so that\ndownstream agents can retrieve the file.\n\n```bash\ncurl -X POST {base_url}/staging \\\n  -H \"X-API-Key: $TMUX_ORCHESTRATOR_API_KEY\" \\\n  -F \"file=@myfile.py\" \\\n  -F \"uploaded_by=producer-agent\"\n```\n\nReference: DESIGN.md \u00a710.94 (v1.2.18)",
+        "operationId": "upload_file_staging_post",
+        "parameters": [
+          {
+            "description": "Agent ID of the uploader",
+            "in": "query",
+            "name": "uploaded_by",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Agent ID of the uploader",
+              "title": "Uploaded By"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_file_staging_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Upload File Staging Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload a file to the staging area"
+      }
+    },
+    "/staging/{file_id}": {
+      "delete": {
+        "description": "Remove a staged file from the staging area.\n\nReturns 404 if the file does not exist.\n\nReference: DESIGN.md \u00a710.94 (v1.2.18)",
+        "operationId": "delete_file_staging__file_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "file_id",
+            "required": true,
+            "schema": {
+              "title": "File Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Delete File Staging  File Id  Delete",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete a staged file"
+      },
+      "get": {
+        "description": "Download the content of a staged file.\n\nReturns the raw file bytes with the original ``Content-Type`` and a\n``Content-Disposition: attachment`` header so that ``curl -O`` saves\nthe file under the original filename.\n\n```bash\ncurl -s {base_url}/staging/{file_id} \\\n  -H \"X-API-Key: $TMUX_ORCHESTRATOR_API_KEY\" \\\n  -o received.py\n```\n\nReference: DESIGN.md \u00a710.94 (v1.2.18)",
+        "operationId": "download_file_staging__file_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "file_id",
+            "required": true,
+            "schema": {
+              "title": "File Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download a staged file"
+      }
+    },
+    "/staging/{file_id}/meta": {
+      "get": {
+        "description": "Return metadata for a specific staged file without downloading content.\n\nUseful when a consumer agent only needs to verify that a file exists\nand check its size/type before downloading.\n\nReference: DESIGN.md \u00a710.94 (v1.2.18)",
+        "operationId": "get_file_meta_staging__file_id__meta_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "file_id",
+            "required": true,
+            "schema": {
+              "title": "File Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get File Meta Staging  File Id  Meta Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get staged file metadata (no content)"
       }
     },
     "/tasks": {
