@@ -3003,6 +3003,22 @@ class Orchestrator:
                     final_branch,
                 )
 
+        # Wait briefly for any still-running ephemeral agents whose worktrees
+        # reference these branches to stop and release their worktree locks.
+        # Ephemeral auto-stop (in _route_loop) runs AFTER _update_status triggers
+        # this coroutine, so the last agent's stop() may still be in progress.
+        # We poll for up to 10 s; in practice agents stop within 1-3 s.
+        # Design reference: DESIGN.md §10.84 (v1.2.8)
+        deadline = loop.time() + 10.0
+        while loop.time() < deadline:
+            still_running = [
+                aid for aid in self._ephemeral_agents
+                if self._ephemeral_agent_branches.get(aid, "") in branches
+            ]
+            if not still_running:
+                break
+            await asyncio.sleep(0.5)
+
         # Prune stale worktree admin files so that branches previously held by
         # ephemeral worktrees (which have already been removed by agent.stop())
         # are no longer "locked" — otherwise git branch -D fails silently.
