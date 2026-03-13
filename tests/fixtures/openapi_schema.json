@@ -2173,6 +2173,27 @@
         "summary": "Create a new agent dynamically (no template required)"
       }
     },
+    "/agents/summary": {
+      "get": {
+        "description": "Return aggregate statistics for all registered agents.\n\nResponse fields:\n- ``agents``: list of per-agent summary dicts (agent_id, status,\n  tasks_completed, tasks_failed, error_rate, avg_task_duration_s,\n  context_pct).\n- ``total_agents``: number of registered agents.\n- ``total_tasks_completed``: sum of tasks_completed across all agents.\n- ``total_tasks_failed``: sum of tasks_failed across all agents.\n- ``busiest_agent``: agent_id with the highest tasks_completed count\n  (null when no tasks have been completed yet).\n\nDesign references:\n- REST composition & aggregation pattern (Matrix AI, 2025):\n  https://matrix.ai/blog/rest-composition-aggregation\n- Google SRE \"Four Golden Signals\" (latency, traffic, errors, saturation):\n  https://sre.google/sre-book/monitoring-distributed-systems/\n- Microsoft Azure \"Agent Factory: Top 5 agent observability best\n  practices\" (2025): cross-agent comparison dashboards:\n  https://azure.microsoft.com/en-us/blog/agent-factory-top-5-agent-observability-best-practices-for-reliable-ai/\n- TAMAS arXiv:2503.06745 (IBM, 2025): per-agent history enables\n  bottleneck analysis and capacity planning.\n- DESIGN.md \u00a710.87 (v1.2.11).",
+        "operationId": "agents_summary_agents_summary_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Agents Summary Agents Summary Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Cross-agent aggregate statistics summary"
+      }
+    },
     "/agents/tree": {
       "get": {
         "description": "Return the agent list as a nested JSON tree (d3-hierarchy compatible).\n\nEach node has: ``id``, ``status``, ``role``, ``parent_id``,\n``current_task``, ``bus_drops``, ``circuit_breaker``, ``children``.\n\nThe top level of the returned list contains root-level agents\n(``parent_id == None``); each node's ``children`` list recursively\ncontains its sub-agents.",
@@ -2985,7 +3006,7 @@
     },
     "/agents/{agent_id}/stats": {
       "get": {
-        "description": "Return context window usage statistics for *agent_id*.\n\nFields:\n- ``pane_chars``: character count of the last captured pane output.\n- ``estimated_tokens``: estimated token count (pane_chars / 4).\n- ``context_window_tokens``: configured total context window size.\n- ``context_pct``: percentage of context window used (0-100+).\n- ``warn_threshold_pct``: threshold at which context_warning is emitted.\n- ``notes_mtime``: mtime of NOTES.md at last check (Unix timestamp).\n- ``notes_updates``: number of NOTES.md changes detected.\n- ``context_warnings``: number of context_warning events emitted.\n- ``summarize_triggers``: number of /summarize auto-injections.\n- ``last_polled``: monotonic timestamp of the last poll cycle.\n- ``worktree_path``: filesystem path to the agent's worktree (str | null).\n- ``status``: current agent status (IDLE/BUSY/STOPPED/ERROR/DRAINING).\n- ``task_count``: number of completed tasks (success + error).\n- ``error_count``: number of tasks that completed with an error.\n\nReturns 404 if the agent is not registered.\n\nDesign reference: Liu et al. \"Lost in the Middle\" TACL 2024\n(https://arxiv.org/abs/2307.03172) \u2014 context saturation degrades recall;\nmonitoring context size enables proactive compression. DESIGN.md \u00a711 (v0.21.0).\nDesign reference (enrichment): Zalando RESTful API Guidelines \u00a7compatibility \u2014\nadding optional fields is a backward-compatible change. DESIGN.md \u00a710 (v1.0.20).",
+        "description": "Return context window usage statistics for *agent_id*.\n\nFields:\n- ``pane_chars``: character count of the last captured pane output.\n- ``estimated_tokens``: estimated token count (pane_chars / 4).\n- ``context_window_tokens``: configured total context window size.\n- ``context_pct``: percentage of context window used (0-100+).\n- ``warn_threshold_pct``: threshold at which context_warning is emitted.\n- ``notes_mtime``: mtime of NOTES.md at last check (Unix timestamp).\n- ``notes_updates``: number of NOTES.md changes detected.\n- ``context_warnings``: number of context_warning events emitted.\n- ``summarize_triggers``: number of /summarize auto-injections.\n- ``last_polled``: monotonic timestamp of the last poll cycle.\n- ``worktree_path``: filesystem path to the agent's worktree (str | null).\n- ``status``: current agent status (IDLE/BUSY/STOPPED/ERROR/DRAINING).\n- ``task_count``: number of completed tasks (success + error).\n- ``error_count``: number of tasks that completed with an error.\n- ``tasks_completed``: number of tasks completed successfully.\n- ``tasks_failed``: number of tasks that completed with an error.\n- ``avg_task_duration_s``: mean task duration in seconds (null when no tasks).\n- ``error_rate``: tasks_failed / max(tasks_completed + tasks_failed, 1).\n- ``last_task_at``: ISO timestamp of the most recent completed task (null).\n\nReturns 404 if the agent is not registered.\n\nDesign reference: Liu et al. \"Lost in the Middle\" TACL 2024\n(https://arxiv.org/abs/2307.03172) \u2014 context saturation degrades recall;\nmonitoring context size enables proactive compression. DESIGN.md \u00a711 (v0.21.0).\nDesign reference (enrichment): Zalando RESTful API Guidelines \u00a7compatibility \u2014\nadding optional fields is a backward-compatible change. DESIGN.md \u00a710 (v1.0.20).\nDesign reference (dashboard metrics): Google SRE four golden signals;\nMicrosoft Azure Agent Factory observability (2025). DESIGN.md \u00a710.87 (v1.2.11).",
         "operationId": "agent_context_stats_agents__agent_id__stats_get",
         "parameters": [
           {

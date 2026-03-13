@@ -87,10 +87,31 @@ class OrchestratorApp(App):
         )
 
     async def _refresh_ui(self) -> None:
-        self.query_one(AgentPanel).refresh_agents(self.orchestrator.list_agents())
+        agents = self.orchestrator.list_agents()
+        self.query_one(AgentPanel).refresh_agents(agents)
         self.query_one(TaskQueuePanel).refresh_tasks(self.orchestrator.list_tasks())
         status_bar = self.query_one(StatusBar)
         status_bar.paused = self.orchestrator.is_paused
+        # Update aggregate stats for the status bar (v1.2.11 — §10.87).
+        total_completed = 0
+        active_count = 0
+        high_error: list[str] = []
+        for a in agents:
+            aid = a["id"]
+            if a.get("status") not in ("STOPPED",):
+                active_count += 1
+            history = self.orchestrator.get_agent_history(aid, limit=200) or []
+            done = sum(1 for r in history if r.get("status") == "success")
+            failed = sum(1 for r in history if r.get("status") == "error")
+            total_completed += done
+            total = done + failed
+            if total > 0 and failed / total > 0.2:
+                high_error.append(aid)
+        status_bar.update_stats(
+            tasks_completed=total_completed,
+            active_agents=active_count,
+            high_error_agents=high_error,
+        )
 
     async def _listen_bus(self) -> None:
         q = await self.orchestrator.bus.subscribe("__tui__", broadcast=True)

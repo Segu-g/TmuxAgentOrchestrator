@@ -174,7 +174,86 @@ def build_agents_router(
         """
         agents = orchestrator.list_agents()
         return _build_agent_tree(agents)
-    
+
+    @router.get(
+        "/agents/summary",
+        summary="Cross-agent aggregate statistics summary",
+        dependencies=[Depends(auth)],
+    )
+    async def agents_summary() -> dict:
+        """Return aggregate statistics for all registered agents.
+
+        Response fields:
+        - ``agents``: list of per-agent summary dicts (agent_id, status,
+          tasks_completed, tasks_failed, error_rate, avg_task_duration_s,
+          context_pct).
+        - ``total_agents``: number of registered agents.
+        - ``total_tasks_completed``: sum of tasks_completed across all agents.
+        - ``total_tasks_failed``: sum of tasks_failed across all agents.
+        - ``busiest_agent``: agent_id with the highest tasks_completed count
+          (null when no tasks have been completed yet).
+
+        Design references:
+        - REST composition & aggregation pattern (Matrix AI, 2025):
+          https://matrix.ai/blog/rest-composition-aggregation
+        - Google SRE "Four Golden Signals" (latency, traffic, errors, saturation):
+          https://sre.google/sre-book/monitoring-distributed-systems/
+        - Microsoft Azure "Agent Factory: Top 5 agent observability best
+          practices" (2025): cross-agent comparison dashboards:
+          https://azure.microsoft.com/en-us/blog/agent-factory-top-5-agent-observability-best-practices-for-reliable-ai/
+        - TAMAS arXiv:2503.06745 (IBM, 2025): per-agent history enables
+          bottleneck analysis and capacity planning.
+        - DESIGN.md §10.87 (v1.2.11).
+        """
+        all_agents = orchestrator.list_agents()
+        agent_summaries = []
+        total_completed = 0
+        total_failed = 0
+        busiest_agent: str | None = None
+        busiest_count = 0
+
+        for a in all_agents:
+            aid = a["id"]
+            history = orchestrator.get_agent_history(aid, limit=200) or []
+            tasks_completed = sum(1 for r in history if r.get("status") == "success")
+            tasks_failed = sum(1 for r in history if r.get("status") == "error")
+            total = tasks_completed + tasks_failed
+            error_rate = round(tasks_failed / max(total, 1), 4) if total > 0 else 0.0
+            durations = [
+                r["duration_s"]
+                for r in history
+                if r.get("duration_s") is not None
+            ]
+            avg_duration = round(sum(durations) / len(durations), 3) if durations else None
+
+            # Pull context_pct from context monitor if available.
+            ctx_stats = orchestrator.get_agent_context_stats(aid)
+            context_pct = ctx_stats.get("context_pct") if ctx_stats else None
+
+            agent_summaries.append({
+                "agent_id": aid,
+                "status": a["status"],
+                "tasks_completed": tasks_completed,
+                "tasks_failed": tasks_failed,
+                "error_rate": error_rate,
+                "avg_task_duration_s": avg_duration,
+                "context_pct": context_pct,
+            })
+
+            total_completed += tasks_completed
+            total_failed += tasks_failed
+            if tasks_completed > busiest_count:
+                busiest_count = tasks_completed
+                busiest_agent = aid
+
+        return {
+            "agents": agent_summaries,
+            "total_agents": len(all_agents),
+            "total_tasks_completed": total_completed,
+            "total_tasks_failed": total_failed,
+            "busiest_agent": busiest_agent if busiest_count > 0 else None,
+        }
+
     @router.get(
         "/agents/{agent_id}",
         summary="Get a single agent by ID",
@@ -544,8 +623,6 @@ def build_agents_router(
             "draining": agent.status == AgentStatus.DRAINING,
             "status": agent.status.value,
         }
-    
-    
     @router.get(
         "/agents/{agent_id}/stats",
         summary="Per-agent context usage stats",
@@ -553,7 +630,7 @@ def build_agents_router(
     )
     async def agent_context_stats(agent_id: str) -> dict:
         """Return context window usage statistics for *agent_id*.
-    
+
         Fields:
         - ``pane_chars``: character count of the last captured pane output.
         - ``estimated_tokens``: estimated token count (pane_chars / 4).
@@ -569,24 +646,46 @@ def build_agents_router(
         - ``status``: current agent status (IDLE/BUSY/STOPPED/ERROR/DRAINING).
         - ``task_count``: number of completed tasks (success + error).
         - ``error_count``: number of tasks that completed with an error.
-    
+        - ``tasks_completed``: number of tasks completed successfully.
+        - ``tasks_failed``: number of tasks that completed with an error.
+        - ``avg_task_duration_s``: mean task duration in seconds (null when no tasks).
+        - ``error_rate``: tasks_failed / max(tasks_completed + tasks_failed, 1).
+        - ``last_task_at``: ISO timestamp of the most recent completed task (null).
+
         Returns 404 if the agent is not registered.
-    
+
         Design reference: Liu et al. "Lost in the Middle" TACL 2024
         (https://arxiv.org/abs/2307.03172) — context saturation degrades recall;
         monitoring context size enables proactive compression. DESIGN.md §11 (v0.21.0).
         Design reference (enrichment): Zalando RESTful API Guidelines §compatibility —
         adding optional fields is a backward-compatible change. DESIGN.md §10 (v1.0.20).
+        Design reference (dashboard metrics): Google SRE four golden signals;
+        Microsoft Azure Agent Factory observability (2025). DESIGN.md §10.87 (v1.2.11).
         """
         agent = orchestrator.get_agent(agent_id)
         if agent is None:
             raise HTTPException(status_code=404, detail=f"Agent {agent_id!r} not found")
-    
+
         # Build enrichment fields from registry/history regardless of context monitor.
         history = orchestrator.get_agent_history(agent_id, limit=200) or []
         task_count = len(history)
         error_count = sum(1 for r in history if r.get("status") == "error")
-    
+
+        # Derived dashboard metrics (v1.2.11 — §10.87).
+        tasks_completed = sum(1 for r in history if r.get("status") == "success")
+        tasks_failed = error_count
+        total = tasks_completed + tasks_failed
+        error_rate = round(tasks_failed / max(total, 1), 4) if total > 0 else 0.0
+        durations = [
+            r["duration_s"]
+            for r in history
+            if r.get("duration_s") is not None
+        ]
+        avg_task_duration_s = (
+            round(sum(durations) / len(durations), 3) if durations else None
+        )
+        last_task_at: str | None = history[0].get("finished_at") if history else None
+
         enrichment: dict = {
             "worktree_path": (
                 str(agent.worktree_path) if agent.worktree_path is not None else None
@@ -594,18 +693,23 @@ def build_agents_router(
             "status": agent.status.value,
             "task_count": task_count,
             "error_count": error_count,
+            "tasks_completed": tasks_completed,
+            "tasks_failed": tasks_failed,
+            "avg_task_duration_s": avg_task_duration_s,
+            "error_rate": error_rate,
+            "last_task_at": last_task_at,
             "started_at": (
                 agent.started_at.isoformat() if agent.started_at is not None else None
             ),
             "uptime_s": agent.uptime_s,
         }
-    
+
         stats = orchestrator.get_agent_context_stats(agent_id)
         if stats is None:
             # Agent registered but context monitor has not polled yet;
             # return skeleton with enrichment fields.
             return {"agent_id": agent_id, **enrichment}
-    
+
         return {**stats, **enrichment}
     
     

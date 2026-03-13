@@ -112,7 +112,7 @@ class LogPanel(Widget):
 
 
 class StatusBar(Static):
-    """Bottom status bar showing pause/run state."""
+    """Bottom status bar showing pause/run state and aggregate agent stats."""
 
     DEFAULT_CSS = """
     StatusBar {
@@ -124,11 +124,47 @@ class StatusBar(Static):
     """
 
     paused: reactive[bool] = reactive(False)
+    tasks_completed: reactive[int] = reactive(0)
+    active_agents: reactive[int] = reactive(0)
+    high_error_agents: reactive[list] = reactive([])
+
+    def update_stats(
+        self,
+        *,
+        tasks_completed: int,
+        active_agents: int,
+        high_error_agents: list[str],
+    ) -> None:
+        """Update aggregate stats displayed in the status bar.
+
+        Parameters
+        ----------
+        tasks_completed:
+            Total tasks completed across all agents (success only).
+        active_agents:
+            Number of agents currently in IDLE or BUSY state (i.e. not stopped).
+        high_error_agents:
+            List of agent IDs whose error_rate exceeds 20%.  Shown as a
+            warning indicator to alert operators.
+        """
+        self.tasks_completed = tasks_completed
+        self.active_agents = active_agents
+        self.high_error_agents = list(high_error_agents)
 
     def render(self) -> str:
         state = "[yellow]PAUSED[/yellow]" if self.paused else "[green]RUNNING[/green]"
+        stats_parts = [
+            f"agents:[cyan]{self.active_agents}[/cyan]",
+            f"done:[cyan]{self.tasks_completed}[/cyan]",
+        ]
+        if self.high_error_agents:
+            warn_ids = ",".join(self.high_error_agents[:3])
+            if len(self.high_error_agents) > 3:
+                warn_ids += f"+{len(self.high_error_agents) - 3}"
+            stats_parts.append(f"[red]ERR%↑:[/red][red]{warn_ids}[/red]")
+        stats_str = "  ".join(stats_parts)
         return (
-            f" {state}  "
+            f" {state}  {stats_str}  "
             "[bold]n[/bold] new task  "
             "[bold]k[/bold] kill agent  "
             "[bold]p[/bold] pause/resume  "
