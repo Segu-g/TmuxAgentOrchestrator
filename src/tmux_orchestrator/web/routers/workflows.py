@@ -330,11 +330,11 @@ def build_workflows_router(
                     task_metadata["_ephemeral_template"] = agent_template
                     task_metadata["_chain_branch"] = True
                     task_metadata["_chain_pred_task_ids"] = pred_global_task_ids
-                    # _chain_workflow_id is filled in below after run.id is known.
-                    # Design reference: DESIGN.md §10.84 (v1.2.8 — branch tracking)
-                    task_metadata["_chain_workflow_id"] = "__pending__"
                     # No immediate spawn; target_agent stays None.
                     # _route_loop will spawn and set target_agent at dispatch time.
+                    # workflow_id is provided to spawn_ephemeral_agent via
+                    # Orchestrator._task_workflow_id (populated below after run.id).
+                    # Design reference: DESIGN.md §10.84 (v1.2.8 — branch tracking)
                     effective_target_agent = None
                 else:
                     # Immediate spawn for non-chain-branch ephemeral phases (v1.2.3).
@@ -376,12 +376,18 @@ def build_workflows_router(
                 branch = _eph_branches.get(eph_id, "")
                 if branch:
                     _wf_branches.setdefault(run.id, []).append(branch)
-        # Fix up _chain_workflow_id in any deferred chain_branch task metadata.
-        # Tasks already in the waiting queue need their metadata updated.
-        _waiting = getattr(orchestrator, "_waiting_tasks", {})
-        for task_obj in list(_waiting.values()):
-            if task_obj.metadata.get("_chain_workflow_id") == "__pending__":
-                task_obj.metadata["_chain_workflow_id"] = run.id
+        # Register workflow_id → task_id mapping for ALL deferred chain_branch tasks
+        # (tasks that have _ephemeral_template in metadata).  This allows _route_loop
+        # to pass workflow_id to spawn_ephemeral_agent() regardless of whether the task
+        # is in _waiting_tasks or already in the priority queue.
+        # Design reference: DESIGN.md §10.84 (v1.2.8)
+        _task_wf_id = getattr(orchestrator, "_task_workflow_id", None)
+        if _task_wf_id is not None:
+            for global_tid in global_task_ids:
+                # We only need to track chain_branch tasks, but recording all
+                # workflow tasks is safe (spawn_ephemeral_agent will only use it
+                # when called for ephemeral agents with isolate=True).
+                _task_wf_id[global_tid] = run.id
         # Wire the branch cleanup callback to WorkflowManager (if cleanup enabled).
         _config = getattr(orchestrator, "config", None)
         _branch_cleanup_enabled = getattr(_config, "workflow_branch_cleanup", True) if _config is not None else False

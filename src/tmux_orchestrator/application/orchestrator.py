@@ -422,6 +422,13 @@ class Orchestrator:
         # LAST branch is the final phase's accumulated state.
         # Design reference: DESIGN.md §10.84 (v1.2.8)
         self._workflow_branches: dict[str, list[str]] = {}
+        # Task → workflow mapping (v1.2.8): task_id → workflow_id.
+        # Populated by the workflow router AFTER run.id is known so that
+        # _route_loop can pass workflow_id to spawn_ephemeral_agent() for
+        # deferred chain_branch spawns (tasks already enqueued before run.id
+        # was available).
+        # Design reference: DESIGN.md §10.84
+        self._task_workflow_id: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1541,11 +1548,9 @@ class Orchestrator:
                         if _candidate:
                             _source_branch = _candidate
                             break
-                # Workflow ID for branch tracking (v1.2.8): read from metadata
-                # if the router injected it during the POST /workflows submission.
-                _chain_wf_id: str | None = task.metadata.get("_chain_workflow_id")
-                if _chain_wf_id == "__pending__":
-                    _chain_wf_id = None  # not yet resolved; skip tracking
+                # Workflow ID for branch tracking (v1.2.8): look up from
+                # _task_workflow_id (populated by router after run.id is known).
+                _chain_wf_id: str | None = self._task_workflow_id.get(task.id)
                 try:
                     _new_eph_id = await self.spawn_ephemeral_agent(
                         _tmpl,
@@ -2997,6 +3002,14 @@ class Orchestrator:
                     "cleanup_workflow_branches: failed to merge final branch %r to main",
                     final_branch,
                 )
+
+        # Prune stale worktree admin files so that branches previously held by
+        # ephemeral worktrees (which have already been removed by agent.stop())
+        # are no longer "locked" — otherwise git branch -D fails silently.
+        try:
+            await loop.run_in_executor(None, wm.prune_stale)
+        except Exception:  # noqa: BLE001
+            logger.debug("cleanup_workflow_branches: prune_stale() failed (non-fatal)")
 
         deleted: list[str] = []
         for branch in branches:
