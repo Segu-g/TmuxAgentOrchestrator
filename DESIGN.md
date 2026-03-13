@@ -6285,3 +6285,65 @@ if task.metadata.get("_ephemeral_template") and task.target_agent is None:
 - `tests/test_workflow_branch_cleanup.py`: 12+ テスト
 
 **テスト数**: 3071 → 3083+
+
+## §10.85 — v1.2.9: ワークフローフェーズ Webhook イベント (phase_complete / phase_failed / phase_skipped)
+
+### 選択理由
+v1.1.38でWorkflowManagerはフェーズ完了トラッキングを実装したが、フェーズ遷移時にWebhookを発火していなかった（既知の制限事項）。外部システムがワークフロー進捗をフェーズ粒度でモニタリングできるよう、`phase_complete`/`phase_failed`/`phase_skipped`のWebhookイベントを追加する。
+
+選択しなかった候補:
+- タスク優先度自動調整 (次回候補) — フェーズWebhookの方が依存関係が明確
+
+### Research References
+
+1. **Webhook Best Practices (Integrate.io, TechTarget, 2025)**
+   - Queue-first: ingest layer decoupled from processing — respond with 2xx immediately, then process.
+   - HMAC-SHA256 verification window + minimal schema validation on receipt.
+   - Per-event-type payloads with consistent timestamp + event identifier structure.
+   - Sources: https://www.integrate.io/blog/apply-webhook-best-practices/
+              https://www.techtarget.com/searchapparchitecture/tip/Implementing-webhooks-Benefits-and-best-practices
+
+2. **Event-Driven Workflow Phase Granularity (DEV Community / DreamFactory, 2025)**
+   - Balance granularity vs complexity: per-phase events (not per-task) is appropriate for external consumers.
+   - Hierarchical event types: `workflow_complete` → `phase_complete` → `task_complete` (fine-grained ladder).
+   - JSON path filtering for granular subscriber criteria.
+   - Sources: https://dev.to/vikthurrdev/designing-a-webhook-service-a-practical-guide-to-event-driven-architecture-3lep
+              https://blog.dreamfactory.com/webhook-triggers-for-event-driven-apis
+
+3. **CloudEvents Specification v1.0 (CNCF, 2024–2025)**
+   - Core fields: `specversion`, `type`, `source`, `id`, `time`, `subject`, `datacontenttype`.
+   - `type` as reverse-DNS dot-separated: e.g. `com.example.workflow.phase.complete`.
+   - Combination of `id` + `source` must uniquely identify an event (idempotency key).
+   - Our payload includes `workflow_id` (source), `phase_name` (subject), `timestamp` (time), and `task_ids`.
+   - Sources: https://cloudevents.io/
+              https://github.com/cloudevents/spec/blob/main/cloudevents/spec.md
+
+### 設計判断
+
+**注入方式**: `WorkflowManager.set_webhook_fn(fn)` — `_branch_cleanup_fn` と同じ直接注入パターン。
+バスを経由しない理由: WebhookManagerはバスを購読していない（直接呼び出しパターンが既存コードの慣例）。
+
+**注入タイミング**: `web/app.py` の scratchpad/cancel 注入ブロックと同じ場所に追加。
+
+**Async**: `asyncio.ensure_future()` で fire-and-forget（`_branch_cleanup_fn` と同パターン）。
+
+**新規イベント名**: `phase_complete`, `phase_failed`, `phase_skipped` を `KNOWN_EVENTS` に追加。
+
+**フェーズ skipped**: `_mark_task_skipped()` がフェーズを `mark_skipped()` する際にも発火。
+ただしタスク経由ではなく直接 `_fire_phase_webhook` を呼ぶ。
+
+### 実装変更ファイル
+- `src/tmux_orchestrator/infrastructure/webhook_manager.py`: `KNOWN_EVENTS` に3イベント追加
+- `src/tmux_orchestrator/application/workflow_manager.py`:
+  - `_fire_webhook_fn: Callable[[str, dict], Awaitable[None]] | None` フィールド
+  - `set_webhook_fn(fn)` メソッド
+  - `_update_phase_status()`: complete/failed 遷移後に `asyncio.ensure_future(_fire_phase_webhook(...))`
+  - `_mark_task_skipped()`: phase skipped 遷移後に webhook 発火
+- `src/tmux_orchestrator/web/app.py`: WorkflowManager への `set_webhook_fn` 注入
+- `src/tmux_orchestrator/web/routers/webhooks.py`: ドキュメント文字列に新イベント名追記
+- `pyproject.toml`: version `1.2.9`
+
+**新規ファイル**:
+- `tests/test_workflow_phase_webhooks.py`: 12+ テスト
+
+**テスト数**: 3083 → 3095+

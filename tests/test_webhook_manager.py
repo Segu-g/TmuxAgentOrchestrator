@@ -539,7 +539,9 @@ def test_known_events_complete():
     expected = {
         "task_complete", "task_failed", "task_retrying", "task_cancelled",
         "task_dependency_failed", "task_waiting", "agent_status",
-        "workflow_complete", "workflow_failed", "workflow_cancelled", "*",
+        "workflow_complete", "workflow_failed", "workflow_cancelled",
+        "phase_complete", "phase_failed", "phase_skipped",
+        "*",
     }
     assert expected == KNOWN_EVENTS
 

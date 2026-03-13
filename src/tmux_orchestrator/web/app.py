@@ -479,6 +479,21 @@ def create_app(
 
                 _wm.set_cancel_task_fn(_sync_cancel)
 
+    # Wire phase webhook callback into WorkflowManager (v1.2.9).
+    # Delivers phase_complete / phase_failed / phase_skipped events to all
+    # registered webhooks when a workflow phase transitions to a terminal state.
+    # Reference: DESIGN.md §10.85 (v1.2.9)
+    if hasattr(orchestrator, "get_workflow_manager"):
+        _wm2 = orchestrator.get_workflow_manager()
+        if _wm2 is not None and hasattr(_wm2, "set_webhook_fn"):
+            _webhook_mgr = getattr(orchestrator, "_webhook_manager", None)
+            if _webhook_mgr is not None and hasattr(_webhook_mgr, "deliver"):
+                async def _fire_phase_webhook(event_type: str, payload: dict) -> None:
+                    """Deliver a phase lifecycle event to all matching webhooks."""
+                    await _webhook_mgr.deliver(event_type, payload)
+
+                _wm2.set_webhook_fn(_fire_phase_webhook)
+
     # Episodic memory store (shared between agents router and memory router)
     # Reference: DESIGN.md §10.28 (v1.0.28); DESIGN.md §10.29 (v1.0.29)
     _orch_config = getattr(orchestrator, "config", None)

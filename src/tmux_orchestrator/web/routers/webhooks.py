@@ -41,8 +41,14 @@ def build_webhooks_router(
         Valid event names:
         ``task_complete``, ``task_failed``, ``task_retrying``, ``task_cancelled``,
         ``task_dependency_failed``, ``task_waiting``, ``agent_status``,
-        ``workflow_complete``, ``workflow_failed``, ``workflow_cancelled``, ``*``
+        ``workflow_complete``, ``workflow_failed``, ``workflow_cancelled``,
+        ``phase_complete``, ``phase_failed``, ``phase_skipped``, ``*``
         (wildcard — receive all events).
+
+        Phase events (``phase_complete``, ``phase_failed``, ``phase_skipped``) are
+        fired when a workflow phase transitions to a terminal state.  Each payload
+        contains ``workflow_id``, ``workflow_name``, ``phase_name``, ``task_ids``,
+        and ``timestamp``.  Design reference: DESIGN.md §10.85 (v1.2.9).
     
         Returns: ``{id, url, events, created_at}``
     

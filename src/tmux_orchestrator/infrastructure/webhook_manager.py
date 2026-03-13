@@ -42,6 +42,9 @@ KNOWN_EVENTS: frozenset[str] = frozenset({
     "workflow_complete",
     "workflow_failed",
     "workflow_cancelled",
+    "phase_complete",
+    "phase_failed",
+    "phase_skipped",
     "*",
 })
 

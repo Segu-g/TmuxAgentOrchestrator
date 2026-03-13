@@ -109,6 +109,11 @@ class WorkflowManager:
         # Signature: async (workflow_id: str) -> None
         # Design reference: DESIGN.md §10.84 (v1.2.8)
         self._branch_cleanup_fn: "Callable[[str], Awaitable[None]] | None" = None
+        # Phase webhook callback injected by web/app.py (v1.2.9).
+        # Called asynchronously when a phase transitions to complete/failed/skipped.
+        # Signature: async (event_type: str, payload: dict) -> None
+        # Design reference: DESIGN.md §10.85 (v1.2.9)
+        self._fire_webhook_fn: "Callable[[str, dict], Awaitable[None]] | None" = None
 
     # ------------------------------------------------------------------
     # Submission
@@ -228,6 +233,29 @@ class WorkflowManager:
         Design reference: DESIGN.md §10.84 (v1.2.8)
         """
         self._branch_cleanup_fn = fn
+
+    def set_webhook_fn(
+        self, fn: "Callable[[str, dict], Awaitable[None]]"
+    ) -> None:
+        """Inject the webhook-fire callback called when a phase transitions to a terminal state.
+
+        The callback receives the event type string (``"phase_complete"``,
+        ``"phase_failed"``, or ``"phase_skipped"``) and a payload dict, and
+        should forward them to the :class:`~tmux_orchestrator.webhook_manager.WebhookManager`.
+
+        Example callback::
+
+            async def fire(event_type: str, payload: dict) -> None:
+                await webhook_manager.deliver(event_type, payload)
+
+        Parameters
+        ----------
+        fn:
+            Async callable: ``async (event_type: str, payload: dict) -> None``
+
+        Design reference: DESIGN.md §10.85 (v1.2.9)
+        """
+        self._fire_webhook_fn = fn
 
     def register_loop(
         self,
@@ -491,8 +519,10 @@ class WorkflowManager:
         if done >= all_ids:
             if self._phase_failed.get(phase_key):
                 phase.mark_failed()
+                self._fire_phase_webhook("phase_failed", run, phase_name, phase)
             else:
                 phase.mark_complete()
+                self._fire_phase_webhook("phase_complete", run, phase_name, phase)
 
     def _check_loop_until(self, completed_task_id: str) -> None:
         """After a task completes, check if any loop's until condition is now met.
@@ -579,7 +609,53 @@ class WorkflowManager:
                 if task_id in phase_status.task_ids:
                     if phase_status.status not in ("complete", "failed", "skipped"):
                         phase_status.mark_skipped()
+                        self._fire_phase_webhook("phase_skipped", run, phase_status.name, phase_status)
                     break
+
+    def _fire_phase_webhook(
+        self,
+        event_type: str,
+        run: WorkflowRun,
+        phase_name: str,
+        phase: "Any",
+    ) -> None:
+        """Schedule a fire-and-forget webhook delivery for a phase transition.
+
+        No-op when ``_fire_webhook_fn`` has not been injected or when there is
+        no running asyncio event loop (e.g. synchronous test contexts).
+
+        Parameters
+        ----------
+        event_type:
+            One of ``"phase_complete"``, ``"phase_failed"``, ``"phase_skipped"``.
+        run:
+            The :class:`WorkflowRun` that owns the phase.
+        phase_name:
+            Human-readable phase name.
+        phase:
+            The phase status object (used to extract ``task_ids``).
+
+        Design reference: DESIGN.md §10.85 (v1.2.9)
+        Research: CloudEvents spec — combination of workflow_id + phase_name
+        uniquely identifies the event; payload includes task_ids for tracing.
+        """
+        if self._fire_webhook_fn is None:
+            return
+        from datetime import datetime, timezone  # noqa: PLC0415
+
+        payload = {
+            "workflow_id": run.id,
+            "workflow_name": run.name,
+            "phase_name": phase_name,
+            "task_ids": list(getattr(phase, "task_ids", [])),
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self._fire_webhook_fn(event_type, payload))
+        except RuntimeError:
+            pass  # No running event loop — skip (sync test context)
 
     def _update_status(self, run: WorkflowRun) -> None:
         """Recompute and update the run's status field.
