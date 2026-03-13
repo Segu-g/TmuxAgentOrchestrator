@@ -47,6 +47,7 @@ from tmux_orchestrator.web.schemas import (  # noqa: E402
     AgentSelectorModel,
     AdrWorkflowSubmit,
     AutoScalerUpdate,
+    BroadcastTaskSubmit,
     ChangeStrategyRequest,
     CleanArchWorkflowSubmit,
     CompetitionWorkflowSubmit,

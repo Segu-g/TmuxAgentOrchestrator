@@ -207,6 +207,72 @@
         "title": "AutoScalerUpdate",
         "type": "object"
       },
+      "BroadcastTaskSubmit": {
+        "description": "Request body for POST /tasks/broadcast.\n\nSubmits the same task to multiple agents simultaneously, enabling\ncompetitive (race) or ensemble (gather) patterns.\n\nTarget resolution priority:\n1. ``agent_ids`` \u2014 explicit list of agent IDs (takes precedence)\n2. ``target_group`` \u2014 all agents in this named group\n3. ``target_tags`` \u2014 all agents whose tags include ALL of the listed tags\n\nDesign references:\n- Fan-out / Fan-in concurrency pattern (Go, DEV Community 2025)\n- Sakana AI ALE-Agent AHC058 \u2014 parallel trial-and-error with best-of-N\n- DESIGN.md \u00a710.91 (v1.2.15)",
+        "properties": {
+          "agent_ids": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Agent Ids",
+            "type": "array"
+          },
+          "mode": {
+            "default": "race",
+            "enum": [
+              "race",
+              "gather"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "priority": {
+            "default": 0,
+            "title": "Priority",
+            "type": "integer"
+          },
+          "prompt": {
+            "title": "Prompt",
+            "type": "string"
+          },
+          "target_group": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Group"
+          },
+          "target_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Target Tags",
+            "type": "array"
+          },
+          "timeout": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeout"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "title": "BroadcastTaskSubmit",
+        "type": "object"
+      },
       "ChangeStrategyRequest": {
         "description": "Request body for POST /agents/{agent_id}/change-strategy.\n\nAllows an agent to autonomously request a change in execution strategy\nfor its current (or next) task phase.  The orchestrator fulfills the\nrequest by spawning parallel sub-tasks and routing results back to the\nrequesting agent.\n\nAttributes\n----------\npattern:\n    Execution strategy to switch to.  Only ``single``, ``parallel``, and\n    ``competitive`` are supported in v0.49.0.  ``debate`` may be added in\n    a future release.\ncount:\n    Number of parallel workers to spawn (``parallel`` / ``competitive``\n    patterns only).  Must be between 1 and 10 inclusive.\ntags:\n    Optional ``required_tags`` list for dispatching the spawned tasks.\ncontext:\n    Prompt context for the spawned tasks.  When provided, the orchestrator\n    immediately submits ``count`` tasks with this context.  When omitted,\n    only the strategy preference is recorded.\nreply_to:\n    Agent ID that collects the results of spawned tasks.  Typically set to\n    the requesting agent's own ID so it can aggregate outcomes.\n\nDesign references:\n- \u00a712\u300c\u30ef\u30fc\u30af\u30d5\u30ed\u30fc\u8a2d\u8a08\u306e\u5c64\u69cb\u9020\u300d\u5c643 \u5b9f\u884c\u65b9\u5f0f\u306e\u81ea\u5f8b\u5207\u308a\u66ff\u3048\n- arXiv:2505.19591 (Evolving Orchestration 2025): dynamic strategy adaptation\n- ALAS arXiv:2505.12501 (2025): orchestrator escalation pattern\n- DESIGN.md \u00a710.16 (v0.49.0)",
         "properties": {
@@ -4279,6 +4345,89 @@
           }
         },
         "summary": "Submit multiple tasks in one request"
+      }
+    },
+    "/tasks/broadcast": {
+      "post": {
+        "description": "Submit the same task to multiple agents simultaneously.\n\nTarget resolution (first match wins):\n1. ``agent_ids`` \u2014 explicit list of agent IDs.\n2. ``target_group`` \u2014 all agents in this named group.\n3. ``target_tags`` \u2014 all agents whose tags include ALL listed tags.\n\nReturns immediately with a ``broadcast_id``; poll\n``GET /tasks/broadcast/{broadcast_id}`` for status and results.\n\nDesign references:\n- Fan-out / Fan-in concurrency pattern (Go Concurrency Patterns, DEV 2025)\n- Sakana AI ALE-Agent AHC058 \u2014 parallel best-of-N trial-and-error\n- LAMaS latency-aware orchestration (arXiv:2601.10560, 2025)\n- DESIGN.md \u00a710.91 (v1.2.15)",
+        "operationId": "broadcast_task_tasks_broadcast_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BroadcastTaskSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Broadcast Task Tasks Broadcast Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit same task to multiple agents (broadcast/fan-out)"
+      }
+    },
+    "/tasks/broadcast/{broadcast_id}": {
+      "get": {
+        "description": "Poll the status of a broadcast submitted via POST /tasks/broadcast.\n\nReturns:\n- ``status``: ``\"pending\"`` | ``\"running\"`` | ``\"complete\"`` | ``\"failed\"``\n- ``winner``: (race mode) task and result for the winning agent, or ``null``\n- ``results``: (gather mode) list of ``{task_id, agent_id, result}`` objects\n- ``failed_tasks``: list of task IDs that failed\n\nDesign reference: DESIGN.md \u00a710.91 (v1.2.15)",
+        "operationId": "get_broadcast_status_tasks_broadcast__broadcast_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "broadcast_id",
+            "required": true,
+            "schema": {
+              "title": "Broadcast Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Get Broadcast Status Tasks Broadcast  Broadcast Id  Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get broadcast task status and results"
       }
     },
     "/tasks/{task_id}": {

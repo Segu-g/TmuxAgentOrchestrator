@@ -12,6 +12,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from tmux_orchestrator.web.schemas import (
+    BroadcastTaskSubmit,
     TaskBatchSubmit,
     TaskPriorityUpdate,
     TaskSubmit,
@@ -124,6 +125,147 @@ def build_tasks_router(
                 record["target_group"] = task.target_group
             results.append(record)
         return {"tasks": results}
+
+    @router.post(
+        "/tasks/broadcast",
+        summary="Submit same task to multiple agents (broadcast/fan-out)",
+        dependencies=[Depends(auth)],
+    )
+    async def broadcast_task(body: BroadcastTaskSubmit) -> dict:
+        """Submit the same task to multiple agents simultaneously.
+
+        Target resolution (first match wins):
+        1. ``agent_ids`` — explicit list of agent IDs.
+        2. ``target_group`` — all agents in this named group.
+        3. ``target_tags`` — all agents whose tags include ALL listed tags.
+
+        Returns immediately with a ``broadcast_id``; poll
+        ``GET /tasks/broadcast/{broadcast_id}`` for status and results.
+
+        Design references:
+        - Fan-out / Fan-in concurrency pattern (Go Concurrency Patterns, DEV 2025)
+        - Sakana AI ALE-Agent AHC058 — parallel best-of-N trial-and-error
+        - LAMaS latency-aware orchestration (arXiv:2601.10560, 2025)
+        - DESIGN.md §10.91 (v1.2.15)
+        """
+        from tmux_orchestrator.security import sanitize_prompt  # noqa: PLC0415
+
+        # Resolve target agent IDs.
+        resolved_ids: list[str] = []
+
+        if body.agent_ids:
+            # Explicit IDs — validate they exist.
+            all_agents = {a["id"] for a in orchestrator.list_agents()}
+            resolved_ids = [aid for aid in body.agent_ids if aid in all_agents]
+            missing = [aid for aid in body.agent_ids if aid not in all_agents]
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown agent IDs: {missing}",
+                )
+        elif body.target_group is not None:
+            gm = getattr(orchestrator, "_group_manager", None)
+            if gm is None:
+                raise HTTPException(status_code=400, detail="No group manager available")
+            members = gm.get(body.target_group)
+            if members is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Group {body.target_group!r} not found",
+                )
+            resolved_ids = sorted(members)
+        elif body.target_tags:
+            all_agents_list = orchestrator.list_agents()
+            needed = set(body.target_tags)
+            resolved_ids = [
+                a["id"]
+                for a in all_agents_list
+                if needed.issubset(set(a.get("tags", [])))
+            ]
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Must specify at least one of: agent_ids, target_group, target_tags",
+            )
+
+        if not resolved_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="No agents matched the given target criteria",
+            )
+
+        result = await orchestrator.broadcast_task(
+            sanitize_prompt(body.prompt),
+            resolved_ids,
+            mode=body.mode,
+            priority=body.priority,
+            timeout=body.timeout,
+        )
+        return {
+            "broadcast_id": result.broadcast_id,
+            "mode": result.mode,
+            "task_ids": result.task_ids,
+            "agent_ids": result.agent_ids,
+            "status": "pending",
+        }
+
+    @router.get(
+        "/tasks/broadcast/{broadcast_id}",
+        summary="Get broadcast task status and results",
+        dependencies=[Depends(auth)],
+    )
+    async def get_broadcast_status(broadcast_id: str) -> dict:
+        """Poll the status of a broadcast submitted via POST /tasks/broadcast.
+
+        Returns:
+        - ``status``: ``"pending"`` | ``"running"`` | ``"complete"`` | ``"failed"``
+        - ``winner``: (race mode) task and result for the winning agent, or ``null``
+        - ``results``: (gather mode) list of ``{task_id, agent_id, result}`` objects
+        - ``failed_tasks``: list of task IDs that failed
+
+        Design reference: DESIGN.md §10.91 (v1.2.15)
+        """
+        bc = orchestrator.get_broadcast(broadcast_id)
+        if bc is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Broadcast {broadcast_id!r} not found",
+            )
+
+        # Build agent_id → task_id reverse lookup for result presentation.
+        task_to_agent: dict[str, str] = {
+            tid: aid
+            for tid, aid in zip(bc.task_ids, bc.agent_ids)
+        }
+
+        winner: dict | None = None
+        if bc.winner_task_id is not None:
+            winner = {
+                "task_id": bc.winner_task_id,
+                "agent_id": task_to_agent.get(bc.winner_task_id),
+                "result": bc.completed_tasks.get(bc.winner_task_id, ""),
+            }
+
+        results = [
+            {
+                "task_id": tid,
+                "agent_id": task_to_agent.get(tid),
+                "result": bc.completed_tasks[tid],
+            }
+            for tid in bc.task_ids
+            if tid in bc.completed_tasks
+        ]
+
+        return {
+            "broadcast_id": bc.broadcast_id,
+            "mode": bc.mode,
+            "status": bc.status,
+            "task_ids": bc.task_ids,
+            "agent_ids": bc.agent_ids,
+            "winner": winner,
+            "results": results,
+            "failed_tasks": sorted(bc.failed_tasks),
+        }
 
     @router.get("/tasks", summary="List all tasks (active + completed)", dependencies=[Depends(auth)])
     async def list_tasks(skip: int = 0, limit: int = 100) -> list[dict]:

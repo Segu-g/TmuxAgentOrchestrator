@@ -83,6 +83,34 @@ class TaskBatchSubmit(BaseModel):
     tasks: list[TaskBatchItem]
 
 
+class BroadcastTaskSubmit(BaseModel):
+    """Request body for POST /tasks/broadcast.
+
+    Submits the same task to multiple agents simultaneously, enabling
+    competitive (race) or ensemble (gather) patterns.
+
+    Target resolution priority:
+    1. ``agent_ids`` — explicit list of agent IDs (takes precedence)
+    2. ``target_group`` — all agents in this named group
+    3. ``target_tags`` — all agents whose tags include ALL of the listed tags
+
+    Design references:
+    - Fan-out / Fan-in concurrency pattern (Go, DEV Community 2025)
+    - Sakana AI ALE-Agent AHC058 — parallel trial-and-error with best-of-N
+    - DESIGN.md §10.91 (v1.2.15)
+    """
+
+    prompt: str
+    # Target resolution (mutually exclusive; agent_ids takes precedence)
+    target_tags: list[str] = []
+    target_group: str | None = None
+    agent_ids: list[str] = []
+    # Broadcast semantics
+    mode: Literal["race", "gather"] = "race"
+    priority: int = 0
+    timeout: int | None = None
+
+
 class AgentKillResponse(BaseModel):
     agent_id: str
     stopped: bool

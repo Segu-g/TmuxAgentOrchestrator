@@ -8,6 +8,7 @@ import logging
 import shutil
 import time
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -50,6 +51,44 @@ logger = logging.getLogger(__name__)
 # are now defined in tmux_orchestrator.application.monitor_protocols and imported above.
 # They are re-exported from this module for backward compatibility.
 # DESIGN.md §10.N (v1.0.15 — application/ layer extraction, Strangler Fig pattern).
+
+
+@dataclass
+class BroadcastGroup:
+    """Tracks a fan-out broadcast of the same task to multiple agents.
+
+    Used by ``Orchestrator.broadcast_task()`` and polled via
+    ``GET /tasks/broadcast/{id}``.
+
+    Design references:
+    - Fan-out / Fan-in concurrency pattern — distribute, collect, cancel losers.
+    - Sakana AI ALE-Agent AHC058 — parallel trial-and-error with best-of-N selection.
+    - Go context.Context cancellation — abort remaining workers after first result.
+    - DESIGN.md §10.91 (v1.2.15)
+    """
+
+    broadcast_id: str
+    mode: str  # "race" | "gather"
+    task_ids: list[str] = field(default_factory=list)
+    agent_ids: list[str] = field(default_factory=list)
+    completed_tasks: dict[str, str] = field(default_factory=dict)  # task_id → result
+    failed_tasks: set[str] = field(default_factory=set)
+    cancelled: bool = False
+    winner_task_id: str | None = None
+    status: str = "pending"  # pending | running | complete | failed
+
+
+@dataclass
+class BroadcastResult:
+    """Returned by ``broadcast_task()`` after submitting N tasks.
+
+    Design reference: DESIGN.md §10.91 (v1.2.15)
+    """
+
+    broadcast_id: str
+    mode: str
+    task_ids: list[str]
+    agent_ids: list[str]
 
 
 class Orchestrator:
@@ -453,6 +492,14 @@ class Orchestrator:
         # Incremented in _restart_agent().  Exposed via GET /agents/{id}/stats.
         # Design reference: DESIGN.md §10.88 (v1.2.12)
         self._restart_counts: dict[str, int] = {}
+        # Broadcast group registry (v1.2.15): broadcast_id → BroadcastGroup.
+        # Tracks fan-out broadcast operations submitted via broadcast_task().
+        # Design reference: DESIGN.md §10.91 (v1.2.15)
+        self._broadcast_groups: dict[str, BroadcastGroup] = {}
+        # Reverse lookup: task_id → broadcast_id (v1.2.15).
+        # Populated at broadcast_task() time; used by _route_loop for O(1) lookup.
+        # Design reference: DESIGN.md §10.91 (v1.2.15)
+        self._task_to_broadcast: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1433,6 +1480,83 @@ class Orchestrator:
         logger.info("Task %s cancelled from queue", task_id)
         return True
 
+    async def broadcast_task(
+        self,
+        prompt: str,
+        agent_ids: list[str],
+        *,
+        mode: str = "race",
+        priority: int = 0,
+        timeout: int | None = None,
+    ) -> "BroadcastResult":
+        """Submit the same task to multiple agents simultaneously.
+
+        Parameters
+        ----------
+        prompt:
+            Task prompt sent to every target agent.
+        agent_ids:
+            Explicit list of agent IDs to receive the task.  The caller is
+            responsible for resolving tags / groups before calling this method.
+        mode:
+            ``"race"`` — first successful result wins; remaining tasks are
+            cancelled.  ``"gather"`` — wait for ALL tasks to complete (success
+            or failure) before marking the broadcast done.
+        priority:
+            Task priority (lower = dispatched first).
+        timeout:
+            Per-task timeout in seconds.  ``None`` uses the global config value.
+
+        Returns
+        -------
+        BroadcastResult
+            Metadata about the broadcast (id, task_ids, agent_ids, mode).
+
+        Design references:
+        - Fan-out / Fan-in concurrency pattern — distribute work, cancel losers.
+        - Sakana AI ALE-Agent — parallel multi-agent trial-and-error with selection.
+        - Go context.Context cancellation — abort remaining workers on first result.
+        - DESIGN.md §10.91 (v1.2.15)
+        """
+        broadcast_id = str(uuid.uuid4())
+        task_ids: list[str] = []
+        for agent_id in agent_ids:
+            task = await self.submit_task(
+                prompt,
+                priority=priority,
+                target_agent=agent_id,
+                timeout=timeout,
+            )
+            task_ids.append(task.id)
+            self._task_to_broadcast[task.id] = broadcast_id
+
+        group = BroadcastGroup(
+            broadcast_id=broadcast_id,
+            mode=mode,
+            task_ids=list(task_ids),
+            agent_ids=list(agent_ids),
+            status="pending" if task_ids else "complete",
+        )
+        self._broadcast_groups[broadcast_id] = group
+        if not task_ids:
+            group.status = "complete"
+        logger.info(
+            "Broadcast %s submitted: %d tasks, mode=%s", broadcast_id, len(task_ids), mode
+        )
+        return BroadcastResult(
+            broadcast_id=broadcast_id,
+            mode=mode,
+            task_ids=task_ids,
+            agent_ids=list(agent_ids),
+        )
+
+    def get_broadcast(self, broadcast_id: str) -> "BroadcastGroup | None":
+        """Return the :class:`BroadcastGroup` for *broadcast_id*, or ``None``.
+
+        Design reference: DESIGN.md §10.91 (v1.2.15)
+        """
+        return self._broadcast_groups.get(broadcast_id)
+
     async def cancel_workflow(self, workflow_id: str) -> dict | None:
         """Cancel all tasks in *workflow_id* and mark the workflow as cancelled.
 
@@ -2389,6 +2513,81 @@ class Orchestrator:
                         self._route_result_reply(task_id, msg),
                         name=f"reply-to-route-{task_id[:8]}",
                     )
+                # Broadcast group handling (v1.2.15): update BroadcastGroup state
+                # when a task that belongs to a broadcast completes or fails.
+                # Race mode: first success → mark winner, cancel remaining tasks.
+                # Gather mode: collect all results; mark complete when all finish.
+                # Design reference: DESIGN.md §10.91 (v1.2.15)
+                if task_id and task_id in self._task_to_broadcast:
+                    _bc_id = self._task_to_broadcast.pop(task_id)
+                    _bc = self._broadcast_groups.get(_bc_id)
+                    if _bc is not None and not _bc.cancelled:
+                        _error = msg.payload.get("error")
+                        if not _error:
+                            _output = msg.payload.get("output", "") or ""
+                            _bc.completed_tasks[task_id] = _output
+                            _bc.status = "running"
+                            if _bc.mode == "race" and _bc.winner_task_id is None:
+                                # First success wins — cancel all remaining tasks.
+                                _bc.winner_task_id = task_id
+                                _bc.status = "complete"
+                                _bc.cancelled = True
+                                for _other_tid in list(_bc.task_ids):
+                                    if (
+                                        _other_tid != task_id
+                                        and _other_tid not in _bc.completed_tasks
+                                        and _other_tid not in _bc.failed_tasks
+                                    ):
+                                        asyncio.create_task(
+                                            self.cancel_task(_other_tid),
+                                            name=f"bc-cancel-{_other_tid[:8]}",
+                                        )
+                                logger.info(
+                                    "Broadcast %s complete (race): winner=%s",
+                                    _bc_id, task_id,
+                                )
+                            elif _bc.mode == "gather":
+                                # Gather: check if ALL tasks are resolved.
+                                _resolved = (
+                                    len(_bc.completed_tasks) + len(_bc.failed_tasks)
+                                )
+                                if _resolved >= len(_bc.task_ids):
+                                    _bc.status = "complete"
+                                    logger.info(
+                                        "Broadcast %s complete (gather): %d results",
+                                        _bc_id, len(_bc.completed_tasks),
+                                    )
+                        else:
+                            # Task failed — record and check gather completion.
+                            _bc.failed_tasks.add(task_id)
+                            _bc.status = "running"
+                            if _bc.mode == "gather":
+                                _resolved = (
+                                    len(_bc.completed_tasks) + len(_bc.failed_tasks)
+                                )
+                                if _resolved >= len(_bc.task_ids):
+                                    _bc.status = (
+                                        "complete"
+                                        if _bc.completed_tasks
+                                        else "failed"
+                                    )
+                                    logger.info(
+                                        "Broadcast %s %s (gather, all resolved)",
+                                        _bc_id, _bc.status,
+                                    )
+                            elif _bc.mode == "race":
+                                # All failed in race mode?
+                                _all_failed = all(
+                                    tid in _bc.failed_tasks
+                                    or tid in _bc.completed_tasks
+                                    for tid in _bc.task_ids
+                                )
+                                if _all_failed and not _bc.completed_tasks:
+                                    _bc.status = "failed"
+                                    logger.info(
+                                        "Broadcast %s failed (race, all tasks failed)",
+                                        _bc_id,
+                                    )
                 # Drain auto-stop: if the agent that sent this RESULT is in drain mode,
                 # stop it now that its task has completed.
                 # Reference: Kubernetes terminationGracePeriodSeconds; DESIGN.md §10.23 (v0.28.0)
