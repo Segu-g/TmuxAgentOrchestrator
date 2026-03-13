@@ -702,6 +702,7 @@ def build_agents_router(
                 agent.started_at.isoformat() if agent.started_at is not None else None
             ),
             "uptime_s": agent.uptime_s,
+            "restart_count": orchestrator.get_agent_restart_count(agent_id),
         }
 
         stats = orchestrator.get_agent_context_stats(agent_id)

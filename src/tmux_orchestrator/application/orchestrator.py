@@ -429,6 +429,19 @@ class Orchestrator:
         # was available).
         # Design reference: DESIGN.md §10.84
         self._task_workflow_id: dict[str, str] = {}
+        # Per-agent consecutive failure counters (v1.2.12 — auto-restart).
+        # Incremented each time a task for that agent reaches final failure (all
+        # retries exhausted).  Reset to 0 on any successful task completion.
+        # When counter >= AgentConfig.max_consecutive_failures (and > 0), the
+        # orchestrator calls _restart_agent() to stop and recreate the agent.
+        # Ephemeral agents are excluded — they are single-use and never restarted.
+        # Reference: Erlang OTP one_for_one supervisor strategy (Ericsson 1996);
+        # DESIGN.md §10.88 (v1.2.12)
+        self._consecutive_failures: dict[str, int] = {}
+        # Cumulative restart count per agent (v1.2.12).
+        # Incremented in _restart_agent().  Exposed via GET /agents/{id}/stats.
+        # Design reference: DESIGN.md §10.88 (v1.2.12)
+        self._restart_counts: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -746,6 +759,17 @@ class Orchestrator:
     def all_agent_drift_stats(self) -> list[dict]:
         """Return drift stats for all tracked agents."""
         return self._drift_monitor.all_drift_stats()
+
+    def get_agent_restart_count(self, agent_id: str) -> int:
+        """Return the cumulative restart count for *agent_id* (v1.2.12).
+
+        Returns 0 when the agent has never been restarted by the auto-restart
+        mechanism (either because it has not failed enough consecutive times or
+        because ``max_consecutive_failures=0`` / ``supervision_enabled=False``).
+
+        Design reference: DESIGN.md §10.88 (v1.2.12)
+        """
+        return self._restart_counts.get(agent_id, 0)
 
     def get_agent_drift_rebriefs(self, agent_id: str) -> list[dict]:
         """Return the re-brief history for *agent_id* (most-recent-first).
@@ -2015,6 +2039,10 @@ class Orchestrator:
                 self._buffer_director_result(msg)
                 error = msg.payload.get("error")
                 self.registry.record_result(msg.from_id, error=bool(error))
+                # Auto-restart tracking (v1.2.12): reset consecutive failure
+                # counter on success; checked below on final failure.
+                if not error:
+                    self._consecutive_failures[msg.from_id] = 0
                 if not error and task_id:
                     self._completed_tasks.add(task_id)
                     # Checkpoint: remove completed task so it isn't re-queued on resume.
@@ -2135,6 +2163,28 @@ class Orchestrator:
                                 }),
                                 name=f"wh-wf-failed-err-{task_id[:8]}",
                             )
+                        # Auto-restart: track consecutive failures and trigger
+                        # _restart_agent() when threshold is reached.
+                        # Ephemeral agents and disabled agents are handled inside
+                        # _restart_agent() itself.
+                        # Reference: DESIGN.md §10.88 (v1.2.12)
+                        _failed_agent_id = msg.from_id
+                        _failed_agent_cfg = self._get_agent_config(_failed_agent_id)
+                        if (
+                            _failed_agent_cfg is not None
+                            and _failed_agent_cfg.max_consecutive_failures > 0
+                            and _failed_agent_id not in self._ephemeral_agents
+                        ):
+                            self._consecutive_failures[_failed_agent_id] = (
+                                self._consecutive_failures.get(_failed_agent_id, 0) + 1
+                            )
+                            if (
+                                self._consecutive_failures[_failed_agent_id]
+                                >= _failed_agent_cfg.max_consecutive_failures
+                            ):
+                                asyncio.ensure_future(
+                                    self._restart_agent(_failed_agent_id)
+                                )
                 # Record task in per-agent history.
                 self._record_agent_history(msg)
                 # reply_to routing: deliver RESULT to the requesting agent's mailbox.
@@ -2914,6 +2964,146 @@ class Orchestrator:
             branch_name or "<none>",
         )
         return ephemeral_id
+
+    # ------------------------------------------------------------------
+    # Agent auto-restart (v1.2.12)
+    # ------------------------------------------------------------------
+
+    def _get_agent_config(self, agent_id: str) -> "AgentConfig | None":
+        """Return the :class:`AgentConfig` whose ``id`` matches *agent_id*, or None.
+
+        Only static agents defined in ``config.agents`` are returned — ephemeral
+        agents spawned at runtime are not in this list.
+
+        Design reference: DESIGN.md §10.88 (v1.2.12)
+        """
+        return next((a for a in self.config.agents if a.id == agent_id), None)
+
+    async def _restart_agent(self, agent_id: str) -> None:
+        """Stop an unhealthy agent and start a fresh replacement with the same config.
+
+        Called automatically when ``_consecutive_failures[agent_id]`` reaches the
+        ``AgentConfig.max_consecutive_failures`` threshold and
+        ``OrchestratorConfig.supervision_enabled`` is True.
+
+        The new agent uses the same ``agent_id`` so that in-flight task routing,
+        reply_to entries, and external references remain valid.
+
+        Ephemeral agents (tracked in ``_ephemeral_agents``) are never restarted
+        by this method — they are single-use by design and are cleaned up by the
+        ephemeral auto-stop logic in ``_route_loop``.
+
+        Reference: Erlang OTP one_for_one supervisor strategy (Ericsson 1996);
+        AWS ECS unhealthy task replacement (AWS Blog 2023);
+        Microsoft Azure Scheduler Agent Supervisor pattern (2024).
+        DESIGN.md §10.88 (v1.2.12)
+        """
+        if not self.config.supervision_enabled:
+            logger.debug(
+                "Agent %s: auto-restart skipped (supervision_enabled=False)", agent_id
+            )
+            return
+
+        # Never restart ephemeral agents — they are single-use.
+        if agent_id in self._ephemeral_agents:
+            logger.debug(
+                "Agent %s: auto-restart skipped (ephemeral agent)", agent_id
+            )
+            return
+
+        cfg = self._get_agent_config(agent_id)
+        if cfg is None:
+            logger.warning(
+                "Agent %s: auto-restart skipped (no matching AgentConfig)", agent_id
+            )
+            return
+
+        logger.warning(
+            "Agent %s hit max_consecutive_failures=%d — restarting",
+            agent_id,
+            cfg.max_consecutive_failures,
+        )
+
+        # Stop the unhealthy agent.
+        agent = self.registry.get(agent_id)
+        if agent is not None:
+            try:
+                await agent.stop()
+            except Exception:  # noqa: BLE001
+                logger.exception("Auto-restart: error stopping agent %s", agent_id)
+            self.registry.unregister(agent_id)
+
+        # Reset failure counter BEFORE starting the new agent so any failure
+        # during startup doesn't immediately trigger another restart cycle.
+        self._consecutive_failures[agent_id] = 0
+
+        # Increment cumulative restart counter for observability.
+        self._restart_counts[agent_id] = self._restart_counts.get(agent_id, 0) + 1
+
+        # Create and start a fresh agent with the same ID and original config.
+        from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent  # noqa: PLC0415
+        from tmux_orchestrator.messaging import Mailbox  # noqa: PLC0415
+        from pathlib import Path as _Path  # noqa: PLC0415
+
+        mailbox = Mailbox(self.config.mailbox_dir, self.config.session_name)
+        effective_timeout = (
+            cfg.task_timeout
+            if cfg.task_timeout is not None
+            else self.config.task_timeout
+        )
+        effective_wm = self._worktree_manager if cfg.isolate else None
+
+        new_agent: Agent = ClaudeCodeAgent(
+            agent_id=agent_id,
+            bus=self.bus,
+            tmux=self.tmux,
+            mailbox=mailbox,
+            worktree_manager=effective_wm,
+            isolate=cfg.isolate,
+            session_name=self.config.session_name,
+            web_base_url=self.config.web_base_url,
+            api_key=self.config.api_key,
+            task_timeout=effective_timeout,
+            role=cfg.role,
+            command=(
+                cfg.command
+                or "env -u CLAUDECODE claude --dangerously-skip-permissions"
+            ),
+            system_prompt=cfg.system_prompt,
+            context_files=cfg.context_files,
+            context_files_root=_Path.cwd() if cfg.context_files else None,
+            context_spec_files=cfg.context_spec_files,
+            context_spec_files_root=(
+                _Path.cwd() if cfg.context_spec_files else None
+            ),
+            spec_files=cfg.spec_files,
+            spec_files_root=_Path.cwd() if cfg.spec_files else None,
+            tags=list(cfg.tags),
+            merge_on_stop=cfg.merge_on_stop,
+            merge_target=cfg.merge_target,
+            cleanup_subdir=cfg.cleanup_subdir,
+            keep_branch_on_stop=cfg.keep_branch_on_stop,
+        )
+
+        self.registry.register(new_agent)
+        await new_agent.start()
+
+        # Publish restart event for TUI / web hub observers.
+        await self.bus.publish(Message(
+            type=MessageType.STATUS,
+            from_id="__orchestrator__",
+            payload={
+                "event": "agent_restarted",
+                "agent_id": agent_id,
+                "reason": "max_consecutive_failures",
+                "restart_count": self._restart_counts[agent_id],
+            },
+        ))
+        logger.info(
+            "Agent %s successfully restarted (restart_count=%d)",
+            agent_id,
+            self._restart_counts[agent_id],
+        )
 
     # ------------------------------------------------------------------
     # Workflow DAG tracking

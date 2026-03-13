@@ -100,6 +100,22 @@ class AgentConfig:
     # Reference: git-worktree(1) — "git worktree remove" keeps the branch;
     #   DESIGN.md §10.82 (v1.2.6 — branch artifact persistence)
     keep_branch_on_stop: bool = False
+    # max_consecutive_failures: when > 0, the orchestrator automatically stops
+    #   and restarts this agent after this many consecutive task failures.
+    #   A "consecutive failure" is a RESULT message with error != None after all
+    #   retry attempts are exhausted (i.e. the task enters the dead-letter queue).
+    #   The counter resets to 0 on any successful task completion.
+    #   Set to 0 (default) to disable auto-restart for this agent.
+    #
+    # Rationale: complements the CircuitBreaker (which blocks dispatch) with
+    #   proactive remediation — recycling a stuck agent process so it can accept
+    #   new work again.  Mirrors the Erlang OTP one_for_one restart strategy
+    #   (Ericsson 1996) and AWS ECS unhealthy task replacement (AWS 2023).
+    #
+    # Reference: Erlang/OTP supervisor behaviour https://www.erlang.org/doc/system/sup_princ.html
+    #   AWS ECS task replacement https://aws.amazon.com/blogs/containers/a-deep-dive-into-amazon-ecs-task-health-and-task-replacement/
+    #   DESIGN.md §10.88 (v1.2.12)
+    max_consecutive_failures: int = 3
 
 
 @dataclass
@@ -378,6 +394,15 @@ class OrchestratorConfig:
     #
     # Reference: DESIGN.md §10.17 (v1.0.0 — worktree cwd bug fix)
     repo_root: "Path | None" = None
+    # --- Agent auto-restart supervision (v1.2.12) ---
+    # supervision_enabled: global kill-switch for agent auto-restart.
+    #   When False, _restart_agent() is a no-op regardless of per-agent
+    #   max_consecutive_failures settings.  Use this to disable auto-restart
+    #   across all agents without modifying individual AgentConfig entries.
+    #
+    # Reference: Erlang OTP supervisor behaviour — intensity/period limit;
+    #   DESIGN.md §10.88 (v1.2.12)
+    supervision_enabled: bool = True
     # --- Workflow branch cleanup on completion ---
     # workflow_branch_cleanup: when True (default), the orchestrator automatically
     #   deletes worktree branches accumulated by ephemeral agents once the workflow
@@ -493,6 +518,7 @@ def load_config(path: str | Path, cwd: Path | str | None = None) -> Orchestrator
             merge_on_stop=a.get("merge_on_stop", False),
             merge_target=a.get("merge_target"),
             cleanup_subdir=a.get("cleanup_subdir", True),
+            max_consecutive_failures=a.get("max_consecutive_failures", 3),
         )
         for a in data.get("agents", [])
     ]
@@ -585,4 +611,6 @@ def load_config(path: str | Path, cwd: Path | str | None = None) -> Orchestrator
             data.get("scratchpad_dir", ".orchestrator/scratchpad"), effective_cwd
         ),
         repo_root=Path(data["repo_root"]).expanduser().resolve() if data.get("repo_root") else None,
+        supervision_enabled=data.get("supervision_enabled", True),
+        workflow_branch_cleanup=data.get("workflow_branch_cleanup", True),
     )

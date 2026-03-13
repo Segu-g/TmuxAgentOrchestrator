@@ -6533,3 +6533,62 @@ The `OrchestratorTuiApp` calls `status_bar.update_stats()` in its agent refresh 
 - `pyproject.toml`: version `1.2.11`
 
 **テスト数**: 3114+ → 3126+
+
+## §10.88 — v1.2.12: サーキットブレーカー自動再起動 (Circuit Breaker Auto-Restart)
+
+### 選択理由 (Selection Rationale)
+
+**選択**: Circuit Breaker + エージェント自動再起動 (auto-restart unhealthy agents)
+
+**理由**: The system already tracks agent failure state via CircuitBreaker (OPEN/CLOSED/HALF-OPEN). However when an agent accumulates consecutive failures, no remediation occurs — the circuit stays open indefinitely until recovery_timeout elapses and the probe succeeds. This is insufficient for long-lived orchestration: a stuck agent blocks queue capacity and produces cascading dependency failures. Auto-restart (one-for-one, per Erlang OTP) is the natural complement to circuit breaking.
+
+**選択しなかったもの**: Distributed tracing improvements, workflow visualisation — deprioritised because fault tolerance infrastructure has a higher ROI at this stage.
+
+### Research Findings
+
+**1. Scheduler Agent Supervisor pattern (Microsoft Azure Architecture Center, 2024)**
+- "The Supervisor monitors the status of steps and if it detects any that have timed out or failed, it arranges for the appropriate Agent to recover the step or execute the appropriate remedial action."
+- Directly maps to `_restart_agent(agent_id)`.
+- Reference: https://learn.microsoft.com/en-us/azure/architecture/patterns/scheduler-agent-supervisor
+
+**2. Erlang OTP one_for_one supervisor restart strategy (Erlang/OTP docs, 2024)**
+- "If one child process terminates and is to be restarted, only that child process is affected."
+- Restart intensity: `MaxR` restarts within `MaxT` seconds — prevent infinite restart loops.
+- The `max_consecutive_failures` threshold maps to `MaxR`; the orchestrator tracks consecutive failures per agent.
+- Reference: https://www.erlang.org/doc/system/sup_princ.html
+
+**3. Amazon ECS unhealthy task replacement (AWS Blog, 2023)**
+- "ECS will first start a healthy replacement for each unhealthy task that failed to pass a health check, before terminating it."
+- Key pattern: replacement is created with the SAME config (template), same ID preserved for routing.
+- Reference: https://aws.amazon.com/blogs/containers/a-deep-dive-into-amazon-ecs-task-health-and-task-replacement/
+
+### 実装内容 (Implementation)
+
+#### `AgentConfig.max_consecutive_failures: int = 3`
+Per-agent threshold. `0` = disabled (opt-out). Loaded from YAML.
+
+#### `OrchestratorConfig.supervision_enabled: bool = True`
+Global kill-switch. When `False`, `_restart_agent` is a no-op regardless of per-agent config.
+
+#### `Orchestrator._consecutive_failures: dict[str, int]`
+Per-agent consecutive failure counter. Reset to 0 on success. Incremented on final failure (retries exhausted).
+
+#### `Orchestrator._restart_counts: dict[str, int]`
+Cumulative restart count per agent. Exposed via `GET /agents/{id}/stats` as `restart_count`.
+
+#### `Orchestrator._restart_agent(agent_id: str)`
+Async method. Stops old agent, creates fresh one with same config + ID, registers, starts.
+Publishes `agent_restarted` STATUS bus event. Ephemeral agents are excluded.
+
+#### `GET /agents/{id}/stats` enhancement
+Added `restart_count: int` field.
+
+### 実装変更ファイル (Implementation Files)
+
+- `src/tmux_orchestrator/application/config.py`: `AgentConfig.max_consecutive_failures`, `OrchestratorConfig.supervision_enabled`
+- `src/tmux_orchestrator/application/orchestrator.py`: `_consecutive_failures`, `_restart_counts`, `_restart_agent()`, hook in `_route_loop`
+- `src/tmux_orchestrator/web/routers/agents.py`: add `restart_count` to stats response
+- `tests/test_agent_auto_restart.py`: 12+ tests
+- `pyproject.toml`: version `1.2.12`
+
+**テスト数**: 3126+ → 3158+

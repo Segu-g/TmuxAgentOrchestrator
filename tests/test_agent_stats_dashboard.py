@@ -122,6 +122,9 @@ class _MockOrchestrator:
     def get_agent_drift_rebriefs(self, agent_id: str) -> list:
         return []
 
+    def get_agent_restart_count(self, agent_id: str) -> int:
+        return 0
+
 
 def _make_history(
     n_success: int = 0,
