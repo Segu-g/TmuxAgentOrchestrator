@@ -24,3 +24,7 @@ class AgentRole(str, Enum):
 
     WORKER = "worker"
     DIRECTOR = "director"
+    # TDD specialist roles (v1.2.22)
+    TESTER = "tester"    # Red phase — writes failing tests
+    CODER = "coder"      # Green phase — makes tests pass with minimal code
+    REVIEWER = "reviewer"  # Refactor phase — improves code quality

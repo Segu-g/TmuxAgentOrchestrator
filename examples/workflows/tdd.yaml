@@ -39,6 +39,23 @@ feature: "a stack data structure with push, pop, and peek operations"
 language: python
 
 # Agent capability routing (empty = any available agent)
+# Role-specific docs are loaded from agent_plugin/docs/ when agents are configured
+# with a matching role field:
+#   test-writer agent  → role: tester   → loads agent_plugin/docs/tester.md
+#   implementer agent  → role: coder    → loads agent_plugin/docs/coder.md
+#   refactorer agent   → role: reviewer → loads agent_plugin/docs/reviewer.md
+#
+# Example agent config entries (add to your orchestrator YAML):
+#   agents:
+#     - id: test-writer
+#       role: tester
+#       tags: [tdd_tester]
+#     - id: implementer
+#       role: coder
+#       tags: [tdd_coder]
+#     - id: refactorer
+#       role: reviewer
+#       tags: [tdd_reviewer]
 test_writer_tags: []
 implementer_tags: []
 refactorer_tags: []

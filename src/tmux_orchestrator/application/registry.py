@@ -30,6 +30,16 @@ from tmux_orchestrator.domain.agent import AgentRole, AgentStatus
 
 logger = logging.getLogger(__name__)
 
+# Roles that are eligible for task dispatch via find_idle_worker().
+# DIRECTOR agents coordinate via REST and are never dispatched tasks by the
+# routing loop.  All other roles (worker + TDD specialists) can receive tasks.
+_DISPATCHABLE_ROLES: frozenset[AgentRole] = frozenset({
+    AgentRole.WORKER,
+    AgentRole.TESTER,
+    AgentRole.CODER,
+    AgentRole.REVIEWER,
+})
+
 
 class AgentRegistry:
     """Encapsulates all agent-related state for the orchestrator.
@@ -138,7 +148,7 @@ class AgentRegistry:
         for agent in self._agents.values():
             if agent.status != AgentStatus.IDLE:
                 continue
-            if getattr(agent, "role", AgentRole.WORKER) != AgentRole.WORKER:
+            if getattr(agent, "role", AgentRole.WORKER) not in _DISPATCHABLE_ROLES:
                 continue
             if not self._breakers.get(agent.id, CircuitBreaker(agent.id)).is_allowed():
                 continue

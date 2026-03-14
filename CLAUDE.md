@@ -339,6 +339,30 @@ ctx = json.loads(ctx_path.read_text())
 
 The per-agent naming prevents race conditions when multiple agents share the same working directory (`isolate: false`). The slash commands handle this automatically — you do not need to manage it manually.
 
+### Role-Specific Instructions
+
+The orchestrator sets two environment variables in your pane at startup:
+
+- `TMUX_ORCHESTRATOR_AGENT_ROLE` — your role name (e.g. `worker`, `director`, `tester`, `coder`, `reviewer`)
+- `TMUX_ORCHESTRATOR_PLUGIN_DOCS_DIR` — absolute path to the `agent_plugin/docs/` directory
+
+To read your role-specific instructions:
+
+```bash
+cat "$TMUX_ORCHESTRATOR_PLUGIN_DOCS_DIR/$TMUX_ORCHESTRATOR_AGENT_ROLE.md"
+```
+
+Available role docs:
+| Role value | Doc file | Used by |
+|---|---|---|
+| `worker` | `worker.md` | General worker agents |
+| `director` | `director.md` | Director/coordinator agents |
+| `tester` | `tester.md` | TDD Red phase — writes failing tests |
+| `coder` | `coder.md` | TDD Green phase — makes tests pass |
+| `reviewer` | `reviewer.md` | TDD Refactor phase — improves code quality |
+
+If no role-specific doc exists for your role, fall back to `worker.md`.
+
 ### API Key for Authenticated Requests
 
 REST endpoints require an `X-API-Key` header. The key is delivered exclusively via:
