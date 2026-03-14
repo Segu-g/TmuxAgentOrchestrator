@@ -9495,3 +9495,20 @@ https://icml.cc/virtual/2025/poster/45170
 4. **監査プロンプト**: OWASP Top 10 (security), Big-O / caching / DB (performance)
 5. **auto-prefix**: `audit_{8hex}`
 
+
+### Step 3-4 — デモ結果 + フィードバック (2026-03-15)
+
+**デモ結果**: 30/33 PASS。コアワークフロー成功。
+- implementer (69.9s): user authentication module 5125 chars 実装
+- security-auditor: セキュリティ監査 7395 chars (OWASP/CWE キーワード確認済み)
+- performance-auditor: パフォーマンス監査 6646 chars (complexity/performance キーワード確認済み)
+- synthesizer: 統合 AUDIT_REPORT.md 7388 chars 生成
+- workflow status=complete
+
+**失敗した3チェック** (30/33):
+1-3. `{security-auditor,performance-auditor,synthesizer} has task history — no history`
+→ `_record_agent_history()` が `on_task_complete()` より後に呼ばれていたため、workflow=complete 状態を poll した後に history を query するとまだ記録されていない競合が発生
+→ **修正済み**: `_record_agent_history()` を `on_task_complete()` より前に移動 (commit 8cada91)
+
+**次イテレーション**: history bug fix により demos が 33/33 に改善されることを確認。
+
