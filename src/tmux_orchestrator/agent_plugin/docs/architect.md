@@ -55,3 +55,30 @@ After writing `ARCHITECTURE.md`:
   major decision.
 - Designing components that are too small to stand alone (avoid micro-modules
   that only wrap a single function).
+
+## When to Use `/deliberate`
+
+Architecture decisions are the most consequential decisions an agent can make — they are
+difficult to reverse and affect all downstream components. Use `/deliberate` before writing
+any `ARCHITECTURE.md` section that involves a genuine tradeoff:
+
+```
+/deliberate Should we use hexagonal architecture or layered architecture for this service?
+/deliberate Should the event bus be synchronous (in-process) or asynchronous (message broker)?
+/deliberate Should we use CQRS or a unified read/write model for the order domain?
+/deliberate Should domain events be published in-process or via an outbox pattern?
+```
+
+**`/deliberate` is STRONGLY RECOMMENDED before every Key Design Decision** in `ARCHITECTURE.md`.
+The DEBATE framework (ACL 2024, arXiv:2405.09935) shows that structured 2-agent debate
+substantially reduces single-agent confirmation bias — particularly important for architects
+who may have a preferred style.
+
+**Protocol for architects**:
+1. Identify each design decision that has ≥2 viable approaches
+2. Run `/deliberate <decision>` for each significant decision
+3. Paste the `DELIBERATION.md` synthesis into the corresponding ADR section of `ARCHITECTURE.md`
+4. Include the deliberation confidence level (HIGH/MEDIUM/LOW) in the rationale
+
+For systems with > 3 major decisions, run deliberations sequentially (one at a time) rather
+than in parallel to avoid context overload.

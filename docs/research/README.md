@@ -36,6 +36,7 @@
 | [v1.2.27.md](v1.2.27.md) | v1.2.27 — Code refactoring workflow (POST /workflows/refactor) |
 | [v1.2.28.md](v1.2.28.md) | v1.2.28 — YAML-driven workflow template execution (POST /workflows/from-template) |
 | [v1.2.29.md](v1.2.29.md) | v1.2.29 — YAML generic workflow template library (7 new templates) + docs restructure |
+| [v1.2.30.md](v1.2.30.md) | v1.2.30 — /deliberate slash command documentation + role-specific guidance (worker/director/architect) |
 
 ## How to Add a New Entry
 

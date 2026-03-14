@@ -83,3 +83,11 @@ PUT $TMUX_ORCHESTRATOR_WEB_BASE_URL/scratchpad/<key>
 # Director reads result
 GET $TMUX_ORCHESTRATOR_WEB_BASE_URL/scratchpad/<key>
 ```
+
+## When to Use `/deliberate`
+
+Use `/deliberate <question>` during planning (before delegation) when choosing between workflow
+coordination strategies with significant tradeoffs. Run it alongside `/plan`, not after workers
+have started. The outcome informs `PLAN.md`.
+
+Example: `/deliberate Should we use a pipeline or fan-out workflow for this task?`

@@ -55,3 +55,13 @@ Recommended sequence: **Write → Select → Compress → Isolate**
 
 Signs of context rot: repeating yourself, forgetting earlier decisions, missing files you already
 created. Run `/summarize` immediately if you notice these symptoms.
+
+## When to Use `/deliberate`
+
+Use `/deliberate <question>` when stuck between two valid implementation approaches that are hard
+to reverse. Examples: file format choice, module boundary, storage strategy.
+
+**Use it when**: the decision is significant and your task prompt is ambiguous about the approach.
+**Skip it when**: the choice is trivial/reversible, or you are near a task timeout.
+
+After `/deliberate` completes, read `DELIBERATION.md` and continue implementation.
