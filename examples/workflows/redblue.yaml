@@ -15,6 +15,21 @@
 workflow:
   endpoint: /workflows/redblue
 
+# --- Defaults (parameter inheritance) ---
+defaults:
+  language: "python"
+  security_focus:
+    - "input_validation"
+    - "authentication"
+    - "rate_limiting"
+    - "injection"
+  scratchpad_prefix: "redblue"
+  agent_timeout: 300
+  blue_tags: ["redblue_blue"]
+  red_tags: ["redblue_red"]
+  arbiter_tags: ["redblue_arbiter"]
+  reply_to: null
+
 # --- Required fields ---
 
 # Feature to implement and security-review

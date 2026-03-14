@@ -1,3 +1,16 @@
+workflow:
+  endpoint: /workflows/paircoder
+
+# --- Defaults (parameter inheritance) ---
+defaults:
+  language: python
+  spec_keys: []
+  max_rounds: 2
+  writer_tags: ["paircoder_writer"]
+  reviewer_tags: ["paircoder_reviewer"]
+  agent_timeout: 300
+  reply_to: null
+
 name: PairCoder Writer→Reviewer Loop
 description: |
   Two-agent iterative code refinement using the Generator-and-Critic (Ralph Loop) pattern.

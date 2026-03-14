@@ -22,6 +22,15 @@
 workflow:
   endpoint: /workflows/ddd
 
+# --- Defaults (parameter inheritance) ---
+defaults:
+  contexts: []
+  language: python
+  context_mapper_tags: []
+  domain_expert_tags: []
+  integration_designer_tags: []
+  reply_to: null
+
 # --- Required fields ---
 
 # Topic to decompose using DDD

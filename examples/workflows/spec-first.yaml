@@ -20,6 +20,12 @@
 workflow:
   endpoint: /workflows/spec-first
 
+# --- Defaults (parameter inheritance) ---
+defaults:
+  spec_tags: []
+  impl_tags: []
+  reply_to: null
+
 # --- Required fields ---
 
 # Short topic/module name (used in file naming)

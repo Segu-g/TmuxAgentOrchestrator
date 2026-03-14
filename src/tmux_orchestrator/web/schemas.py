@@ -820,6 +820,32 @@ class WorkflowSubmit(BaseModel):
     #
     # Design reference: DESIGN.md §10.84 (v1.2.8)
     merge_to_main_on_complete: bool = False
+    # phase_defaults: flat dict of fallback values applied to every PhaseSpecModel
+    #   in the ``phases`` list before conversion to domain objects.  Phase-level
+    #   values always take priority (phase-wins-over-defaults), matching Argo
+    #   Workflows ``templateDefaults`` semantics.
+    #
+    #   Typical usage:
+    #     phase_defaults: {"timeout": 300, "required_tags": ["worker"]}
+    #
+    #   This avoids repeating the same timeout / tags in every phase definition.
+    #   Ignored entirely when ``tasks=`` mode is used.
+    #
+    # Design references:
+    # - Argo Workflows templateDefaults (template-specific values take priority)
+    #   https://argo-workflows.readthedocs.io/en/latest/template-defaults/ (2025)
+    # - GitLab CI ``default:`` keyword (job-level inherits from top-level default)
+    #   https://docs.gitlab.com/ci/yaml/ (2025)
+    # - DESIGN.md §10.98 (v1.2.23)
+    phase_defaults: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Flat dict of fallback values applied to every phase spec before "
+            "conversion. Phase-level values always take priority. "
+            "Common fields: timeout, required_tags, context. "
+            "Ignored in tasks= mode. Design reference: DESIGN.md §10.98 (v1.2.23)."
+        ),
+    )
 
     @model_validator(mode="after")
     def tasks_or_phases_required(self) -> "WorkflowSubmit":
@@ -828,6 +854,38 @@ class WorkflowSubmit(BaseModel):
         if self.tasks and self.phases:
             raise ValueError("Provide either 'tasks' or 'phases', not both")
         return self
+
+    def effective_phases(self) -> list[Any]:
+        """Return phases with phase_defaults applied to each entry.
+
+        Each phase dict (or Pydantic model serialised to dict) that is missing
+        a field present in ``phase_defaults`` receives the default value.
+        Phase-level values always win.
+
+        Returns an empty list when ``phases`` is None.
+
+        Design reference: DESIGN.md §10.98 (v1.2.23).
+        """
+        from tmux_orchestrator.workflow_defaults import apply_phase_defaults  # noqa: PLC0415
+
+        if self.phases is None:
+            return []
+        if not self.phase_defaults:
+            return [
+                p if isinstance(p, dict) else p.model_dump(exclude_unset=False)
+                if hasattr(p, "model_dump") else p
+                for p in self.phases
+            ]
+        result = []
+        for p in self.phases:
+            if isinstance(p, dict):
+                result.append(apply_phase_defaults(p, self.phase_defaults))
+            elif hasattr(p, "model_dump"):
+                d = p.model_dump(exclude_unset=False)
+                result.append(apply_phase_defaults(d, self.phase_defaults))
+            else:
+                result.append(p)
+        return result
 
 
 class TddWorkflowSubmit(BaseModel):

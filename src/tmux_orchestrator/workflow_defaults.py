@@ -126,6 +126,48 @@ def apply_workflow_defaults(data: dict[str, Any]) -> dict[str, Any]:
     return deep_merge_defaults(body, defaults)
 
 
+def apply_phase_defaults(
+    phase: dict[str, Any], defaults: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Apply *defaults* to a single phase spec dict without overwriting existing values.
+
+    This is the phase-level equivalent of :func:`deep_merge_defaults` — used by
+    :meth:`WorkflowSubmit.effective_phases` to apply ``phase_defaults`` to each
+    entry in ``phases`` before conversion to domain objects.
+
+    Merge semantics (Argo Workflows ``templateDefaults`` inspired):
+    - Keys **present** in *phase* (including ``None`` and ``0``) are kept unchanged.
+    - Keys **absent** from *phase* but present in *defaults* are copied in.
+
+    Parameters
+    ----------
+    phase:
+        A single phase spec dict (e.g. ``{"name": "...", "pattern": "single"}``).
+    defaults:
+        Flat dict of fallback values (e.g. ``{"timeout": 300, "required_tags": []}``)
+        or ``None`` / empty dict for a no-op.
+
+    Returns
+    -------
+    dict
+        A new dict (the input *phase* is not mutated).
+
+    Examples
+    --------
+    >>> apply_phase_defaults({"name": "p", "pattern": "single"}, {"timeout": 300})
+    {'name': 'p', 'pattern': 'single', 'timeout': 300}
+    >>> apply_phase_defaults({"name": "p", "pattern": "single", "timeout": 600}, {"timeout": 300})
+    {'name': 'p', 'pattern': 'single', 'timeout': 600}
+    """
+    if not defaults:
+        return dict(phase)
+    result = dict(phase)
+    for key, default_val in defaults.items():
+        if key not in result:
+            result[key] = default_val
+    return result
+
+
 def load_workflow_template(path: Path) -> dict[str, Any]:
     """Load a workflow YAML template and apply its ``defaults:`` section.
 

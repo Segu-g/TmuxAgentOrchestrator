@@ -19,6 +19,15 @@
 workflow:
   endpoint: /workflows/clean-arch
 
+# --- Defaults (parameter inheritance) ---
+defaults:
+  language: python
+  domain_designer_tags: []
+  usecase_designer_tags: []
+  adapter_designer_tags: []
+  framework_designer_tags: []
+  reply_to: null
+
 # --- Required fields ---
 
 # Feature to decompose into Clean Architecture layers

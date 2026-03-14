@@ -18,6 +18,17 @@
 workflow:
   endpoint: /workflows/adr
 
+# --- Defaults (parameter inheritance) ---
+# Values here apply when the corresponding field is absent from the request body.
+# Override any field by setting it explicitly below or in the POST body.
+# Use apply_workflow_defaults() / load_workflow_template() from
+# tmux_orchestrator.workflow_defaults to load this template programmatically.
+defaults:
+  proposer_tags: []
+  reviewer_tags: []
+  synthesizer_tags: []
+  reply_to: null
+
 # --- Required fields ---
 
 # Topic for the Architecture Decision Record

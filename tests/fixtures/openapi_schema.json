@@ -2131,6 +2131,19 @@
             "title": "Name",
             "type": "string"
           },
+          "phase_defaults": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Flat dict of fallback values applied to every phase spec before conversion. Phase-level values always take priority. Common fields: timeout, required_tags, context. Ignored in tasks= mode. Design reference: DESIGN.md \u00a710.98 (v1.2.23).",
+            "title": "Phase Defaults"
+          },
           "phases": {
             "anyOf": [
               {

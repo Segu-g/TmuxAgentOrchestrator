@@ -49,6 +49,14 @@
 workflow:
   endpoint: /workflows/iterative-review
 
+# --- Defaults (parameter inheritance) ---
+defaults:
+  language: "Python"
+  implementer_tags: []
+  reviewer_tags: []
+  revisor_tags: []
+  reply_to: null
+
 # --- Required fields ---
 
 # The implementation task description

@@ -55,6 +55,18 @@
 workflow:
   endpoint: /workflows/mob-review
 
+# --- Defaults (parameter inheritance) ---
+defaults:
+  language: "Python"
+  aspects:
+    - security
+    - performance
+    - maintainability
+    - testing
+  reviewer_tags: []
+  synthesizer_tags: ["mob_synthesizer"]
+  reply_to: null
+
 # --- Required fields ---
 
 # The code to review (paste the full source here)

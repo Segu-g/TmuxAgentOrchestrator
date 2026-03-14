@@ -18,6 +18,17 @@
 workflow:
   endpoint: /workflows/delphi
 
+# --- Defaults (parameter inheritance) ---
+defaults:
+  experts:
+    - security
+    - performance
+    - maintainability
+  max_rounds: 2
+  expert_tags: []
+  moderator_tags: []
+  reply_to: null
+
 # --- Required fields ---
 
 # Topic for expert consensus (e.g. "API rate limiting strategy")

@@ -360,6 +360,9 @@ Available role docs:
 | `tester` | `tester.md` | TDD Red phase — writes failing tests |
 | `coder` | `coder.md` | TDD Green phase — makes tests pass |
 | `reviewer` | `reviewer.md` | TDD Refactor phase — improves code quality |
+| `planner` | `planner.md` | Structured planning — writes PLAN.md, decomposes goals |
+| `spec-writer` | `spec-writer.md` | Specification authoring — writes SPEC.md with acceptance criteria |
+| `architect` | `architect.md` | Architecture design — writes ARCHITECTURE.md and ADRs |
 
 If no role-specific doc exists for your role, fall back to `worker.md`.
 

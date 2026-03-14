@@ -17,6 +17,13 @@
 workflow:
   endpoint: /workflows/socratic
 
+# --- Defaults (parameter inheritance) ---
+defaults:
+  questioner_tags: []
+  responder_tags: []
+  synthesizer_tags: []
+  reply_to: null
+
 # --- Required fields ---
 
 # Topic for the Socratic dialogue

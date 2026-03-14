@@ -52,6 +52,14 @@
 workflow:
   endpoint: /workflows/spec-first-tdd
 
+# --- Defaults (parameter inheritance) ---
+defaults:
+  language: "Python"
+  spec_tags: []
+  impl_tags: []
+  tester_tags: []
+  reply_to: null
+
 # --- Required fields ---
 
 # Short topic name (used for workflow name and scratchpad prefix)
