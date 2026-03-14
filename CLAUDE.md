@@ -443,7 +443,19 @@ Commands that use REST (`/send-message`, `/spawn-subagent`, `/list-agents`, `/pr
 
 ### Shared Scratchpad
 
-The shared scratchpad is a server-side key/value store for passing data between agents without P2P messaging. It implements the Blackboard pattern — one agent writes results, another reads them.
+The shared scratchpad is a server-side key/value store for **coordination metadata** between agents. It implements the Blackboard pattern.
+
+**Use scratchpad for** (small coordination values only):
+- File paths pointing to committed artefacts (e.g. `scratchpad/report_path = ".worktrees/worker-1/REVIEW.md"`)
+- Status flags (e.g. `scratchpad/phase1_done = "true"`)
+- Small parameters passed between phases
+
+**Do NOT use scratchpad for** (use Git instead):
+- File contents — review results, specifications, code, reports
+- Large payloads of any kind
+- Persistent storage — scratchpad is volatile and lost on server restart
+
+**Rule**: Commit artefacts to Git first, then write the file path to scratchpad. The next agent reads the path and uses `cat`/`Read` to access the content.
 
 ```bash
 # Write a value
@@ -461,8 +473,6 @@ curl {web_base_url}/scratchpad/ -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY"
 # Delete an entry
 curl -X DELETE {web_base_url}/scratchpad/my-key -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY"
 ```
-
-Use the scratchpad for pipeline workflows (agent-a writes an artefact path, agent-b reads it) rather than embedding large payloads in P2P messages.
 
 ### Submitting Tasks via REST (Director Pattern)
 
