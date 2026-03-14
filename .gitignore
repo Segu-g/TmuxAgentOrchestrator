@@ -16,3 +16,8 @@ __orchestrator_api_key__*__
 # Task prompt files written by orchestrator
 __task_prompt__*
 __compress_context__*
+# Orchestrator runtime state
+.orchestrator/
+# Ephemeral files from agent sessions
+AUDIT.md
+NOTES.md
