@@ -21,7 +21,7 @@ HOOK_SCRIPT = (
     / "src"
     / "tmux_orchestrator"
     / "agent_plugin"
-    / "hooks"
+    / "scripts"
     / "user-prompt-submit.py"
 )
 

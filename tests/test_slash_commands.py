@@ -72,14 +72,14 @@ def test_session_start_sh_exists_and_is_executable() -> None:
     """session-start.sh must exist and be executable."""
     import os
 
-    script = _plugin_dir() / "hooks" / "session-start.sh"
+    script = _plugin_dir() / "scripts" / "session-start.sh"
     assert script.exists(), f"session-start.sh missing: {script}"
     assert os.access(str(script), os.X_OK), "session-start.sh must be executable"
 
 
 def test_session_start_sh_calls_ready_endpoint() -> None:
     """session-start.sh must call the /ready endpoint using env vars."""
-    script = _plugin_dir() / "hooks" / "session-start.sh"
+    script = _plugin_dir() / "scripts" / "session-start.sh"
     content = script.read_text()
     assert "TMUX_ORCHESTRATOR_WEB_BASE_URL" in content
     assert "TMUX_ORCHESTRATOR_AGENT_ID" in content

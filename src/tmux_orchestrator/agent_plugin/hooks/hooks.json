@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/session-start.sh",
             "timeout": 10
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks/user-prompt-submit.py",
+            "command": "python3 ${CLAUDE_PLUGIN_ROOT}/scripts/user-prompt-submit.py",
             "timeout": 5
           }
         ]
