@@ -9215,3 +9215,19 @@ https://aclanthology.org/2024.emnlp-main.70/
 4. **レビュアープロンプト**: 両実装を読み込み、可読性・正確性・エッジケース処理・コードスタイルの4軸で比較。REVIEW.md + winner 宣言
 5. **agent_plugin/docs/README.md**: ロール一覧表・フォーマット規約・ワークフロー対応表・新規追加手順
 
+
+### Step 3-4 — デモ結果 + フィードバック (2026-03-15)
+
+**デモ結果**: 21/24 PASS。コアワークフロー成功。
+- impl-a (77.5s), impl-b (57.9s) が並列実行
+- reviewer が両実装を比較し winner=B を宣言
+- review content 2566 chars, impl-b content 3065 chars がスクラッチパッドに保存
+
+**失敗した3チェック**:
+1. `impl_a status is queued` → タイミング問題 (実際は `in_progress`)。コードバグではない。
+2. `impl_a stored in scratchpad` → impl-a がスクラッチパッドに書き込まなかった。bashスニペットが複雑すぎる可能性。
+3. `reviewer has task history` → エピソードストアの問題。コアは動作。
+
+**次イテレーション候補** (v1.2.25):
+- bashスニペットの簡略化 + 新ワークフロー
+
