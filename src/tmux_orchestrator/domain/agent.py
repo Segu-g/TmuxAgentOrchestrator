@@ -28,3 +28,7 @@ class AgentRole(str, Enum):
     TESTER = "tester"    # Red phase — writes failing tests
     CODER = "coder"      # Green phase — makes tests pass with minimal code
     REVIEWER = "reviewer"  # Refactor phase — improves code quality
+    # Context pack roles (v1.2.23)
+    PLANNER = "planner"          # Structured planning — writes PLAN.md
+    SPEC_WRITER = "spec-writer"  # Specification authoring — writes SPEC.md
+    ARCHITECT = "architect"      # Architecture design — writes ARCHITECTURE.md

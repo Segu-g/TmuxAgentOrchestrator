@@ -312,6 +312,14 @@ class TestNewRoleDocs:
         missing = expected - found
         assert not missing, f"Missing role docs: {missing}"
 
+    def test_new_roles_in_agent_role_enum(self):
+        """AgentRole enum must include planner, spec-writer, and architect."""
+        from tmux_orchestrator.domain.agent import AgentRole
+        role_values = {r.value for r in AgentRole}
+        assert "planner" in role_values
+        assert "spec-writer" in role_values
+        assert "architect" in role_values
+
 
 # ---------------------------------------------------------------------------
 # Workflow YAML templates: all must have defaults: sections

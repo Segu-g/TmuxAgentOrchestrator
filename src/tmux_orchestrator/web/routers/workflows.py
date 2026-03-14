@@ -231,18 +231,23 @@ def build_workflows_router(
             run_id_prefix = uuid.uuid4().hex[:8]
             phase_sp = f"wf/{run_id_prefix}"
 
+            # Apply phase_defaults (if any) to each phase before conversion.
+            # effective_phases() returns phases with phase_defaults merged in;
+            # phase-level values always take priority (DESIGN.md §10.98 v1.2.23).
+            effective_phases = body.effective_phases()
+
             # Check whether any item is a block type (LoopBlock, SequenceBlock, ParallelBlock).
             # Any block type triggers the block-aware expander path.
             has_loop = any(
                 isinstance(p, (LoopBlockModel, SequenceBlockModel, ParallelBlockModel))
                 or (isinstance(p, dict) and ("loop" in p or "sequence" in p or "parallel" in p))
-                for p in body.phases
+                for p in effective_phases
             )
 
             # Convert all phase items to domain objects (handles both dicts and
             # Pydantic models, plus LoopBlockModel detection).
             try:
-                domain_items = [_to_domain_phase_item(p) for p in body.phases]
+                domain_items = [_to_domain_phase_item(p) for p in effective_phases]
             except Exception as exc:
                 raise HTTPException(status_code=422, detail=str(exc))
 
