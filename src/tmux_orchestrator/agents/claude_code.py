@@ -170,9 +170,12 @@ class ClaudeCodeAgent(Agent):
         # ``environment`` parameter (maps to ``tmux new-window -e KEY=VALUE``).
         # This is pane-local, so concurrent agent starts cannot race.
         # The shared API key is also included here for convenience.
+        plugin_docs_dir = Path(__file__).parent.parent / "agent_plugin" / "docs"
         pane_env: dict[str, str] = {
             "TMUX_ORCHESTRATOR_AGENT_ID": self.id,
             "TMUX_ORCHESTRATOR_WEB_BASE_URL": self._web_base_url,
+            "TMUX_ORCHESTRATOR_AGENT_ROLE": self.role.value,
+            "TMUX_ORCHESTRATOR_PLUGIN_DOCS_DIR": str(plugin_docs_dir),
         }
         if self._api_key:
             pane_env["TMUX_ORCHESTRATOR_API_KEY"] = self._api_key
@@ -331,36 +334,6 @@ class ClaudeCodeAgent(Agent):
                 for ex in examples:
                     lines.append(f"  - `{ex}`\n")
         return "".join(lines)
-
-    def _load_role_rules(self) -> str:
-        """Load role-specific rules from ``agent_plugin/rules/{role}.md`` and return as a string.
-
-        Returns the file content under a ``## Role Rules`` section heading, ready to
-        embed at the end of CLAUDE.md.  Embedding into CLAUDE.md makes the rules
-        auto-compact-resistant: CLAUDE.md is reloaded in full after auto-compact,
-        so the rules survive context compaction without an additional file copy step.
-
-        Returns an empty string when:
-        - No rules file exists for the agent's role (silently skipped).
-
-        Reference: DESIGN.md §10.95 (v1.2.20 — rules embedded in CLAUDE.md)
-        """
-        rules_src_dir = Path(__file__).parent.parent / "agent_plugin" / "rules"
-        src = rules_src_dir / f"{self.role.value}.md"
-        if not src.exists():
-            logger.debug(
-                "Agent %s: no built-in rules file for role %r at %s — skipping",
-                self.id, self.role.value, src,
-            )
-            return ""
-        try:
-            rules_content = src.read_text()
-        except OSError:
-            logger.warning(
-                "Agent %s: could not read role rules file %s — skipping", self.id, src
-            )
-            return ""
-        return f"\n## Role Rules\n\n{rules_content}\n"
 
     def _write_agent_claude_md(self, cwd: Path) -> None:
         """Write an agent-specific CLAUDE.md to the worktree.
@@ -531,13 +504,24 @@ or by branching from your branch (chain_branch workflow).
             self._spec_files_root = cwd
         codified_specs_section = self._load_spec_files()
 
-        # Role rules: embedded from agent_plugin/rules/{role}.md into CLAUDE.md.
-        # Embedding into CLAUDE.md makes rules auto-compact-resistant — CLAUDE.md
-        # is reloaded in full after auto-compact, so rules survive context compaction.
-        # This replaces the .claude/rules/ copy approach (v1.2.19) which conflicted
-        # with shared worktrees and was not reloaded after auto-compact.
-        # Reference: DESIGN.md §10.95 (v1.2.20)
-        role_rules_section = self._load_role_rules()
+        # Role-Specific Instructions: static section referencing env vars.
+        # The agent reads its role documentation at startup via a shell command.
+        # This avoids embedding role file content into CLAUDE.md (which required
+        # reading from agent_plugin/rules/ at every agent start) and instead
+        # delegates to the agent's shell environment at runtime.
+        # Reference: DESIGN.md §10.96 (v1.2.21)
+        role_instructions_section = """
+## Role-Specific Instructions
+
+Your role is defined by the `TMUX_ORCHESTRATOR_AGENT_ROLE` environment variable.
+At startup, read your role documentation:
+
+```bash
+cat "$TMUX_ORCHESTRATOR_PLUGIN_DOCS_DIR/$TMUX_ORCHESTRATOR_AGENT_ROLE.md"
+```
+
+This file contains detailed instructions for your specific role (worker, director, tester, coder, reviewer, etc.).
+"""
 
         content = f"""\
 # Agent: {self.id}
@@ -623,7 +607,7 @@ use the plain form without a namespace prefix.
 | `/summarize` | `/summarize` | Compress context → NOTES.md |
 | `/delegate` | `/delegate <task>` | Spawn sub-agents and assign subtasks |
 | `/task-complete` | `/task-complete <summary>` | Signal task completion to orchestrator |
-{role_rules_section}"""
+{role_instructions_section}"""
         claude_md_path = cwd / "CLAUDE.md"
         claude_md_path.write_text(content)
         logger.debug("Agent %s wrote CLAUDE.md to %s", self.id, cwd)
