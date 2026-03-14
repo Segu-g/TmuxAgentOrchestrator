@@ -1,0 +1,125 @@
+# Generic Deliberate Workflow Template (for POST /workflows/from-template)
+# ==========================================================================
+# Socratic dialogue: questioner interrogates a position, responder defends and refines,
+# synthesizer draws conclusions. Based on the SocraSynth multi-LLM framework.
+#
+# Variables (required):
+#   question   — the question or proposition to deliberate on
+#
+# Variables (optional):
+#   domain     — domain context for the deliberation (default: "software engineering")
+#
+# Usage:
+#   POST /workflows/from-template
+#   {"template": "deliberate", "variables": {
+#     "question": "Should we adopt event sourcing for our order service?"}}
+#
+# References:
+#   Chang "SocraSynth: Multi-LLM Reasoning with Conditional Statistics"
+#     arXiv:2402.06634 (Stanford, 2024)
+#     https://arxiv.org/abs/2402.06634
+#   Plato — Socratic method: elenchus (cross-examination), aporia (productive uncertainty)
+#   SocratiQ (emergentmind.com) — AI-driven Socratic dialogue systems (2025)
+
+name: "Deliberate: {question}"
+description: "Socratic dialogue workflow: questioner -> responder -> synthesizer"
+
+variables:
+  question:
+    description: "Question or proposition to deliberate on"
+    required: true
+  domain:
+    description: "Domain context for the deliberation"
+    required: false
+    default: "software engineering"
+
+defaults:
+  timeout: 300
+  pattern: "single"
+
+phases:
+  - name: "questioner"
+    pattern: "single"
+    required_tags: ["deliberate_questioner"]
+    context: |
+      You are the QUESTIONER agent in a Socratic deliberation workflow.
+
+      Question to deliberate: {question}
+      Domain: {domain}
+
+      Your role (inspired by SocraSynth arXiv:2402.06634):
+      You are a rigorous Socratic interlocutor. Your goal is NOT to answer the question
+      but to interrogate it — exposing hidden assumptions, definitions, and implications.
+
+      Your task:
+      1. Analyse the question '{question}' from multiple angles:
+         - What terms need precise definition? (e.g. "event sourcing" — what scope, what tradeoffs?)
+         - What is being assumed but not stated?
+         - What are the strongest possible positions FOR this proposition?
+         - What are the strongest possible positions AGAINST?
+         - What evidence or data would be needed to answer definitively?
+      2. Write your Socratic examination to `QUESTIONS.md`:
+         - Key definitions required (with the range of possible meanings)
+         - Hidden assumptions (list them explicitly)
+         - Pro-position: steelman argument FOR the proposition
+         - Con-position: steelman argument AGAINST the proposition
+         - 5-7 pointed questions that challenge both sides
+         - What would make this question easier or harder to answer?
+      3. Call /task-complete with: 'Socratic analysis complete. Assumptions found: N. Key questions: N.'
+
+  - name: "responder"
+    pattern: "single"
+    depends_on: ["questioner"]
+    required_tags: ["deliberate_responder"]
+    context: |
+      You are the RESPONDER agent in a Socratic deliberation workflow.
+
+      Question to deliberate: {question}
+      Domain: {domain}
+
+      Your task:
+      1. Read `QUESTIONS.md` written by the questioner agent.
+      2. Engage with the Socratic examination:
+         - Provide precise definitions for the key terms identified
+         - Acknowledge and address the hidden assumptions
+         - Respond to each of the 5-7 pointed questions with considered answers
+         - Draw on {domain} expertise and real-world examples
+         - Explicitly weigh the pro and con arguments
+      3. Develop a reasoned position:
+         - State your position clearly (FOR / AGAINST / CONDITIONAL / NEEDS-MORE-EVIDENCE)
+         - Provide your core argument (3-5 key points)
+         - Identify the most important conditions under which the answer would change
+         - Acknowledge what you are uncertain about
+      4. Write your response to `RESPONSE.md`:
+         - Definitions accepted/refined
+         - Answers to each Socratic question
+         - Your position and core argument
+         - Conditions and uncertainty
+      5. Call /task-complete with: 'Deliberation response complete. Position: [FOR/AGAINST/CONDITIONAL].'
+
+  - name: "synthesizer"
+    pattern: "single"
+    depends_on: ["responder"]
+    required_tags: ["deliberate_synthesizer"]
+    context: |
+      You are the SYNTHESIZER agent in a Socratic deliberation workflow.
+
+      Question to deliberate: {question}
+      Domain: {domain}
+
+      Your task:
+      1. Read `QUESTIONS.md` and `RESPONSE.md`.
+      2. Synthesize the deliberation into actionable wisdom:
+         - What did the Socratic examination reveal that was not obvious at first?
+         - Where did the responder's argument hold up under scrutiny?
+         - Where did gaps or weaknesses remain?
+         - What is the most defensible position given the evidence and arguments?
+      3. Write the synthesis to `DELIBERATION.md`:
+         - Question (restated precisely after deliberation)
+         - Key insights from the Socratic process
+         - Synthesis position: what the deliberation concludes
+         - Confidence: HIGH / MEDIUM / LOW / UNDECIDABLE
+         - Decision recommendation (if applicable to {domain})
+         - Open questions for further investigation
+         - Practical next steps
+      4. Call /task-complete with: 'Synthesis complete. Confidence: [LEVEL]. Recommendation written.'

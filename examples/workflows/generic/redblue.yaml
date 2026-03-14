@@ -1,0 +1,109 @@
+# Generic Red/Blue Team Security Review Template (for POST /workflows/from-template)
+# =====================================================================================
+# 3-phase adversarial security review: blue-team (implement) -> red-team (attack) ->
+# arbiter (assess).
+#
+# Variables (required):
+#   feature_description  — feature to implement and review
+#
+# Variables (optional):
+#   security_focus       — comma-separated security concerns to focus on
+#                          (default: "input validation, authentication")
+#
+# Usage:
+#   POST /workflows/from-template
+#   {"template": "redblue", "variables": {
+#     "feature_description": "user login endpoint with JWT tokens"}}
+#
+# References:
+#   AgenticSCR arXiv:2601.19138 (2025) — security code review automation
+#   Red-Teaming LLM MAS arXiv:2502.14847 (ACL 2025)
+#   OWASP Top 10 — common security vulnerabilities
+
+name: "RedBlue: {feature_description}"
+description: "3-phase adversarial security review: blue-team -> red-team -> arbiter"
+
+variables:
+  feature_description:
+    description: "Feature to implement and adversarially review"
+    required: true
+  security_focus:
+    description: "Comma-separated security areas to focus on"
+    required: false
+    default: "input validation, authentication"
+
+defaults:
+  timeout: 300
+  pattern: "single"
+
+phases:
+  - name: "implement"
+    pattern: "single"
+    required_tags: ["redblue_blue"]
+    context: |
+      You are the BLUE TEAM agent in a red/blue security review workflow.
+
+      Feature to implement: {feature_description}
+      Security focus areas: {security_focus}
+
+      Your task (Blue Team — build the feature):
+      1. Implement '{feature_description}' with security in mind.
+      2. Apply defensive coding practices:
+         - Input validation and sanitisation
+         - Proper error handling (do not leak internal details)
+         - Secure defaults
+         - Address the specific concerns: {security_focus}
+      3. Write tests covering happy paths and basic security scenarios.
+      4. Save implementation to `implementation.py` and tests to `tests.py`.
+      5. Run tests and confirm they pass.
+      6. Write a brief security rationale to `BLUE_NOTES.md`:
+         - Security measures taken
+         - Known limitations or trade-offs
+      7. Call /task-complete with: 'Blue team implementation complete. Tests: N pass.'
+
+  - name: "attack"
+    pattern: "single"
+    depends_on: ["implement"]
+    required_tags: ["redblue_red"]
+    context: |
+      You are the RED TEAM agent in a red/blue security review workflow.
+
+      Feature under review: {feature_description}
+      Security focus areas: {security_focus}
+
+      Your task (Red Team — find vulnerabilities):
+      1. Read `implementation.py`, `tests.py`, and `BLUE_NOTES.md`.
+      2. Attempt to identify security vulnerabilities, focusing on: {security_focus}
+      3. For each vulnerability found, document:
+         - Vulnerability name (use OWASP categories where applicable)
+         - Severity: CRITICAL / HIGH / MEDIUM / LOW
+         - Attack vector: how an attacker could exploit it
+         - Proof of concept (code snippet or step-by-step)
+         - Recommended fix
+      4. Write your findings to `VULNERABILITIES.md`.
+      5. If you can write a failing security test that demonstrates a vulnerability, add it to `security_tests.py`.
+      6. Call /task-complete with: 'Red team attack complete. Vulnerabilities: N critical, N high, N medium, N low.'
+
+  - name: "assess"
+    pattern: "single"
+    depends_on: ["attack"]
+    required_tags: ["redblue_arbiter"]
+    context: |
+      You are the ARBITER agent in a red/blue security review workflow.
+
+      Feature assessed: {feature_description}
+      Security focus areas: {security_focus}
+
+      Your task (Arbiter — assess and recommend):
+      1. Read `implementation.py`, `BLUE_NOTES.md`, `VULNERABILITIES.md`, and `security_tests.py` (if present).
+      2. Evaluate the overall security posture:
+         - Confirm or dispute each vulnerability found by the red team.
+         - Assess the severity and exploitability of confirmed vulnerabilities.
+         - Evaluate the blue team's security measures.
+      3. Write a risk assessment report to `RISK_REPORT.md`:
+         - Overall Risk Level: LOW / MEDIUM / HIGH / CRITICAL
+         - Confirmed vulnerabilities (with severity)
+         - Disputed findings (with rationale)
+         - Required fixes before production deployment
+         - Recommended improvements
+      4. Call /task-complete with: 'Assessment complete. Risk: [LEVEL]. Required fixes: N.'

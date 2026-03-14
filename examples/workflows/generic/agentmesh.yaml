@@ -1,0 +1,121 @@
+# Generic AgentMesh Workflow Template (phase-based, for POST /workflows/from-template)
+# ====================================================================================
+# 4-stage pipeline: planner -> coder -> debugger -> reviewer.
+#
+# Variables (required):
+#   feature_request  — description of the feature to build
+#
+# Variables (optional):
+#   language         — programming language (default: python)
+#
+# Usage:
+#   POST /workflows/from-template
+#   {"template": "agentmesh", "variables": {"feature_request": "binary search function"}}
+#
+# References:
+#   AgentMesh arXiv:2507.19902 (Elias 2025) — 4-role Planner/Coder/Debugger/Reviewer pipeline
+#   TmuxAgentOrchestrator POST /workflows/agentmesh (v1.1.41)
+
+name: "AgentMesh: {feature_request}"
+description: "4-stage development pipeline: planner -> coder -> debugger -> reviewer"
+
+variables:
+  feature_request:
+    description: "Feature to implement (e.g. 'binary search function')"
+    required: true
+  language:
+    description: "Programming language"
+    required: false
+    default: "python"
+
+defaults:
+  timeout: 300
+  pattern: "single"
+
+phases:
+  - name: "planner"
+    pattern: "single"
+    required_tags: ["agentmesh_planner"]
+    context: |
+      You are the PLANNER agent in an AgentMesh 4-stage development pipeline.
+
+      Feature request: {feature_request}
+      Language: {language}
+
+      Your task:
+      1. Analyse the feature request and produce a structured implementation plan.
+      2. Break the feature into concrete sub-tasks with clear inputs and outputs.
+      3. Define the public API (function signatures, class interfaces, or REST endpoints).
+      4. Identify edge cases and acceptance criteria.
+      5. Write your plan to `PLAN.md` with sections:
+         - Overview
+         - API Design
+         - Implementation Steps (numbered list)
+         - Edge Cases
+         - Acceptance Criteria
+      6. Call /task-complete with: 'Plan written to PLAN.md. N implementation steps.'
+
+  - name: "coder"
+    pattern: "single"
+    depends_on: ["planner"]
+    required_tags: ["agentmesh_coder"]
+    context: |
+      You are the CODER agent in an AgentMesh 4-stage development pipeline.
+
+      Feature request: {feature_request}
+      Language: {language}
+
+      Your task:
+      1. Read `PLAN.md` written by the planner agent.
+      2. Implement the feature following the plan exactly.
+      3. Write clean, well-documented {language} code.
+      4. Save the implementation as `implementation.py`.
+      5. Write a basic test file `tests.py` and run it to confirm the implementation works.
+      6. Call /task-complete with: 'Implementation complete. File: implementation.py. Tests: N pass.'
+
+  - name: "debugger"
+    pattern: "single"
+    depends_on: ["coder"]
+    required_tags: ["agentmesh_debugger"]
+    context: |
+      You are the DEBUGGER agent in an AgentMesh 4-stage development pipeline.
+
+      Feature request: {feature_request}
+      Language: {language}
+
+      Your task:
+      1. Read `PLAN.md`, `implementation.py`, and `tests.py`.
+      2. Run the tests: `python -m pytest tests.py -v`
+      3. Identify any failures, edge case gaps, or correctness issues.
+      4. Fix bugs in `implementation.py` and/or add missing test cases to `tests.py`.
+      5. Run tests again and confirm all pass.
+      6. Write a debugging report to `DEBUG_REPORT.md`:
+         - Bugs found (description, root cause, fix applied)
+         - Edge cases added
+         - Final test result (N pass, 0 fail)
+      7. Call /task-complete with: 'Debug complete. Bugs fixed: N. Tests: N pass, 0 fail.'
+
+  - name: "reviewer"
+    pattern: "single"
+    depends_on: ["debugger"]
+    required_tags: ["agentmesh_reviewer"]
+    context: |
+      You are the REVIEWER agent in an AgentMesh 4-stage development pipeline.
+
+      Feature request: {feature_request}
+      Language: {language}
+
+      Your task:
+      1. Read `PLAN.md`, `implementation.py`, `tests.py`, and `DEBUG_REPORT.md`.
+      2. Review the final implementation for:
+         - Correctness: does it satisfy all acceptance criteria from PLAN.md?
+         - Code quality: naming, structure, readability, {language} idioms
+         - Test coverage: are edge cases covered?
+         - Performance: any obvious inefficiencies?
+      3. Run `python -m pytest tests.py -v` to confirm all tests still pass.
+      4. Write a review report to `REVIEW.md`:
+         - Overall rating (1-5 stars)
+         - Strengths
+         - Issues (severity: high/medium/low)
+         - Recommendations
+      5. Call /task-complete with: 'Review complete. Rating: N/5. Issues: N high, N medium, N low.'

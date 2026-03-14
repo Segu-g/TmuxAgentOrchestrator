@@ -1,0 +1,136 @@
+# Generic Spec-First Workflow Template (for POST /workflows/from-template)
+# =========================================================================
+# 3-agent specification-driven development: spec-writer -> implementer -> acceptance-tester.
+#
+# Variables (required):
+#   feature   — feature to specify and implement
+#
+# Variables (optional):
+#   acceptance_criteria — initial acceptance criteria to guide spec writing (default: "")
+#
+# Usage:
+#   POST /workflows/from-template
+#   {"template": "spec-first", "variables": {
+#     "feature": "rate limiter middleware",
+#     "acceptance_criteria": "100 req/min per IP, returns 429 on excess"}}
+#
+# References:
+#   Gherkin / BDD "Given-When-Then" specification format (Cucumber project, 2009)
+#   TmuxAgentOrchestrator POST /workflows/spec-first (v1.1.8)
+#   Acceptence TDD: Beck "Test-Driven Development By Example" (2002) Ch. 3
+
+name: "Spec-First: {feature}"
+description: "3-agent specification-driven development: spec-writer -> implementer -> acceptance-tester"
+
+variables:
+  feature:
+    description: "Feature to specify and implement"
+    required: true
+  acceptance_criteria:
+    description: "Initial acceptance criteria (optional; spec-writer will expand)"
+    required: false
+    default: ""
+
+defaults:
+  timeout: 300
+  pattern: "single"
+
+phases:
+  - name: "spec-writer"
+    pattern: "single"
+    required_tags: ["spec_writer"]
+    context: |
+      You are the SPEC-WRITER agent in a specification-first development workflow.
+
+      Feature: {feature}
+      Initial acceptance criteria: {acceptance_criteria}
+
+      Your task:
+      1. Write a complete specification for '{feature}' BEFORE any implementation.
+         Good specs are precise, testable, and unambiguous.
+
+      2. Structure the specification in `SPEC.md`:
+         ## Overview
+         One paragraph explaining what the feature does and why it exists.
+
+         ## Scope
+         What is IN scope and what is explicitly OUT of scope.
+
+         ## Definitions
+         Key terms with precise meanings.
+
+         ## Functional Requirements
+         Numbered list of MUST/SHOULD/MAY requirements (RFC 2119 style).
+
+         ## Acceptance Criteria
+         Given-When-Then scenarios (minimum 5):
+         ```
+         Scenario: <descriptive name>
+           Given <precondition>
+           When <action>
+           Then <expected result>
+         ```
+
+         ## Non-Functional Requirements
+         Performance, security, reliability expectations.
+
+         ## Error Cases
+         How the feature behaves when inputs are invalid or services are unavailable.
+
+         ## Open Questions
+         Unresolved design decisions (to be answered by implementer).
+
+      3. Call /task-complete with: 'Specification written. Requirements: N. Scenarios: N. Open questions: N.'
+
+  - name: "implementer"
+    pattern: "single"
+    depends_on: ["spec-writer"]
+    required_tags: ["spec_implementer"]
+    context: |
+      You are the IMPLEMENTER agent in a specification-first development workflow.
+
+      Feature: {feature}
+
+      Your task:
+      1. Read `SPEC.md` written by the spec-writer.
+      2. Address any open questions in `SPEC.md` by making explicit design decisions.
+         Document your decisions in `DECISIONS.md`.
+      3. Implement '{feature}' strictly according to SPEC.md:
+         - Every functional requirement must be addressed.
+         - Every acceptance scenario must be satisfiable.
+      4. Write the implementation to `implementation.py`.
+      5. Write tests in `tests.py` that mirror the acceptance criteria from SPEC.md.
+         Each Given-When-Then scenario should have at least one test.
+      6. Run tests: `python -m pytest tests.py -v`
+         - All tests must pass before calling /task-complete.
+      7. If SPEC.md has ambiguities that block implementation, document them in `DECISIONS.md`
+         with the choice you made and why.
+      8. Call /task-complete with: 'Implementation complete. Requirements met: N/N. Tests: N pass.'
+
+  - name: "acceptance-tester"
+    pattern: "single"
+    depends_on: ["implementer"]
+    required_tags: ["spec_tester"]
+    context: |
+      You are the ACCEPTANCE TESTER agent in a specification-first development workflow.
+
+      Feature: {feature}
+
+      Your task:
+      1. Read `SPEC.md`, `DECISIONS.md` (if present), and `implementation.py`.
+      2. Verify the implementation against the specification:
+         a. For each functional requirement in SPEC.md: PASS / FAIL / PARTIAL
+         b. For each acceptance scenario (Given-When-Then): run or trace through the scenario.
+         c. Check error cases: does the implementation handle them as specified?
+         d. Check non-functional requirements (where testable).
+      3. Run the test suite: `python -m pytest tests.py -v`
+      4. Write additional acceptance tests to `acceptance_tests.py` for any scenarios
+         not covered by the implementer's tests.
+      5. Run `python -m pytest tests.py acceptance_tests.py -v` — all must pass.
+      6. Write a test report to `ACCEPTANCE_REPORT.md`:
+         - Requirements coverage: N/N PASS
+         - Scenario coverage: N/N PASS
+         - Issues found (with references to SPEC.md section)
+         - Deviation from spec (if any)
+         - Overall verdict: ACCEPTED / CONDITIONAL / REJECTED
+      7. Call /task-complete with: 'Acceptance testing complete. Verdict: [ACCEPTED/CONDITIONAL/REJECTED]. Tests: N pass.'

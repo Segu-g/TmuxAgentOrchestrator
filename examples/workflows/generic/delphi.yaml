@@ -1,0 +1,139 @@
+# Generic Delphi Consensus Workflow Template (for POST /workflows/from-template)
+# ================================================================================
+# Multi-round expert consensus using the Delphi method: experts produce opinions,
+# a moderator synthesizes and challenges, experts revise, moderator produces consensus.
+#
+# Variables (required):
+#   topic    — decision or design question to reach consensus on
+#
+# Variables (optional):
+#   experts  — comma-separated list of expert personas (default: "security,performance,maintainability")
+#   rounds   — number of rounds as a string (default: "2")
+#
+# Usage:
+#   POST /workflows/from-template
+#   {"template": "delphi", "variables": {
+#     "topic": "Should we migrate from REST to GraphQL?",
+#     "experts": "backend,frontend,devops"}}
+#
+# Note: This template uses a simplified 2-round structure for clarity.
+# For dynamic round counts, use POST /workflows/delphi instead.
+#
+# References:
+#   Dalkey & Helmer "An Experimental Application of the Delphi Method" (1963)
+#   Linstone & Turoff "The Delphi Method: Techniques and Applications" (1975)
+#   TmuxAgentOrchestrator POST /workflows/delphi (v1.0.23)
+
+name: "Delphi: {topic}"
+description: "Multi-round expert consensus workflow using the Delphi method"
+
+variables:
+  topic:
+    description: "Decision or design question to reach consensus on"
+    required: true
+  experts:
+    description: "Comma-separated expert personas"
+    required: false
+    default: "security,performance,maintainability"
+  rounds:
+    description: "Number of deliberation rounds (informational only in this template)"
+    required: false
+    default: "2"
+
+defaults:
+  timeout: 300
+  pattern: "single"
+
+phases:
+  - name: "expert-round1"
+    pattern: "single"
+    required_tags: ["delphi_expert"]
+    context: |
+      You are an EXPERT agent in a Delphi consensus workflow (Round 1).
+
+      Topic: {topic}
+      Expert perspectives to consider: {experts}
+      Total rounds: {rounds}
+
+      Your task (Round 1 — initial expert opinions):
+      1. For EACH expert perspective in '{experts}', write a structured opinion:
+         - Position: clear stance on the topic from this expert's viewpoint
+         - Key arguments: 3-5 supporting points from this perspective
+         - Concerns: risks or trade-offs this expert would highlight
+         - Priority: what this expert would weight most heavily
+      2. Write all expert opinions to `expert_opinions_r1.md`:
+         One section per expert persona.
+      3. Do not yet try to reconcile conflicting views — capture genuine disagreements.
+      4. Call /task-complete with: 'Round 1 expert opinions written. Experts: N. Key tensions: N.'
+
+  - name: "moderator-round1"
+    pattern: "single"
+    depends_on: ["expert-round1"]
+    required_tags: ["delphi_moderator"]
+    context: |
+      You are the MODERATOR in a Delphi consensus workflow (Round 1 synthesis).
+
+      Topic: {topic}
+      Experts: {experts}
+
+      Your task (Round 1 synthesis):
+      1. Read `expert_opinions_r1.md`.
+      2. Synthesize the expert opinions:
+         - Identify areas of agreement across experts
+         - Identify key points of disagreement
+         - Formulate clarifying questions to sharpen the debate
+         - Highlight evidence gaps or unexamined assumptions
+      3. Write a synthesis report to `moderator_synthesis_r1.md`:
+         - Points of consensus (what experts agree on)
+         - Points of contention (what experts disagree on)
+         - Clarifying questions for Round 2 (3-5 questions)
+         - Key assumptions to challenge
+      4. Call /task-complete with: 'Round 1 synthesis complete. Consensus points: N. Contentions: N.'
+
+  - name: "expert-round2"
+    pattern: "single"
+    depends_on: ["moderator-round1"]
+    required_tags: ["delphi_expert"]
+    context: |
+      You are an EXPERT agent in a Delphi consensus workflow (Round 2 — revision).
+
+      Topic: {topic}
+      Expert perspectives: {experts}
+
+      Your task (Round 2 — revised opinions):
+      1. Read `expert_opinions_r1.md` and `moderator_synthesis_r1.md`.
+      2. For EACH expert in '{experts}', write a revised opinion addressing:
+         - The moderator's clarifying questions
+         - Points of contention raised in the synthesis
+         - Whether your expert's position has shifted and why
+         - Any new evidence or arguments discovered
+      3. Write revised opinions to `expert_opinions_r2.md`.
+      4. Indicate for each expert: UNCHANGED / REVISED / WITHDRAWN their position.
+      5. Call /task-complete with: 'Round 2 expert opinions written. Positions changed: N.'
+
+  - name: "consensus"
+    pattern: "single"
+    depends_on: ["expert-round2"]
+    required_tags: ["delphi_moderator"]
+    context: |
+      You are the MODERATOR in a Delphi consensus workflow (final consensus).
+
+      Topic: {topic}
+      Experts: {experts}
+
+      Your task (Final consensus):
+      1. Read all files: `expert_opinions_r1.md`, `moderator_synthesis_r1.md`, `expert_opinions_r2.md`.
+      2. Produce the final Delphi consensus:
+         - Summarise the deliberation journey (how positions evolved)
+         - State the consensus position (what most experts agree on)
+         - Document dissenting views (minority positions that persist)
+         - Produce a concrete recommendation with confidence level (HIGH/MEDIUM/LOW)
+      3. Write the final report to `CONSENSUS.md`:
+         - Topic
+         - Consensus position
+         - Supporting rationale (from expert arguments)
+         - Dissenting views
+         - Recommendation
+         - Confidence: HIGH / MEDIUM / LOW
+         - Caveats and conditions
+      4. Call /task-complete with: 'Delphi consensus reached. Confidence: [LEVEL]. Dissent: N experts.'

@@ -1,0 +1,107 @@
+# Generic Refactor Workflow Template (phase-based, for POST /workflows/from-template)
+# =====================================================================================
+# 3-agent behavior-preserving refactoring pipeline: analyzer -> refactorer -> verifier.
+#
+# Variables (required):
+#   code_description   — description of the code to refactor (e.g. "user authentication module")
+#
+# Variables (optional):
+#   refactor_goals     — comma-separated list of goals (default: "readability, maintainability")
+#
+# Usage:
+#   POST /workflows/from-template
+#   {"template": "refactor", "variables": {"code_description": "user auth module",
+#    "refactor_goals": "readability, performance"}}
+#
+# References:
+#   RefAgent arXiv:2511.03153 (2024) — autonomous refactoring agent pipeline
+#   RefactorGPT PeerJ cs-3257 — LLM-guided behavior-preserving refactoring
+#   MUARF ICSE 2025 — multi-agent unified refactoring framework
+
+name: "Refactor: {code_description}"
+description: "3-agent behavior-preserving refactoring pipeline: analyzer -> refactorer -> verifier"
+
+variables:
+  code_description:
+    description: "Description of the code to refactor (e.g. 'user authentication module')"
+    required: true
+  refactor_goals:
+    description: "Comma-separated refactoring goals"
+    required: false
+    default: "readability, maintainability"
+
+defaults:
+  timeout: 300
+  pattern: "single"
+
+phases:
+  - name: "analyzer"
+    pattern: "single"
+    required_tags: ["refactor_analyzer"]
+    context: |
+      You are the ANALYZER agent in a refactoring pipeline.
+
+      Code to refactor: {code_description}
+      Refactoring goals: {refactor_goals}
+
+      Your task:
+      1. Locate and read the source files for '{code_description}'.
+      2. Analyse the code for:
+         - Code smells: long methods, god classes, duplicate logic, magic numbers
+         - Structure issues: poor naming, missing abstractions, tight coupling
+         - Maintainability gaps relative to goals: {refactor_goals}
+      3. Write an analysis report to `ANALYSIS.md` with:
+         - Summary of current code quality
+         - List of specific issues found (severity: high/medium/low)
+         - Proposed refactoring actions (prioritised)
+         - Constraints: what must NOT change (public API, behaviour)
+      4. Call /task-complete with: 'Analysis complete. Issues found: N high, N medium, N low.'
+
+  - name: "refactorer"
+    pattern: "single"
+    depends_on: ["analyzer"]
+    required_tags: ["refactor_refactorer"]
+    context: |
+      You are the REFACTORER agent in a refactoring pipeline.
+
+      Code to refactor: {code_description}
+      Refactoring goals: {refactor_goals}
+
+      Your task:
+      1. Read `ANALYSIS.md` written by the analyzer agent.
+      2. Apply the proposed refactoring actions to improve: {refactor_goals}.
+      3. Key constraints:
+         - Do NOT change the public API (function signatures, class interfaces).
+         - Do NOT change observable behaviour — all existing tests must still pass.
+         - Apply one refactoring at a time to keep changes reviewable.
+      4. Save refactored files (overwrite originals or use `_refactored` suffix).
+      5. Run existing tests to confirm behaviour is preserved.
+      6. Write a refactoring summary to `REFACTOR_SUMMARY.md`:
+         - Changes made (before/after for key transformations)
+         - Design patterns applied
+         - Test results
+      7. Call /task-complete with: 'Refactoring complete. Changes: N. Tests: N pass.'
+
+  - name: "verifier"
+    pattern: "single"
+    depends_on: ["refactorer"]
+    required_tags: ["refactor_verifier"]
+    context: |
+      You are the VERIFIER agent in a refactoring pipeline.
+
+      Code to refactor: {code_description}
+      Refactoring goals: {refactor_goals}
+
+      Your task:
+      1. Read `ANALYSIS.md` and `REFACTOR_SUMMARY.md`.
+      2. Verify that the refactoring achieved its goals:
+         a. Run all tests and confirm they pass.
+         b. Check that the identified issues from ANALYSIS.md were resolved.
+         c. Confirm the public API is unchanged.
+         d. Assess improvement in: {refactor_goals}
+      3. Write a verification report to `VERIFICATION.md`:
+         - Goals achieved (which goals from {refactor_goals} were met)
+         - Goals not achieved (if any)
+         - Remaining technical debt
+         - Overall quality improvement score (1-10)
+      4. Call /task-complete with: 'Verification complete. Goals met: N/M. Quality score: N/10.'

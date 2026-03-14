@@ -299,10 +299,13 @@ def render_template(
         provided in *variables*.
     """
     # Build the substitution map: declared defaults first, then caller values.
+    # Include ALL non-required variables (even those with empty-string defaults) so
+    # that optional variables with default="" are substituted as empty strings rather
+    # than raising a ValueError for an undeclared placeholder.
     sub_map: dict[str, str] = {}
     for var_name, spec in template.variables.items():
-        if not spec.required and spec.default:
-            sub_map[var_name] = spec.default
+        if not spec.required:
+            sub_map[var_name] = spec.default  # may be "" — that is intentional
 
     # Validate required variables and overlay caller values.
     missing_required: list[str] = []

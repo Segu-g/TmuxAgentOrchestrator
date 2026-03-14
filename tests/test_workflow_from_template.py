@@ -745,3 +745,328 @@ class TestWorkflowFromTemplateSchema:
         assert obj.reply_to == "director-1"
         assert obj.agent_timeout == 600
         assert obj.priority == 2
+
+
+# ---------------------------------------------------------------------------
+# Tests: v1.2.29 — New YAML generic templates (agentmesh, refactor, redblue,
+#   clean-arch, delphi, deliberate, spec-first)
+# ---------------------------------------------------------------------------
+
+REAL_GENERIC_DIR = Path(__file__).parent.parent / "examples" / "workflows" / "generic"
+
+NEW_TEMPLATES = [
+    "agentmesh",
+    "refactor",
+    "redblue",
+    "clean-arch",
+    "delphi",
+    "deliberate",
+    "spec-first",
+]
+
+
+class TestNewTemplatesLoad:
+    """Each new template loads without error and has required structure."""
+
+    @pytest.mark.parametrize("template_name", NEW_TEMPLATES)
+    def test_template_loads(self, template_name: str) -> None:
+        """Each new template can be loaded from the real templates directory."""
+        tpl = load_workflow_template(template_name, REAL_GENERIC_DIR.parent)
+        assert tpl.name, f"{template_name}: name must not be empty"
+        assert tpl.description, f"{template_name}: description must not be empty"
+        assert tpl.phases, f"{template_name}: must have at least one phase"
+
+    @pytest.mark.parametrize("template_name", NEW_TEMPLATES)
+    def test_template_has_valid_phases(self, template_name: str) -> None:
+        """Every phase in each template has a non-empty name and context."""
+        tpl = load_workflow_template(template_name, REAL_GENERIC_DIR.parent)
+        for phase in tpl.phases:
+            assert phase.get("name"), f"{template_name}: phase name must not be empty"
+            assert phase.get("context"), f"{template_name}: phase context must not be empty"
+
+    @pytest.mark.parametrize("template_name", NEW_TEMPLATES)
+    def test_template_has_variables_section(self, template_name: str) -> None:
+        """Every new template declares at least one variable."""
+        tpl = load_workflow_template(template_name, REAL_GENERIC_DIR.parent)
+        assert tpl.variables, f"{template_name}: must declare at least one variable"
+
+    @pytest.mark.parametrize("template_name", NEW_TEMPLATES)
+    def test_template_has_at_least_one_required_variable(self, template_name: str) -> None:
+        """Every new template has at least one required variable."""
+        tpl = load_workflow_template(template_name, REAL_GENERIC_DIR.parent)
+        required = [k for k, v in tpl.variables.items() if v.required]
+        assert required, f"{template_name}: must have at least one required variable"
+
+    @pytest.mark.parametrize("template_name", NEW_TEMPLATES)
+    def test_template_listed_by_list_templates(self, template_name: str) -> None:
+        """Each new template appears in list_templates output."""
+        results = list_templates(REAL_GENERIC_DIR.parent)
+        names = [r["template"] for r in results]
+        assert template_name in names, (
+            f"{template_name} not found in list_templates. Found: {names}"
+        )
+
+
+class TestAgentmeshTemplate:
+    """Specific tests for agentmesh.yaml — 4-stage pipeline."""
+
+    def test_has_four_phases(self) -> None:
+        tpl = load_workflow_template("agentmesh", REAL_GENERIC_DIR.parent)
+        assert len(tpl.phases) == 4
+
+    def test_phase_names(self) -> None:
+        tpl = load_workflow_template("agentmesh", REAL_GENERIC_DIR.parent)
+        names = [p["name"] for p in tpl.phases]
+        assert "planner" in names
+        assert "coder" in names
+        assert "debugger" in names
+        assert "reviewer" in names
+
+    def test_required_feature_request(self) -> None:
+        tpl = load_workflow_template("agentmesh", REAL_GENERIC_DIR.parent)
+        assert tpl.variables["feature_request"].required is True
+
+    def test_optional_language_default(self) -> None:
+        tpl = load_workflow_template("agentmesh", REAL_GENERIC_DIR.parent)
+        assert tpl.variables["language"].required is False
+        assert tpl.variables["language"].default == "python"
+
+    def test_render_with_required_only(self) -> None:
+        tpl = load_workflow_template("agentmesh", REAL_GENERIC_DIR.parent)
+        result = render_template(tpl, {"feature_request": "binary search"})
+        assert "AgentMesh" in result["name"]
+        assert "binary search" in result["name"]
+        assert len(result["phases"]) == 4
+
+    def test_render_substitutes_language(self) -> None:
+        tpl = load_workflow_template("agentmesh", REAL_GENERIC_DIR.parent)
+        result = render_template(tpl, {"feature_request": "sort", "language": "rust"})
+        # Check rust appears in at least one phase context
+        contexts = [p["context"] for p in result["phases"]]
+        assert any("rust" in ctx.lower() for ctx in contexts)
+
+    def test_sequential_depends_on(self) -> None:
+        """Phases after planner must have depends_on."""
+        tpl = load_workflow_template("agentmesh", REAL_GENERIC_DIR.parent)
+        phases = {p["name"]: p for p in tpl.phases}
+        assert "depends_on" in phases["coder"]
+        assert "planner" in phases["coder"]["depends_on"]
+        assert "depends_on" in phases["debugger"]
+        assert "depends_on" in phases["reviewer"]
+
+    def test_missing_required_variable_raises(self) -> None:
+        tpl = load_workflow_template("agentmesh", REAL_GENERIC_DIR.parent)
+        with pytest.raises(ValueError, match="feature_request"):
+            render_template(tpl, {})
+
+
+class TestRefactorTemplate:
+    """Specific tests for refactor.yaml — 3-agent pipeline."""
+
+    def test_has_three_phases(self) -> None:
+        tpl = load_workflow_template("refactor", REAL_GENERIC_DIR.parent)
+        assert len(tpl.phases) == 3
+
+    def test_phase_sequence(self) -> None:
+        tpl = load_workflow_template("refactor", REAL_GENERIC_DIR.parent)
+        names = [p["name"] for p in tpl.phases]
+        assert names == ["analyzer", "refactorer", "verifier"]
+
+    def test_optional_refactor_goals_default(self) -> None:
+        tpl = load_workflow_template("refactor", REAL_GENERIC_DIR.parent)
+        assert "refactor_goals" in tpl.variables
+        assert tpl.variables["refactor_goals"].required is False
+        assert "readability" in tpl.variables["refactor_goals"].default
+
+    def test_render_uses_default_goals(self) -> None:
+        tpl = load_workflow_template("refactor", REAL_GENERIC_DIR.parent)
+        result = render_template(tpl, {"code_description": "auth module"})
+        # Default refactor_goals should appear in at least one phase context
+        contexts = [p["context"] for p in result["phases"]]
+        assert any("readability" in ctx for ctx in contexts)
+
+
+class TestRedblueTemplate:
+    """Specific tests for redblue.yaml — adversarial review."""
+
+    def test_has_three_phases(self) -> None:
+        tpl = load_workflow_template("redblue", REAL_GENERIC_DIR.parent)
+        assert len(tpl.phases) == 3
+
+    def test_phase_names(self) -> None:
+        tpl = load_workflow_template("redblue", REAL_GENERIC_DIR.parent)
+        names = [p["name"] for p in tpl.phases]
+        assert "implement" in names
+        assert "attack" in names
+        assert "assess" in names
+
+    def test_security_focus_default(self) -> None:
+        tpl = load_workflow_template("redblue", REAL_GENERIC_DIR.parent)
+        assert "security_focus" in tpl.variables
+        assert "authentication" in tpl.variables["security_focus"].default
+
+    def test_render_substitutes_feature(self) -> None:
+        tpl = load_workflow_template("redblue", REAL_GENERIC_DIR.parent)
+        result = render_template(tpl, {"feature_description": "login API"})
+        assert "RedBlue" in result["name"]
+        assert "login API" in result["name"]
+
+
+class TestCleanArchTemplate:
+    """Specific tests for clean-arch.yaml — 5-agent fan-out pipeline."""
+
+    def test_has_five_phases(self) -> None:
+        tpl = load_workflow_template("clean-arch", REAL_GENERIC_DIR.parent)
+        assert len(tpl.phases) == 5
+
+    def test_architect_has_no_depends_on(self) -> None:
+        tpl = load_workflow_template("clean-arch", REAL_GENERIC_DIR.parent)
+        architect = next(p for p in tpl.phases if p["name"] == "architect")
+        assert "depends_on" not in architect or not architect.get("depends_on")
+
+    def test_parallel_agents_depend_on_architect(self) -> None:
+        tpl = load_workflow_template("clean-arch", REAL_GENERIC_DIR.parent)
+        phases = {p["name"]: p for p in tpl.phases}
+        for agent_name in ("domain-agent", "usecase-agent", "adapter-agent"):
+            assert "depends_on" in phases[agent_name], f"{agent_name} must depend on architect"
+            assert "architect" in phases[agent_name]["depends_on"]
+
+    def test_verifier_depends_on_all_parallel(self) -> None:
+        tpl = load_workflow_template("clean-arch", REAL_GENERIC_DIR.parent)
+        phases = {p["name"]: p for p in tpl.phases}
+        verifier_deps = phases["verifier"].get("depends_on", [])
+        assert "domain-agent" in verifier_deps
+        assert "usecase-agent" in verifier_deps
+        assert "adapter-agent" in verifier_deps
+
+    def test_render_produces_clean_name(self) -> None:
+        tpl = load_workflow_template("clean-arch", REAL_GENERIC_DIR.parent)
+        result = render_template(tpl, {"feature_request": "user registration"})
+        assert "Clean Architecture" in result["name"]
+        assert "user registration" in result["name"]
+
+
+class TestDelphiTemplate:
+    """Specific tests for delphi.yaml — multi-round consensus."""
+
+    def test_has_four_phases(self) -> None:
+        tpl = load_workflow_template("delphi", REAL_GENERIC_DIR.parent)
+        assert len(tpl.phases) == 4
+
+    def test_optional_experts_default(self) -> None:
+        tpl = load_workflow_template("delphi", REAL_GENERIC_DIR.parent)
+        assert "experts" in tpl.variables
+        assert tpl.variables["experts"].required is False
+        assert "security" in tpl.variables["experts"].default
+
+    def test_render_topic_appears_in_name(self) -> None:
+        tpl = load_workflow_template("delphi", REAL_GENERIC_DIR.parent)
+        result = render_template(tpl, {"topic": "SQLite vs PostgreSQL"})
+        assert "SQLite vs PostgreSQL" in result["name"]
+
+    def test_consensus_phase_last(self) -> None:
+        tpl = load_workflow_template("delphi", REAL_GENERIC_DIR.parent)
+        last_phase = tpl.phases[-1]
+        assert "consensus" in last_phase["name"].lower()
+
+
+class TestDeliberateTemplate:
+    """Specific tests for deliberate.yaml — Socratic dialogue."""
+
+    def test_has_three_phases(self) -> None:
+        tpl = load_workflow_template("deliberate", REAL_GENERIC_DIR.parent)
+        assert len(tpl.phases) == 3
+
+    def test_phase_names(self) -> None:
+        tpl = load_workflow_template("deliberate", REAL_GENERIC_DIR.parent)
+        names = [p["name"] for p in tpl.phases]
+        assert "questioner" in names
+        assert "responder" in names
+        assert "synthesizer" in names
+
+    def test_optional_domain_default(self) -> None:
+        tpl = load_workflow_template("deliberate", REAL_GENERIC_DIR.parent)
+        assert "domain" in tpl.variables
+        assert tpl.variables["domain"].required is False
+        assert "software" in tpl.variables["domain"].default.lower()
+
+    def test_render_question_in_name(self) -> None:
+        tpl = load_workflow_template("deliberate", REAL_GENERIC_DIR.parent)
+        result = render_template(tpl, {"question": "event sourcing?"})
+        assert "event sourcing?" in result["name"]
+
+    def test_socrasyth_reference_in_context(self) -> None:
+        """The questioner phase should reference Socratic principles."""
+        tpl = load_workflow_template("deliberate", REAL_GENERIC_DIR.parent)
+        questioner = next(p for p in tpl.phases if p["name"] == "questioner")
+        # SocraSynth reference or Socratic is present
+        assert "Socrat" in questioner["context"] or "socrat" in questioner["context"].lower()
+
+
+class TestSpecFirstTemplate:
+    """Specific tests for spec-first.yaml — specification-driven development."""
+
+    def test_has_three_phases(self) -> None:
+        tpl = load_workflow_template("spec-first", REAL_GENERIC_DIR.parent)
+        assert len(tpl.phases) == 3
+
+    def test_phase_names(self) -> None:
+        tpl = load_workflow_template("spec-first", REAL_GENERIC_DIR.parent)
+        names = [p["name"] for p in tpl.phases]
+        assert "spec-writer" in names
+        assert "implementer" in names
+        assert "acceptance-tester" in names
+
+    def test_optional_acceptance_criteria_default(self) -> None:
+        tpl = load_workflow_template("spec-first", REAL_GENERIC_DIR.parent)
+        assert "acceptance_criteria" in tpl.variables
+        assert tpl.variables["acceptance_criteria"].required is False
+        assert tpl.variables["acceptance_criteria"].default == ""
+
+    def test_render_feature_in_name(self) -> None:
+        tpl = load_workflow_template("spec-first", REAL_GENERIC_DIR.parent)
+        result = render_template(tpl, {"feature": "rate limiter"})
+        assert "rate limiter" in result["name"]
+
+    def test_spec_writer_comes_first(self) -> None:
+        tpl = load_workflow_template("spec-first", REAL_GENERIC_DIR.parent)
+        assert tpl.phases[0]["name"] == "spec-writer"
+
+    def test_sequential_depends_on_chain(self) -> None:
+        tpl = load_workflow_template("spec-first", REAL_GENERIC_DIR.parent)
+        phases = {p["name"]: p for p in tpl.phases}
+        assert "spec-writer" in phases["implementer"].get("depends_on", [])
+        assert "implementer" in phases["acceptance-tester"].get("depends_on", [])
+
+
+class TestGetTemplatesListsAllNew:
+    """Verify GET /workflows/templates lists all 10 templates (3 original + 7 new)."""
+
+    def test_all_ten_templates_listed(self) -> None:
+        """The real generic/ directory must have all 10 templates."""
+        results = list_templates(REAL_GENERIC_DIR.parent)
+        names = {r["template"] for r in results}
+        expected = {
+            # Original 3
+            "tdd", "debate", "review",
+            # New 7
+            "agentmesh", "refactor", "redblue", "clean-arch",
+            "delphi", "deliberate", "spec-first",
+        }
+        missing = expected - names
+        assert not missing, f"Missing templates in list_templates: {missing}"
+
+    def test_total_at_least_ten(self) -> None:
+        results = list_templates(REAL_GENERIC_DIR.parent)
+        assert len(results) >= 10, f"Expected >= 10 templates, got {len(results)}"
+
+    def test_all_have_required_descriptor_fields(self) -> None:
+        """Every template descriptor has all required fields."""
+        results = list_templates(REAL_GENERIC_DIR.parent)
+        for r in results:
+            assert "template" in r
+            assert "name" in r
+            assert "description" in r
+            assert "variables" in r
+            assert "required_variables" in r
+            assert "path" in r

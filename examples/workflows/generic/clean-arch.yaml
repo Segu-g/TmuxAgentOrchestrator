@@ -1,0 +1,179 @@
+# Generic Clean Architecture Workflow Template (for POST /workflows/from-template)
+# ==================================================================================
+# 5-agent pipeline: architect designs layers, then domain/usecase/adapter implement
+# in parallel, then verifier checks the layering constraints.
+#
+# Variables (required):
+#   feature_request  — feature to design and implement
+#
+# Variables (optional):
+#   language         — programming language (default: python)
+#
+# Usage:
+#   POST /workflows/from-template
+#   {"template": "clean-arch", "variables": {
+#     "feature_request": "user registration with email verification"}}
+#
+# References:
+#   Martin "Clean Architecture" (2017) — Dependency Rule, concentric layers
+#   Cockburn "Hexagonal Architecture / Ports and Adapters" (2005)
+#     https://alistair.cockburn.us/hexagonal-architecture/
+#   AgentMesh arXiv:2507.19902 (Elias 2025) — multi-role agent pipeline
+#   Hexagonal Architecture Java Code Geeks (2025)
+#     https://www.javacodegeeks.com/2025/12/hexagonal-architecture-ports-and-adapters-achieving-true-domain-independence.html
+
+name: "Clean Architecture: {feature_request}"
+description: "5-agent Clean Architecture pipeline: architect -> (domain | usecase | adapter) -> verifier"
+
+variables:
+  feature_request:
+    description: "Feature to design and implement using Clean Architecture layers"
+    required: true
+  language:
+    description: "Programming language"
+    required: false
+    default: "python"
+
+defaults:
+  timeout: 300
+  pattern: "single"
+
+phases:
+  - name: "architect"
+    pattern: "single"
+    required_tags: ["clean_arch_architect"]
+    context: |
+      You are the ARCHITECT agent in a Clean Architecture implementation pipeline.
+
+      Feature request: {feature_request}
+      Language: {language}
+
+      Your task:
+      1. Design the Clean Architecture layer structure for '{feature_request}'.
+         Apply Martin (2017) Dependency Rule: dependencies point INWARD only.
+         Apply Cockburn (2005) Ports & Adapters: isolate domain from infrastructure.
+
+      2. Define each layer's responsibilities:
+         - DOMAIN layer: entities, value objects, domain rules (zero external dependencies)
+         - USE CASE layer: application-specific business rules, use case interactors
+         - ADAPTER layer: interface adapters — REST controllers, DB repositories, external APIs
+         - FRAMEWORK layer (if needed): FastAPI routes, SQLAlchemy models, HTTP clients
+
+      3. Write the architecture design to `ARCHITECTURE.md`:
+         - Layer diagram (ASCII)
+         - Key entities and their layer membership
+         - Port interfaces (abstract base classes) with method signatures
+         - Adapter implementations required
+         - Data flow: request -> use case -> domain -> response
+
+      4. Write stub files with type signatures only (no implementation):
+         - `domain/` directory: entity classes with field definitions
+         - `use_cases/` directory: use case class stubs with `execute()` signatures
+         - `adapters/` directory: port interfaces (ABCs) and adapter stubs
+
+      5. Call /task-complete with: 'Architecture designed. Layers: domain/use_cases/adapters. Stubs written.'
+
+  - name: "domain-agent"
+    pattern: "single"
+    depends_on: ["architect"]
+    required_tags: ["clean_arch_domain"]
+    context: |
+      You are the DOMAIN LAYER agent in a Clean Architecture implementation pipeline.
+
+      Feature request: {feature_request}
+      Language: {language}
+
+      Your task:
+      1. Read `ARCHITECTURE.md` and the stubs in `domain/`.
+      2. Implement the DOMAIN layer:
+         - Entities: classes with identity (ID field) and domain logic
+         - Value Objects: immutable classes without identity
+         - Domain rules: validation, invariants, business constraints
+         - Domain events (if applicable)
+      3. Key constraints:
+         - ZERO external library imports (no FastAPI, no SQLAlchemy, no httpx)
+         - Only Python stdlib types (dataclasses, typing, abc, datetime, uuid)
+         - Pure functions wherever possible
+      4. Write tests in `domain/tests.py` that test domain logic in isolation.
+      5. Run tests and confirm they pass.
+      6. Write implementation notes to `domain/NOTES.md`.
+      7. Call /task-complete with: 'Domain layer implemented. Entities: N. Tests: N pass.'
+
+  - name: "usecase-agent"
+    pattern: "single"
+    depends_on: ["architect"]
+    required_tags: ["clean_arch_usecase"]
+    context: |
+      You are the USE CASE LAYER agent in a Clean Architecture implementation pipeline.
+
+      Feature request: {feature_request}
+      Language: {language}
+
+      Your task:
+      1. Read `ARCHITECTURE.md` and the stubs in `use_cases/`.
+      2. Implement the USE CASE layer:
+         - Use Case Interactors: classes with `execute(request_dto) -> response_dto` method
+         - Request/Response DTOs (plain dataclasses, no framework types)
+         - Port interfaces (abstract base classes) for external dependencies
+         - Dependency injection: use cases receive port implementations via constructor
+      3. Key constraints:
+         - Depends ONLY on the domain layer (import from `domain/`)
+         - Does NOT depend on adapters, frameworks, or external libraries
+         - Uses Port interfaces (ABCs) to invert dependencies on infrastructure
+      4. Write tests in `use_cases/tests.py` using mock implementations of ports.
+      5. Run tests and confirm they pass.
+      6. Write implementation notes to `use_cases/NOTES.md`.
+      7. Call /task-complete with: 'Use case layer implemented. Use cases: N. Tests: N pass.'
+
+  - name: "adapter-agent"
+    pattern: "single"
+    depends_on: ["architect"]
+    required_tags: ["clean_arch_adapter"]
+    context: |
+      You are the ADAPTER LAYER agent in a Clean Architecture implementation pipeline.
+
+      Feature request: {feature_request}
+      Language: {language}
+
+      Your task:
+      1. Read `ARCHITECTURE.md` and the stubs in `adapters/`.
+      2. Implement the ADAPTER layer:
+         - Repository adapters: implement port interfaces from use_cases/, provide data access
+         - Controller/Presenter adapters: translate between framework formats and DTOs
+         - External service adapters: implement port interfaces for third-party integrations
+      3. Use in-memory or file-based implementations where a real DB/service is not available.
+      4. Write tests in `adapters/tests.py`.
+      5. Run tests and confirm they pass.
+      6. Write a brief wiring guide to `adapters/WIRING.md`:
+         - How to connect adapters to use cases (dependency injection)
+         - Configuration required
+      7. Call /task-complete with: 'Adapter layer implemented. Adapters: N. Tests: N pass.'
+
+  - name: "verifier"
+    pattern: "single"
+    depends_on: ["domain-agent", "usecase-agent", "adapter-agent"]
+    required_tags: ["clean_arch_verifier"]
+    context: |
+      You are the VERIFIER agent in a Clean Architecture implementation pipeline.
+
+      Feature request: {feature_request}
+      Language: {language}
+
+      Your task:
+      1. Read `ARCHITECTURE.md`, `domain/NOTES.md`, `use_cases/NOTES.md`, `adapters/WIRING.md`.
+      2. Verify the Clean Architecture constraints:
+         a. DEPENDENCY RULE: domain/ has no imports from use_cases/ or adapters/
+            Run: `grep -r "from use_cases\|from adapters\|import use_cases\|import adapters" domain/`
+            (must return nothing)
+         b. USE CASE isolation: use_cases/ only imports from domain/ (not from adapters/)
+            Run: `grep -r "from adapters\|import adapters" use_cases/`
+            (must return nothing)
+         c. All tests pass: run `python -m pytest domain/ use_cases/ adapters/ -v`
+      3. Wire a simple integration test: instantiate an adapter, inject into a use case, call execute().
+      4. Write a verification report to `VERIFICATION.md`:
+         - Dependency rule compliance: PASS / FAIL
+         - Use case isolation: PASS / FAIL
+         - Integration test result
+         - Layer completeness score (0-100%)
+         - Recommendations for improvement
+      5. Call /task-complete with: 'Verification complete. Dependency rule: PASS/FAIL. Tests: N pass.'
