@@ -169,82 +169,22 @@ def test_write_context_file_with_mailbox(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Tests for _write_api_key_file (per-agent naming)
+# Tests for API key delivery (env-var only, v1.2.18+)
 # ---------------------------------------------------------------------------
 
 
-def test_write_api_key_file_creates_per_agent_file(tmp_path: Path) -> None:
-    """_write_api_key_file must create __orchestrator_api_key__{agent_id}__."""
+def test_no_api_key_file_written_to_disk(tmp_path: Path) -> None:
+    """API key must NOT be written to any file (env-var only, v1.2.18+)."""
     from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent
 
     bus = make_bus()
     tmux = MagicMock()
-    agent = ClaudeCodeAgent(
-        "worker-1",
-        bus,
-        tmux,
-        api_key="test-key-123",
+    agent = ClaudeCodeAgent("worker-1", bus, tmux, api_key="test-key-123")
+
+    assert not hasattr(agent, "_write_api_key_file"), (
+        "_write_api_key_file must not exist — API key is env-var only"
     )
-    agent._write_api_key_file(tmp_path)
-
-    per_agent = tmp_path / "__orchestrator_api_key__worker-1__"
-    assert per_agent.exists(), "Per-agent API key file must be created"
-    assert per_agent.read_text().strip() == "test-key-123"
-
-    # Check permissions (0o600)
-    import stat
-    mode = per_agent.stat().st_mode & 0o777
-    assert mode == 0o600, f"Expected 0o600, got {oct(mode)}"
-
-
-def test_write_api_key_file_creates_legacy_file(tmp_path: Path) -> None:
-    """_write_api_key_file must also create __orchestrator_api_key__ for backward compat."""
-    from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent
-
-    bus = make_bus()
-    tmux = MagicMock()
-    agent = ClaudeCodeAgent(
-        "worker-1",
-        bus,
-        tmux,
-        api_key="test-key-123",
-    )
-    agent._write_api_key_file(tmp_path)
-
-    legacy = tmp_path / "__orchestrator_api_key__"
-    assert legacy.exists(), "Legacy API key file must be created"
-    assert legacy.read_text().strip() == "test-key-123"
-
-
-def test_write_api_key_file_no_file_when_empty(tmp_path: Path) -> None:
-    """_write_api_key_file must not create any file when api_key is empty."""
-    from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent
-
-    bus = make_bus()
-    tmux = MagicMock()
-    agent = ClaudeCodeAgent("worker-1", bus, tmux, api_key="")
-    agent._write_api_key_file(tmp_path)
-
-    assert not (tmp_path / "__orchestrator_api_key__worker-1__").exists()
-    assert not (tmp_path / "__orchestrator_api_key__").exists()
-
-
-def test_multiple_agents_independent_api_key_files(tmp_path: Path) -> None:
-    """Multiple agents in the same cwd must have independent per-agent API key files."""
-    from tmux_orchestrator.agents.claude_code import ClaudeCodeAgent
-
-    bus = make_bus()
-    tmux = MagicMock()
-    agent_a = ClaudeCodeAgent("worker-a", bus, tmux, api_key="key-for-a")
-    agent_b = ClaudeCodeAgent("worker-b", bus, tmux, api_key="key-for-b")
-
-    agent_a._write_api_key_file(tmp_path)
-    agent_b._write_api_key_file(tmp_path)
-
-    file_a = tmp_path / "__orchestrator_api_key__worker-a__"
-    file_b = tmp_path / "__orchestrator_api_key__worker-b__"
-
-    assert file_a.exists()
-    assert file_b.exists()
-    assert file_a.read_text().strip() == "key-for-a"
-    assert file_b.read_text().strip() == "key-for-b"
+    # No key files must appear after context file write
+    agent._write_context_file(tmp_path)
+    key_files = list(tmp_path.glob("__orchestrator_api_key__*"))
+    assert key_files == [], f"No key files must be written: {key_files}"

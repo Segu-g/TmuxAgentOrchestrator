@@ -33,15 +33,6 @@ url    = f"{ctx['web_base_url'].rstrip('/')}/agents/{target_id}/message"
 
 # Read API key securely: env var takes priority, then per-agent file, then legacy file
 api_key = os.environ.get("TMUX_ORCHESTRATOR_API_KEY", "")
-if not api_key:
-    _aid2 = os.environ.get("TMUX_ORCHESTRATOR_AGENT_ID", "")
-    per_agent_key = Path(f"__orchestrator_api_key__{_aid2}__") if _aid2 else None
-    if per_agent_key and per_agent_key.exists():
-        api_key = per_agent_key.read_text().strip()
-    else:
-        key_file = Path("__orchestrator_api_key__")
-        if key_file.exists():
-            api_key = key_file.read_text().strip()
 
 headers = {"Content-Type": "application/json"}
 if api_key:

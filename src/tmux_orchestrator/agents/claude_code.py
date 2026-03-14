@@ -202,8 +202,6 @@ class ClaudeCodeAgent(Agent):
             agent_dir = await loop.run_in_executor(None, self._agent_work_dir, cwd)
             self._cwd = agent_dir
             await loop.run_in_executor(None, self._write_context_file, agent_dir)
-            if self._api_key:
-                await loop.run_in_executor(None, self._write_api_key_file, agent_dir)
             # Write agent-specific CLAUDE.md:
             # - isolate=True (own worktree): always write
             # - isolate=False (shared cwd): write inside agent_dir (.agent/{id}/)
@@ -256,54 +254,13 @@ class ClaudeCodeAgent(Agent):
 
     def _context_extras(self) -> dict[str, Any]:
         # NOTE: api_key is intentionally excluded from the context file.
-        # It is written to a separate __orchestrator_api_key__ file (chmod 600)
-        # and injected as TMUX_ORCHESTRATOR_API_KEY tmux session environment
-        # variable.  See DESIGN.md §3 "API キー配送のセキュリティ方針" and
-        # §10.30 for the security rationale.
+        # It is delivered exclusively via the TMUX_ORCHESTRATOR_API_KEY
+        # environment variable (set via libtmux new-window -e KEY=VALUE).
+        # No key file is written to disk.
         return {
             "session_name": self._session_name,
             "web_base_url": self._web_base_url,
         }
-
-    def _write_api_key_file(self, cwd: Path) -> None:
-        """Write the API key to per-agent and legacy key files with mode 0o600.
-
-        Writes two files atomically using ``os.open()`` with ``O_CREAT |
-        O_TRUNC | O_WRONLY`` and explicit permission bits (0o600), preventing the
-        system umask from widening the permissions:
-
-        1. ``__orchestrator_api_key__{agent_id}__`` — per-agent file, safe for
-           shared cwd (no race with sibling agents).
-        2. ``__orchestrator_api_key__`` — legacy file for backward compatibility
-           with single-agent scenarios.
-
-        If *api_key* is empty, no files are created.
-
-        References:
-          - OpenStack Security Guidelines "Apply Restrictive File Permissions"
-            https://security.openstack.org/guidelines/dg_apply-restrictive-file-permissions.html
-          - OWASP Secrets Management Cheat Sheet (2025)
-          - DESIGN.md §10.N (v1.0.19 — per-agent key file naming)
-        """
-        if not self._api_key:
-            return
-        key_content = (self._api_key + "\n").encode()
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-        # Write per-agent file (safe for shared cwd).
-        per_agent_path = cwd / f"__orchestrator_api_key__{self.id}__"
-        fd = os.open(str(per_agent_path), flags, 0o600)
-        try:
-            os.write(fd, key_content)
-        finally:
-            os.close(fd)
-        # Write legacy file for backward compatibility.
-        legacy_path = cwd / "__orchestrator_api_key__"
-        fd = os.open(str(legacy_path), flags, 0o600)
-        try:
-            os.write(fd, key_content)
-        finally:
-            os.close(fd)
-        logger.debug("Agent %s wrote API key files to %s (per-agent + legacy)", self.id, cwd)
 
     # ------------------------------------------------------------------
     # Context localization — writes agent-specific files to worktree

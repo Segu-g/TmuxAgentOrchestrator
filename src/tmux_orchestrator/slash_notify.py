@@ -38,50 +38,17 @@ def _cwd() -> Path:
 def _read_api_key(cwd: Path | None = None) -> str:
     """Read the API key for authenticating REST calls.
 
-    Resolution order (highest priority first):
+    Reads exclusively from the ``TMUX_ORCHESTRATOR_API_KEY`` environment
+    variable, which is set by the orchestrator via
+    ``libtmux new-window -e KEY=VALUE`` at agent startup.
 
-    1. ``TMUX_ORCHESTRATOR_API_KEY`` environment variable — set by the
-       orchestrator via ``libtmux Session.set_environment()``.  Available
-       in all panes created after the session was started.
-    2. ``__orchestrator_api_key__`` file in *cwd* — written with
-       ``chmod 600`` by ``ClaudeCodeAgent._write_api_key_file()``.
+    File-based fallbacks were removed in v1.2.18 because writing credentials
+    to disk is an unnecessary security risk when the environment variable is
+    always available.
 
-    Returns an empty string when neither source is available.
-
-    This function replaces reading ``api_key`` from
-    ``__orchestrator_context__.json``, which stored the key in plaintext
-    alongside non-sensitive context data.
-
-    References:
-      - DESIGN.md §3 "API キー配送のセキュリティ方針" フェーズ 1 + 2
-      - OpenStack Security Guidelines "Apply Restrictive File Permissions"
-      - OWASP Secrets Management Cheat Sheet (2025)
+    Returns an empty string when the variable is not set.
     """
-    # Phase 2: environment variable (tmux session env, no file on disk)
-    env_key = os.environ.get("TMUX_ORCHESTRATOR_API_KEY", "")
-    if env_key:
-        return env_key
-
-    # Phase 1: dedicated key file with chmod 600
-    # Try per-agent file first (safe for shared cwd), then legacy file.
-    if cwd is None:
-        cwd = _cwd()
-    agent_id_env = os.environ.get("TMUX_ORCHESTRATOR_AGENT_ID", "")
-    if agent_id_env:
-        per_agent_key = cwd / f"__orchestrator_api_key__{agent_id_env}__"
-        if per_agent_key.exists():
-            try:
-                return per_agent_key.read_text().strip()
-            except OSError:
-                pass
-    key_file = cwd / "__orchestrator_api_key__"
-    if key_file.exists():
-        try:
-            return key_file.read_text().strip()
-        except OSError:
-            pass
-
-    return ""
+    return os.environ.get("TMUX_ORCHESTRATOR_API_KEY", "")
 
 
 # ---------------------------------------------------------------------------

@@ -53,10 +53,6 @@ agent_id = ctx["agent_id"]
 web_base_url = ctx["web_base_url"]
 
 api_key = os.environ.get("TMUX_ORCHESTRATOR_API_KEY", "")
-if not api_key:
-    kf = Path("__orchestrator_api_key__")
-    if kf.exists():
-        api_key = kf.read_text().strip()
 
 headers = {"Content-Type": "application/json"}
 if api_key:

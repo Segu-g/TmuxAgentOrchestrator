@@ -128,8 +128,8 @@ async def test_non_isolated_context_file_goes_to_subdir(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_isolated_api_key_goes_to_subdir(tmp_path: Path) -> None:
-    """For isolate=False, API key file must be inside .agent/{id}/."""
+async def test_non_isolated_no_api_key_file_written(tmp_path: Path) -> None:
+    """For isolate=False, no API key file must be written to disk (env-var only, v1.2.18+)."""
     agent = ClaudeCodeAgent(
         agent_id="worker-key",
         bus=make_bus(),
@@ -143,14 +143,9 @@ async def test_non_isolated_api_key_goes_to_subdir(tmp_path: Path) -> None:
             with patch("tmux_orchestrator.agents.claude_code.pre_trust_worktree"):
                 await agent.start()
 
-    subdir = tmp_path / ".agent" / "worker-key"
-    key_file = subdir / "__orchestrator_api_key__worker-key__"
-    assert key_file.exists(), "Per-agent API key file must be in subdir"
-    assert key_file.read_text().strip() == "test-key-12345"
-
-    # Must NOT be at cwd root
-    root_key = tmp_path / "__orchestrator_api_key__worker-key__"
-    assert not root_key.exists(), "API key file must not be at cwd root"
+    # No key files must exist anywhere
+    key_files = list(tmp_path.rglob("__orchestrator_api_key__*"))
+    assert key_files == [], f"No API key files must be written to disk: {key_files}"
 
     await agent.stop()
 

@@ -341,39 +341,24 @@ The per-agent naming prevents race conditions when multiple agents share the sam
 
 ### API Key for Authenticated Requests
 
-REST endpoints require an `X-API-Key` header. The key is delivered securely through two channels:
+REST endpoints require an `X-API-Key` header. The key is delivered exclusively via:
 
-1. **Environment variable** `TMUX_ORCHESTRATOR_API_KEY` — set on the tmux session; your shell
-   inherits it automatically. Use `os.environ.get("TMUX_ORCHESTRATOR_API_KEY", "")` in Python
-   or `$TMUX_ORCHESTRATOR_API_KEY` in shell scripts.
-2. **Per-agent key file** `__orchestrator_api_key__{agent_id}__` in your working directory —
-   written with `chmod 600` (v1.0.19+, safe for shared cwd).
-3. **Legacy key file** `__orchestrator_api_key__` — written for backward compatibility.
-   Read as a final fallback when neither env var nor per-agent file is available.
+**Environment variable** `TMUX_ORCHESTRATOR_API_KEY` — injected at pane creation via
+`tmux new-window -e KEY=VALUE`. Your shell inherits it automatically; no file is written to disk.
 
 Quick pattern for Python slash commands:
 
 ```python
 import os
-from pathlib import Path
 
 api_key = os.environ.get("TMUX_ORCHESTRATOR_API_KEY", "")
-if not api_key:
-    agent_id = os.environ.get("TMUX_ORCHESTRATOR_AGENT_ID", "")
-    per_agent_kf = Path(f"__orchestrator_api_key__{agent_id}__") if agent_id else None
-    if per_agent_kf and per_agent_kf.exists():
-        api_key = per_agent_kf.read_text().strip()
-    else:
-        kf = Path("__orchestrator_api_key__")
-        if kf.exists():
-            api_key = kf.read_text().strip()
-
 headers = {"Content-Type": "application/json"}
 if api_key:
     headers["X-API-Key"] = api_key
 ```
 
-The key is **not** stored in `__orchestrator_context__.json` (security fix v0.35.0).
+The key is **not** stored in `__orchestrator_context__.json` and **not** written to any file
+(v1.2.18+: file-based fallbacks removed as unnecessary security risk).
 
 ### Receiving Messages
 
@@ -542,7 +527,7 @@ By default you run in an isolated git worktree at `{repo_root}/.worktrees/{agent
 - Commit freely on your branch.
 - On agent stop, your worktree and branch are automatically deleted.
 
-If the config sets `isolate: false` for your agent, you share the main repo working tree but run inside a per-agent subdirectory `.agent/{agent_id}/` under the shared cwd (v1.1.35). All your per-agent files (CLAUDE.md, settings.local.json, slash commands, context file, API key file) live inside that subdir. Shared project-level files (e.g. source code) remain at the shared cwd root. The `.agent/{agent_id}/` subdir is deleted on agent stop unless `cleanup_subdir: false` is set in config.
+If the config sets `isolate: false` for your agent, you share the main repo working tree but run inside a per-agent subdirectory `.agent/{agent_id}/` under the shared cwd (v1.1.35). All your per-agent files (CLAUDE.md, settings.local.json, slash commands, context file) live inside that subdir. Shared project-level files (e.g. source code) remain at the shared cwd root. The `.agent/{agent_id}/` subdir is deleted on agent stop unless `cleanup_subdir: false` is set in config.
 
 ### Context Engineering Cheatsheet
 

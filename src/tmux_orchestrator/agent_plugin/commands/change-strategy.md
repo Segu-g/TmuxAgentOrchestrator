@@ -62,10 +62,6 @@ url    = f"{ctx['web_base_url'].rstrip('/')}/agents/{my_id}/change-strategy"
 
 # Read API key
 api_key = os.environ.get("TMUX_ORCHESTRATOR_API_KEY", "")
-if not api_key:
-    key_file = Path("__orchestrator_api_key__")
-    if key_file.exists():
-        api_key = key_file.read_text().strip()
 
 headers = {"Content-Type": "application/json"}
 if api_key:
