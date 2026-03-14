@@ -1,0 +1,88 @@
+# Mutation Testing Workflow Template
+# ====================================
+# 3-agent sequential pipeline that uses mutation testing to improve test quality.
+#
+# Pipeline:
+#   implementer → mutant-introducer → test-improver
+#
+# 1. implementer  : writes the feature implementation + initial test suite
+# 2. mutant-introducer: introduces N intentional bugs (mutants) that initial tests miss
+# 3. test-improver: adds tests that kill every mutant; verifies pass on original code
+#
+# Agent roles:
+#   implementer     → role: coder    → loads agent_plugin/docs/coder.md
+#   mutant-introducer → role: coder  → loads agent_plugin/docs/coder.md
+#   test-improver   → role: tester   → loads agent_plugin/docs/tester.md
+#
+# Scratchpad keys (written by agents):
+#   {scratchpad_prefix}_impl           — implementation + initial tests
+#   {scratchpad_prefix}_mutants        — mutated code + mutation descriptions
+#   {scratchpad_prefix}_improved_tests — final test suite (kills all mutants)
+#
+# Endpoint: POST /workflows/mutation-test
+# Reference:
+#   AdverTest arXiv:2602.08146
+#   Meta ACH arXiv:2501.12862 (FSE 2025)
+#   arXiv:2508.00083 "Survey on Code Generation with LLM-based Agents" (2025)
+
+workflow:
+  endpoint: /workflows/mutation-test
+
+# --- Defaults (parameter inheritance) ---
+defaults:
+  language: python
+  num_mutations: 3
+  agent_timeout: 300
+  scratchpad_prefix: ""
+  implementer_tags: []
+  mutant_introducer_tags: []
+  test_improver_tags: []
+  reply_to: null
+
+# --- Required fields ---
+
+# Feature to implement and test
+feature: "a stack data structure with push, pop, peek, and is_empty operations"
+
+# --- Optional fields ---
+
+# Programming language
+language: python
+
+# Number of mutations to introduce (1–5)
+num_mutations: 3
+
+# Per-task timeout in seconds
+agent_timeout: 300
+
+# Agent capability routing (empty = any available agent)
+# Example agent config entries:
+#   agents:
+#     - id: implementer
+#       role: coder
+#       tags: [muttest_implementer]
+#     - id: mutant-introducer
+#       role: coder
+#       tags: [muttest_mutant]
+#     - id: test-improver
+#       role: tester
+#       tags: [muttest_tester]
+implementer_tags: []
+mutant_introducer_tags: []
+test_improver_tags: []
+
+# Auto-generated when empty (format: "muttest_{8-hex}")
+scratchpad_prefix: ""
+
+# If set, test-improver's RESULT is delivered to this agent's mailbox
+reply_to: null
+
+# --- Curl example ---
+# curl -s -X POST http://localhost:8000/workflows/mutation-test \
+#   -H "Content-Type: application/json" \
+#   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+#   -d '{
+#     "feature": "a stack data structure with push, pop, peek, and is_empty",
+#     "language": "python",
+#     "num_mutations": 3
+#   }'

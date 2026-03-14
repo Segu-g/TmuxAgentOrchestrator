@@ -1893,6 +1893,69 @@ class PairCoderWorkflowSubmit(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Mutation-test workflow schema (v1.2.25)
+# Reference: DESIGN.md §10.100 (v1.2.25)
+# ---------------------------------------------------------------------------
+
+
+class MutationTestWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/mutation-test.
+
+    Submits a 3-agent sequential pipeline that uses mutation testing to
+    improve test quality:
+
+    1. **implementer**: writes the feature implementation *and* an initial
+       test suite; stores both in the shared scratchpad.
+    2. **mutant-introducer**: reads the implementation and introduces N
+       intentional bugs (mutants) that the initial tests do NOT catch;
+       stores the mutated code + descriptions in the scratchpad.
+    3. **test-improver**: reads both the implementation and the mutants;
+       adds new tests that kill every mutant; verifies all tests pass on
+       the original code.
+
+    DAG topology (sequential, each step depends_on previous)::
+
+        implementer → mutant-introducer → test-improver
+
+    Scratchpad keys (Blackboard pattern):
+
+    - ``{prefix}_impl``           : original implementation + initial tests
+    - ``{prefix}_mutants``        : mutated code + mutation descriptions
+    - ``{prefix}_improved_tests`` : final test suite that kills all mutants
+
+    Design references:
+    - AdverTest "Test vs Mutant: Adversarial LLM Agents" arXiv:2602.08146
+    - Meta ACH "Mutation-Guided LLM-based Test Generation" arXiv:2501.12862 (FSE 2025)
+    - arXiv:2508.00083 "Survey on Code Generation with LLM-based Agents" (2025)
+    - DESIGN.md §10.100 (v1.2.25)
+    """
+
+    # Feature to implement and test
+    feature: str
+    # Programming language
+    language: str = "python"
+    # Number of mutations the mutant-introducer should introduce (1–5)
+    num_mutations: int = Field(default=3, ge=1, le=5)
+    # Scratchpad prefix (auto-generated when empty)
+    scratchpad_prefix: str = ""
+    # Per-task timeout in seconds
+    agent_timeout: int = 300
+    # required_tags for each role
+    implementer_tags: list[str] = []
+    mutant_introducer_tags: list[str] = []
+    test_improver_tags: list[str] = []
+    # When set, test-improver RESULT routed to this agent's mailbox
+    reply_to: str | None = None
+
+    @field_validator("feature")
+    @classmethod
+    def feature_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("feature must not be empty")
+        return v
+
+
+# ---------------------------------------------------------------------------
 # Peer-review workflow schema (v1.2.24)
 # Reference: DESIGN.md §10.99 (v1.2.24)
 # ---------------------------------------------------------------------------

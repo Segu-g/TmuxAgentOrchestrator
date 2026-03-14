@@ -1086,6 +1086,77 @@
         "title": "MobReviewWorkflowSubmit",
         "type": "object"
       },
+      "MutationTestWorkflowSubmit": {
+        "description": "Request body for POST /workflows/mutation-test.\n\nSubmits a 3-agent sequential pipeline that uses mutation testing to\nimprove test quality:\n\n1. **implementer**: writes the feature implementation *and* an initial\n   test suite; stores both in the shared scratchpad.\n2. **mutant-introducer**: reads the implementation and introduces N\n   intentional bugs (mutants) that the initial tests do NOT catch;\n   stores the mutated code + descriptions in the scratchpad.\n3. **test-improver**: reads both the implementation and the mutants;\n   adds new tests that kill every mutant; verifies all tests pass on\n   the original code.\n\nDAG topology (sequential, each step depends_on previous)::\n\n    implementer \u2192 mutant-introducer \u2192 test-improver\n\nScratchpad keys (Blackboard pattern):\n\n- ``{prefix}_impl``           : original implementation + initial tests\n- ``{prefix}_mutants``        : mutated code + mutation descriptions\n- ``{prefix}_improved_tests`` : final test suite that kills all mutants\n\nDesign references:\n- AdverTest \"Test vs Mutant: Adversarial LLM Agents\" arXiv:2602.08146\n- Meta ACH \"Mutation-Guided LLM-based Test Generation\" arXiv:2501.12862 (FSE 2025)\n- arXiv:2508.00083 \"Survey on Code Generation with LLM-based Agents\" (2025)\n- DESIGN.md \u00a710.100 (v1.2.25)",
+        "properties": {
+          "agent_timeout": {
+            "default": 300,
+            "title": "Agent Timeout",
+            "type": "integer"
+          },
+          "feature": {
+            "title": "Feature",
+            "type": "string"
+          },
+          "implementer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Implementer Tags",
+            "type": "array"
+          },
+          "language": {
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "mutant_introducer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Mutant Introducer Tags",
+            "type": "array"
+          },
+          "num_mutations": {
+            "default": 3,
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "title": "Num Mutations",
+            "type": "integer"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "scratchpad_prefix": {
+            "default": "",
+            "title": "Scratchpad Prefix",
+            "type": "string"
+          },
+          "test_improver_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Test Improver Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "feature"
+        ],
+        "title": "MutationTestWorkflowSubmit",
+        "type": "object"
+      },
       "PairCoderWorkflowSubmit": {
         "description": "Request body for POST /workflows/paircoder \u2014 PairCoder writer\u2192reviewer loop.\n\nImplements the Generator-and-Critic (Ralph Loop) pattern:\n- **writer**: implements the task in ``language``, writes output to ``impl.{ext}``,\n  stores the file path in ``{scratchpad_prefix}_impl_r{n}``.\n- **reviewer**: reads the implementation, checks it against any ``spec_keys``\n  conventions, writes structured PASS/FAIL feedback to\n  ``{scratchpad_prefix}_feedback_r{n}``.\n- Rounds iterate up to ``max_rounds`` times.\n- The reviewer writes the final verdict to ``{scratchpad_prefix}_verdict``.\n\nWorkflow topology (max_rounds=2)::\n\n    write_r1 -> review_r1 -> write_r2 -> review_r2\n\nScratchpad keys (Blackboard pattern):\n\n- ``{scratchpad_prefix}_impl_r{n}``     : path to writer's implementation file for round N\n- ``{scratchpad_prefix}_feedback_r{n}`` : reviewer's PASS/FAIL feedback for round N\n- ``{scratchpad_prefix}_verdict``       : final PASS or FAIL verdict\n\nAgent routing:\n- writer   -> ``paircoder_writer``  (customised via ``writer_tags``)\n- reviewer -> ``paircoder_reviewer`` (customised via ``reviewer_tags``)\n\nDesign references:\n- Geoffrey Huntley \"The Ralph Loop\" \u2014 external review loop for coding agents (2025)\n- Google ADK \"Generator-and-Critic pattern\" (developers.googleblog.com, 2025)\n- Vasilopoulos et al. arXiv:2602.20478 \"Codified Context\" \u00a73 hot-memory (2026)\n- DESIGN.md \u00a710.86 (v1.2.10)",
         "properties": {
@@ -5900,6 +5971,47 @@
           }
         },
         "summary": "Submit an N-reviewer + synthesizer Mob Code Review workflow"
+      }
+    },
+    "/workflows/mutation-test": {
+      "post": {
+        "description": "Submit a 3-agent Mutation Testing Workflow DAG.\n\nPipeline:\n1. **implementer**: writes the feature + initial test suite.\n2. **mutant-introducer**: introduces N intentional bugs that the\n   initial tests miss; outputs mutated code + mutation descriptions.\n3. **test-improver**: adds tests that kill every mutant; verifies\n   tests pass on the original code.\n\nScratchpad keys:\n- ``{prefix}_impl``           : implementation + initial tests\n- ``{prefix}_mutants``        : mutated code + descriptions\n- ``{prefix}_improved_tests`` : final test suite killing all mutants\n\nReturns:\n- ``workflow_id``: workflow run UUID\n- ``name``: ``mutation-test/<feature>``\n- ``task_ids``: ``{\"implementer\": ..., \"mutant_introducer\": ..., \"test_improver\": ...}``\n- ``scratchpad_prefix``: scratchpad namespace\n\nDesign references:\n- AdverTest arXiv:2602.08146\n- Meta ACH arXiv:2501.12862 (FSE 2025)\n- DESIGN.md \u00a710.100 (v1.2.25)",
+        "operationId": "submit_mutation_test_workflow_workflows_mutation_test_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MutationTestWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Mutation Test Workflow Workflows Mutation Test Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a 3-agent Mutation Testing workflow (implementer \u2192 mutant-introducer \u2192 test-improver)"
       }
     },
     "/workflows/pair": {

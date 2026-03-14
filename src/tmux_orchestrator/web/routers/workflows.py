@@ -23,6 +23,7 @@ from tmux_orchestrator.web.schemas import (
     IterativeReviewWorkflowSubmit,
     LoopBlockModel,
     MobReviewWorkflowSubmit,
+    MutationTestWorkflowSubmit,
     PairCoderWorkflowSubmit,
     PairWorkflowSubmit,
     ParallelBlockModel,
@@ -5448,6 +5449,220 @@ def build_workflows_router(
             "name": run.name,
             "task_ids": task_ids,
             "scratchpad_prefix": prefix,
+        }
+
+    # -----------------------------------------------------------------------
+    # POST /workflows/mutation-test  (v1.2.25)
+    # -----------------------------------------------------------------------
+
+    @router.post(
+        "/workflows/mutation-test",
+        summary="Submit a 3-agent Mutation Testing workflow (implementer → mutant-introducer → test-improver)",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_mutation_test_workflow(body: MutationTestWorkflowSubmit) -> dict:
+        """Submit a 3-agent Mutation Testing Workflow DAG.
+
+        Pipeline:
+        1. **implementer**: writes the feature + initial test suite.
+        2. **mutant-introducer**: introduces N intentional bugs that the
+           initial tests miss; outputs mutated code + mutation descriptions.
+        3. **test-improver**: adds tests that kill every mutant; verifies
+           tests pass on the original code.
+
+        Scratchpad keys:
+        - ``{prefix}_impl``           : implementation + initial tests
+        - ``{prefix}_mutants``        : mutated code + descriptions
+        - ``{prefix}_improved_tests`` : final test suite killing all mutants
+
+        Returns:
+        - ``workflow_id``: workflow run UUID
+        - ``name``: ``mutation-test/<feature>``
+        - ``task_ids``: ``{"implementer": ..., "mutant_introducer": ..., "test_improver": ...}``
+        - ``scratchpad_prefix``: scratchpad namespace
+
+        Design references:
+        - AdverTest arXiv:2602.08146
+        - Meta ACH arXiv:2501.12862 (FSE 2025)
+        - DESIGN.md §10.100 (v1.2.25)
+        """
+        lang = body.language
+        feature = body.feature
+        n = body.num_mutations
+
+        wm = orchestrator.get_workflow_manager()
+        wf_name = f"mutation-test/{feature}"
+
+        pre_run_id = str(uuid.uuid4())
+        prefix = body.scratchpad_prefix or f"muttest_{pre_run_id[:8]}"
+
+        impl_key = f"{prefix}_impl"
+        mutants_key = f"{prefix}_mutants"
+        improved_tests_key = f"{prefix}_improved_tests"
+
+        # ------------------------------------------------------------------
+        # Simple Python-based scratchpad write snippet (avoids bash quoting)
+        # ------------------------------------------------------------------
+        def _sp_write_py(key: str, var_expr: str) -> str:
+            """Return a Python-based scratchpad write snippet."""
+            return (
+                f"python3 - <<'PYEOF'\n"
+                f"import json, urllib.request, os\n"
+                f"url = json.load(open('__orchestrator_context__.json'))['web_base_url']\n"
+                f"key = '{key}'\n"
+                f"val = {var_expr}\n"
+                f"req = urllib.request.Request(\n"
+                f"    f'{{url}}/scratchpad/{{key}}',\n"
+                f"    data=json.dumps({{'value': val}}).encode(),\n"
+                f"    headers={{'Content-Type': 'application/json', "
+                f"'X-API-Key': os.environ.get('TMUX_ORCHESTRATOR_API_KEY', '')}},\n"
+                f"    method='PUT',\n"
+                f")\n"
+                f"urllib.request.urlopen(req, timeout=30)\n"
+                f"print(f'Written {{len(val)}} chars to {{key}}')\n"
+                f"PYEOF"
+            )
+
+        def _sp_read_py(key: str, var_name: str) -> str:
+            """Return a Python-based scratchpad read snippet."""
+            return (
+                f"{var_name}=$(python3 - <<'PYEOF'\n"
+                f"import json, urllib.request, os\n"
+                f"url = json.load(open('__orchestrator_context__.json'))['web_base_url']\n"
+                f"req = urllib.request.Request(\n"
+                f"    f'{{url}}/scratchpad/{key}',\n"
+                f"    headers={{'X-API-Key': os.environ.get('TMUX_ORCHESTRATOR_API_KEY', '')}},\n"
+                f")\n"
+                f"print(json.loads(urllib.request.urlopen(req, timeout=30).read())['value'])\n"
+                f"PYEOF\n"
+                f")"
+            )
+
+        # ------------------------------------------------------------------
+        # 1. IMPLEMENTER prompt
+        # ------------------------------------------------------------------
+        implementer_prompt = (
+            f"You are the IMPLEMENTER agent in a Mutation Testing workflow.\n\n"
+            f"**Feature:** {feature}\n"
+            f"**Language:** {lang}\n\n"
+            f"Tasks:\n"
+            f"1. Implement '{feature}' in {lang}. Write clean, correct code.\n"
+            f"2. Write an initial test suite that verifies the basic behaviour.\n"
+            f"   Tests should cover: happy path, edge cases (empty, null, boundary).\n"
+            f"   Aim for at least 5 tests.\n"
+            f"3. Save implementation to `impl.{lang[:2]}` and tests to `tests_initial.{lang[:2]}`.\n"
+            f"4. Store both files in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_sp_write_py(impl_key, 'open(\"impl.\" + \"{lang[:2]}\").read()')}\n"
+            f"   ```\n"
+            f"5. Call `/task-complete \"Implementation + initial tests written to scratchpad\"`"
+        )
+
+        # ------------------------------------------------------------------
+        # 2. MUTANT-INTRODUCER prompt
+        # ------------------------------------------------------------------
+        mutant_introducer_prompt = (
+            f"You are the MUTANT-INTRODUCER agent in a Mutation Testing workflow.\n\n"
+            f"**Feature:** {feature}\n"
+            f"**Language:** {lang}\n"
+            f"**Number of mutations to introduce:** {n}\n\n"
+            f"Tasks:\n"
+            f"1. Load the original implementation from scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_sp_read_py(impl_key, 'IMPL')}\n"
+            f"   echo \"$IMPL\" > impl_original.{lang[:2]}\n"
+            f"   ```\n"
+            f"2. Create {n} mutated versions by introducing subtle bugs.\n"
+            f"   Each mutation should:\n"
+            f"   - Be a minimal, plausible change (off-by-one, wrong operator, wrong comparison)\n"
+            f"   - NOT be caught by the initial basic tests\n"
+            f"   - Be a real fault (not just formatting)\n"
+            f"3. Write `mutants.md` documenting each mutation:\n"
+            f"   ```markdown\n"
+            f"   # Mutations for: {feature}\n\n"
+            f"   ## Mutation 1: <name>\n"
+            f"   **Type:** <off-by-one|wrong-operator|missing-check|...>\n"
+            f"   **Location:** line N — original: `<code>` → mutated: `<code>`\n"
+            f"   **Expected failure:** test that would catch this: `test_<name>`\n\n"
+            f"   ## Mutation 2: ...\n"
+            f"   ```\n"
+            f"4. Write the mutated code to `impl_mutated.{lang[:2]}`.\n"
+            f"5. Store mutation report + mutated code in scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_sp_write_py(mutants_key, 'open(\"mutants.md\").read()')}\n"
+            f"   ```\n"
+            f"6. Call `/task-complete \"{n} mutations introduced and documented\"`"
+        )
+
+        # ------------------------------------------------------------------
+        # 3. TEST-IMPROVER prompt
+        # ------------------------------------------------------------------
+        test_improver_prompt = (
+            f"You are the TEST-IMPROVER agent in a Mutation Testing workflow.\n\n"
+            f"**Feature:** {feature}\n"
+            f"**Language:** {lang}\n\n"
+            f"Tasks:\n"
+            f"1. Load the implementation and mutation report from scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_sp_read_py(impl_key, 'IMPL')}\n"
+            f"   echo \"$IMPL\" > impl.{lang[:2]}\n"
+            f"   {_sp_read_py(mutants_key, 'MUTANTS')}\n"
+            f"   echo \"$MUTANTS\" > mutants.md\n"
+            f"   ```\n"
+            f"2. Read `mutants.md` to understand each mutation.\n"
+            f"3. Write improved tests in `tests_improved.{lang[:2]}` that:\n"
+            f"   - Include ALL original tests (do not remove any)\n"
+            f"   - Add at least one new test per mutation that KILLS the mutant\n"
+            f"   - Pass on the ORIGINAL implementation\n"
+            f"   - Each new test has a docstring explaining which mutation it kills\n"
+            f"4. Run tests against the original implementation to verify they pass:\n"
+            f"   ```bash\n"
+            f"   {lang[:2] if lang == 'python' else lang} -m pytest tests_improved.{lang[:2]} -v 2>&1 | tail -20\n"
+            f"   ```\n"
+            f"5. Store improved tests in scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_sp_write_py(improved_tests_key, 'open(\"tests_improved.\" + \"{lang[:2]}\").read()')}\n"
+            f"   ```\n"
+            f"6. Call `/task-complete \"Improved tests written — all mutations killed\"`"
+        )
+
+        # ------------------------------------------------------------------
+        # Submit tasks (linear sequential chain)
+        # ------------------------------------------------------------------
+        task_impl = await orchestrator.submit_task(
+            prompt=implementer_prompt,
+            required_tags=body.implementer_tags or None,
+            timeout=body.agent_timeout,
+        )
+        task_mutant = await orchestrator.submit_task(
+            prompt=mutant_introducer_prompt,
+            required_tags=body.mutant_introducer_tags or None,
+            depends_on=[task_impl.id],
+            timeout=body.agent_timeout,
+        )
+        task_improver = await orchestrator.submit_task(
+            prompt=test_improver_prompt,
+            required_tags=body.test_improver_tags or None,
+            depends_on=[task_mutant.id],
+            timeout=body.agent_timeout,
+            reply_to=body.reply_to,
+        )
+
+        task_ids = {
+            "implementer": task_impl.id,
+            "mutant_introducer": task_mutant.id,
+            "test_improver": task_improver.id,
+        }
+
+        all_ids = list(task_ids.values())
+        run = wm.submit(name=wf_name, task_ids=all_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids,
+            "scratchpad_prefix": prefix,
+            "num_mutations": n,
         }
 
     return router
