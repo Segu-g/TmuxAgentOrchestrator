@@ -200,9 +200,10 @@ def test_teardown_merge_no_commits_is_noop(git_repo: Path) -> None:
 
 def test_teardown_merge_to_target_branch(git_repo: Path) -> None:
     """teardown(merge_to_base=True, merge_target='feature') merges into specified branch."""
-    # Create a feature branch to merge into
+    # Create a feature branch to merge into (use current branch, not hardcoded 'master')
+    current = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=git_repo).stdout.strip()
     _git("checkout", "-b", "feature", cwd=git_repo)
-    _git("checkout", "master", cwd=git_repo)
+    _git("checkout", current, cwd=git_repo)
 
     wm = WorktreeManager(git_repo)
     worktree = wm.setup("target-agent")
@@ -218,16 +219,16 @@ def test_teardown_merge_to_target_branch(git_repo: Path) -> None:
     # Teardown merging into 'feature' branch (not current 'master')
     wm.teardown("target-agent", merge_to_base=True, merge_target="feature")
 
-    # The commit should be on 'feature', not 'master'
-    master_log = _git("log", "--oneline", "-3", cwd=git_repo).stdout
+    # The commit should be on 'feature', not current (main/master)
+    main_log = _git("log", "--oneline", "-3", cwd=git_repo).stdout
     feature_log = _git("log", "--oneline", "-3", "feature", cwd=git_repo).stdout
 
     assert "merge: squash" in feature_log
-    assert "merge: squash" not in master_log
+    assert "merge: squash" not in main_log
 
-    # Main repo should still be on master
-    current = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=git_repo).stdout.strip()
-    assert current == "master"
+    # Main repo should still be on original branch
+    head = _git("rev-parse", "--abbrev-ref", "HEAD", cwd=git_repo).stdout.strip()
+    assert head == current
 
 
 def test_teardown_merge_target_restores_original_branch(git_repo: Path) -> None:
