@@ -2396,6 +2396,13 @@ class Orchestrator:
                 # counter on success; checked below on final failure.
                 if not error:
                     self._consecutive_failures[msg.from_id] = 0
+                # Record task in per-agent history immediately on result receipt,
+                # before updating workflow status. This ensures history is visible
+                # to REST pollers as soon as the workflow transitions to "complete".
+                # Previously recorded after on_task_complete, causing a race window
+                # where pollers could see workflow=complete but history=empty.
+                # Fix: v1.2.26.
+                self._record_agent_history(msg)
                 if not error and task_id:
                     self._completed_tasks.add(task_id)
                     # Checkpoint: remove completed task so it isn't re-queued on resume.
@@ -2555,8 +2562,6 @@ class Orchestrator:
                                 asyncio.ensure_future(
                                     self._restart_agent(_failed_agent_id)
                                 )
-                # Record task in per-agent history.
-                self._record_agent_history(msg)
                 # reply_to routing: deliver RESULT to the requesting agent's mailbox.
                 # This closes the feedback loop for multi-level hierarchies where a
                 # parent agent submits a task and needs the result in its inbox.
