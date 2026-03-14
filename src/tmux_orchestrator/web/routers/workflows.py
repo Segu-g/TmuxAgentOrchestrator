@@ -27,6 +27,7 @@ from tmux_orchestrator.web.schemas import (
     PairWorkflowSubmit,
     ParallelBlockModel,
     PdcaWorkflowSubmit,
+    PeerReviewWorkflowSubmit,
     RedBlueWorkflowSubmit,
     SequenceBlockModel,
     SkipConditionModel,
@@ -5232,6 +5233,221 @@ def build_workflows_router(
             "task_ids": local_to_global,
             "scratchpad_prefix": scratchpad_prefix,
             "max_rounds": body.max_rounds,
+        }
+
+    # -----------------------------------------------------------------------
+    # POST /workflows/peer-review  (v1.2.24)
+    # -----------------------------------------------------------------------
+
+    @router.post(
+        "/workflows/peer-review",
+        summary="Submit a 3-agent Peer Review workflow (parallel impl-a + impl-b → reviewer)",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_peer_review_workflow(body: PeerReviewWorkflowSubmit) -> dict:
+        """Submit a 3-agent Peer Review Workflow DAG.
+
+        Two implementer agents work **in parallel** on the same feature, then a
+        single reviewer agent compares both implementations and declares a winner.
+
+        DAG topology::
+
+            impl-a ──┐
+                     ├──▶ reviewer
+            impl-b ──┘
+
+        Scratchpad keys:
+        - ``{prefix}_impl_a`` — implementation A (code text)
+        - ``{prefix}_impl_b`` — implementation B (code text)
+        - ``{prefix}_review``  — reviewer's structured REVIEW.md
+        - ``{prefix}_winner``  — ``"A"`` or ``"B"`` (winner declaration)
+
+        Returns:
+        - ``workflow_id``: workflow run UUID
+        - ``name``: ``peer-review/<feature>``
+        - ``task_ids``: ``{"impl_a": ..., "impl_b": ..., "reviewer": ...}``
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+
+        Design references:
+        - AgentReview: EMNLP 2024 arXiv:2406.12708
+        - arXiv:2505.16339 "Rethinking Code Review Workflows" (2025)
+        - DESIGN.md §10.99 (v1.2.24)
+        """
+        lang = body.language
+        feature = body.feature
+
+        wm = orchestrator.get_workflow_manager()
+        wf_name = f"peer-review/{feature}"
+
+        pre_run_id = str(uuid.uuid4())
+        prefix = body.scratchpad_prefix or f"peerreview_{pre_run_id[:8]}"
+
+        impl_a_key = f"{prefix}_impl_a"
+        impl_b_key = f"{prefix}_impl_b"
+        review_key = f"{prefix}_review"
+        winner_key = f"{prefix}_winner"
+
+        # ------------------------------------------------------------------
+        # Common bash snippet: read context + API key
+        # ------------------------------------------------------------------
+        _ctx = (
+            "WEB_URL=$(python3 -c \""
+            "import json; d=json.load(open('__orchestrator_context__.json')); "
+            "print(d['web_base_url'])\")\n"
+            "   API_KEY=$(echo \"$TMUX_ORCHESTRATOR_API_KEY\")"
+        )
+
+        def _write_sp(key: str, var: str = "CONTENT") -> str:
+            return (
+                f"   curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_URL/scratchpad/{key}\" \\\n"
+                f"     -H 'Content-Type: application/json' \\\n"
+                f"     -d '{{\"value\": \"'${var}'\"}}'  "
+            )
+
+        def _read_sp(key: str, varname: str) -> str:
+            return (
+                f"   {varname}=$(curl -s -H \"X-API-Key: $API_KEY\" \\\n"
+                f"     \"$WEB_URL/scratchpad/{key}\" \\\n"
+                f"     | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"value\"])')\n"
+            )
+
+        # ------------------------------------------------------------------
+        # Prompt: implementer A (approach: idiomatic / clear)
+        # ------------------------------------------------------------------
+        impl_a_prompt = (
+            f"You are IMPLEMENTER-A in a Peer Review workflow.\n\n"
+            f"**Feature:** {feature}\n"
+            f"**Language:** {lang}\n\n"
+            f"Your approach: **idiomatic and readable** — prioritise clarity, "
+            f"meaningful names, and adherence to {lang} idioms.\n\n"
+            f"Tasks:\n"
+            f"1. Implement '{feature}' in {lang}.\n"
+            f"   - Write clean, well-commented code.\n"
+            f"   - Include docstrings for all public functions/methods.\n"
+            f"   - Handle edge cases explicitly.\n"
+            f"2. Save your implementation to `impl_a.{lang[:2]}`.\n"
+            f"3. Write a brief self-assessment (≤100 words) at the end as a comment.\n"
+            f"4. Store your implementation in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx}\n"
+            f"   CONTENT=$(cat impl_a.{lang[:2]})\n"
+            + _write_sp(impl_a_key)
+            + f"\n"
+            f"   ```\n"
+            f"5. Call `/task-complete \"impl_a.{lang[:2]} written and stored\"`"
+        )
+
+        # ------------------------------------------------------------------
+        # Prompt: implementer B (approach: performance / concise)
+        # ------------------------------------------------------------------
+        impl_b_prompt = (
+            f"You are IMPLEMENTER-B in a Peer Review workflow.\n\n"
+            f"**Feature:** {feature}\n"
+            f"**Language:** {lang}\n\n"
+            f"Your approach: **performance-oriented and concise** — minimise "
+            f"runtime complexity, reduce boilerplate, use built-in capabilities.\n\n"
+            f"Tasks:\n"
+            f"1. Implement '{feature}' in {lang}.\n"
+            f"   - Optimise for efficiency and minimal code length.\n"
+            f"   - Use language built-ins and standard library where possible.\n"
+            f"   - Handle edge cases correctly (do not sacrifice correctness).\n"
+            f"2. Save your implementation to `impl_b.{lang[:2]}`.\n"
+            f"3. Write a brief self-assessment (≤100 words) at the end as a comment.\n"
+            f"4. Store your implementation in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_ctx}\n"
+            f"   CONTENT=$(cat impl_b.{lang[:2]})\n"
+            + _write_sp(impl_b_key)
+            + f"\n"
+            f"   ```\n"
+            f"5. Call `/task-complete \"impl_b.{lang[:2]} written and stored\"`"
+        )
+
+        # ------------------------------------------------------------------
+        # Prompt: reviewer (compare both, select winner)
+        # ------------------------------------------------------------------
+        reviewer_prompt = (
+            f"You are the REVIEWER in a Peer Review workflow.\n\n"
+            f"**Feature:** {feature}\n"
+            f"**Language:** {lang}\n\n"
+            f"Two implementers have independently implemented '{feature}'.\n"
+            f"Your task: compare both implementations and declare a winner.\n\n"
+            f"Step 1 — Load both implementations:\n"
+            f"```bash\n"
+            f"{_ctx}\n"
+            + _read_sp(impl_a_key, "IMPL_A")
+            + _read_sp(impl_b_key, "IMPL_B")
+            + f"```\n\n"
+            f"Step 2 — Write `REVIEW.md` with this structure:\n"
+            f"```markdown\n"
+            f"# Peer Review: {feature}\n\n"
+            f"## Implementation A\n"
+            f"**Strengths:** ...\n"
+            f"**Weaknesses:** ...\n"
+            f"**Score (1-10):** N\n\n"
+            f"## Implementation B\n"
+            f"**Strengths:** ...\n"
+            f"**Weaknesses:** ...\n"
+            f"**Score (1-10):** N\n\n"
+            f"## Comparative Analysis\n"
+            f"Evaluation axes:\n"
+            f"- Correctness (handles all edge cases?)\n"
+            f"- Readability (clear names, comments, structure?)\n"
+            f"- Efficiency (time/space complexity?)\n"
+            f"- Idiomaticity (idiomatic {lang}?)\n\n"
+            f"## Winner\n"
+            f"**WINNER: [A|B]**\n"
+            f"Reason: <one sentence>\n"
+            f"```\n\n"
+            f"Step 3 — Store review and winner:\n"
+            f"```bash\n"
+            f"CONTENT=$(cat REVIEW.md)\n"
+            + _write_sp(review_key)
+            + f"\n"
+            f"curl -s -X PUT -H \"X-API-Key: $API_KEY\" \\\n"
+            f"  \"$WEB_URL/scratchpad/{winner_key}\" \\\n"
+            f"  -H 'Content-Type: application/json' \\\n"
+            f"  -d '{{\"value\": \"A\"}}' # Replace A with actual winner\n"
+            f"```\n\n"
+            f"4. Call `/task-complete \"REVIEW.md written, winner declared\"`"
+        )
+
+        # ------------------------------------------------------------------
+        # Submit tasks
+        # ------------------------------------------------------------------
+        task_a = await orchestrator.submit_task(
+            prompt=impl_a_prompt,
+            required_tags=body.impl_a_tags or None,
+            timeout=body.agent_timeout,
+        )
+        task_b = await orchestrator.submit_task(
+            prompt=impl_b_prompt,
+            required_tags=body.impl_b_tags or None,
+            timeout=body.agent_timeout,
+        )
+        task_reviewer = await orchestrator.submit_task(
+            prompt=reviewer_prompt,
+            required_tags=body.reviewer_tags or None,
+            depends_on=[task_a.id, task_b.id],
+            timeout=body.agent_timeout,
+            reply_to=body.reply_to,
+        )
+
+        task_ids = {
+            "impl_a": task_a.id,
+            "impl_b": task_b.id,
+            "reviewer": task_reviewer.id,
+        }
+
+        all_ids = list(task_ids.values())
+        run = wm.submit(name=wf_name, task_ids=all_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids,
+            "scratchpad_prefix": prefix,
         }
 
     return router

@@ -1893,6 +1893,67 @@ class PairCoderWorkflowSubmit(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Peer-review workflow schema (v1.2.24)
+# Reference: DESIGN.md §10.99 (v1.2.24)
+# ---------------------------------------------------------------------------
+
+
+class PeerReviewWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/peer-review.
+
+    Submits a 3-agent DAG where two implementers work in **parallel** on the
+    same feature, then a single reviewer compares both implementations and
+    selects the winner.
+
+    Workflow topology::
+
+        impl-a ──┐
+                 ├──▶ reviewer
+        impl-b ──┘
+
+    Both ``impl-a`` and ``impl-b`` run simultaneously (no depends_on).
+    ``reviewer`` depends_on both so it starts only after both finish.
+
+    Scratchpad keys (Blackboard pattern):
+
+    - ``{scratchpad_prefix}_impl_a`` : implementation A (code text)
+    - ``{scratchpad_prefix}_impl_b`` : implementation B (code text)
+    - ``{scratchpad_prefix}_review``  : reviewer's comparative REVIEW.md
+    - ``{scratchpad_prefix}_winner``  : ``"A"`` or ``"B"`` (winner declaration)
+
+    Design references:
+    - AgentReview: Exploring Peer Review Dynamics with LLM Agents — EMNLP 2024
+      https://arxiv.org/abs/2406.12708
+    - "Scaling Code Review: Multi-Agent Systems for Enterprise Engineering Teams"
+      https://rkoots.github.io/blog/2026/03/09/bringing-code-review-to-claude-code/ (2026)
+    - arXiv:2505.16339 "Rethinking Code Review Workflows with LLM Assistance" (2025)
+    - DESIGN.md §10.99 (v1.2.24)
+    """
+
+    # Feature/task to implement
+    feature: str
+    # Programming language for implementations
+    language: str = "python"
+    # Optional scratchpad prefix (auto-generated when empty)
+    scratchpad_prefix: str = ""
+    # Per-task timeout in seconds
+    agent_timeout: int = 300
+    # required_tags for each agent role (empty = any available agent)
+    impl_a_tags: list[str] = []
+    impl_b_tags: list[str] = []
+    reviewer_tags: list[str] = []
+    # When set, reviewer RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    @field_validator("feature")
+    @classmethod
+    def feature_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("feature must not be empty")
+        return v
+
+
+# ---------------------------------------------------------------------------
 # Task template schemas (v1.2.17)
 # Reference: DESIGN.md §10.93 (v1.2.17)
 # ---------------------------------------------------------------------------

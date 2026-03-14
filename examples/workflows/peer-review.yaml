@@ -1,0 +1,85 @@
+# Peer Review Workflow Template
+# ==============================
+# 3-agent parallel implementation + comparative review pipeline.
+#
+# DAG topology:
+#   impl-a ──┐
+#            ├──▶ reviewer
+#   impl-b ──┘
+#
+# Two implementers work in parallel on the same feature using different
+# approaches, then a single reviewer compares both implementations and
+# declares a winner.
+#
+# Agent roles:
+#   impl-a   → role: coder    → loads agent_plugin/docs/coder.md
+#   impl-b   → role: coder    → loads agent_plugin/docs/coder.md
+#   reviewer → role: reviewer → loads agent_plugin/docs/reviewer.md
+#
+# Scratchpad keys (written by agents):
+#   {scratchpad_prefix}_impl_a  — Implementation A (idiomatic/readable approach)
+#   {scratchpad_prefix}_impl_b  — Implementation B (performance/concise approach)
+#   {scratchpad_prefix}_review  — Reviewer's comparative REVIEW.md
+#   {scratchpad_prefix}_winner  — "A" or "B" (winner declaration)
+#
+# Endpoint: POST /workflows/peer-review
+# Reference:
+#   AgentReview: EMNLP 2024 arXiv:2406.12708
+#   arXiv:2505.16339 "Rethinking Code Review Workflows" (2025)
+
+workflow:
+  endpoint: /workflows/peer-review
+
+# --- Defaults (parameter inheritance) ---
+defaults:
+  language: python
+  impl_a_tags: []
+  impl_b_tags: []
+  reviewer_tags: []
+  agent_timeout: 300
+  scratchpad_prefix: ""
+  reply_to: null
+
+# --- Required fields ---
+
+# Feature description (e.g. "a stack data structure with push/pop/peek")
+feature: "a stack data structure with push, pop, and peek operations"
+
+# --- Optional fields ---
+
+# Programming language for both implementations
+language: python
+
+# Per-task timeout in seconds
+agent_timeout: 300
+
+# Agent capability routing (empty = any available agent)
+# Example agent config entries:
+#   agents:
+#     - id: impl-a
+#       role: coder
+#       tags: [peer_impl_a]
+#     - id: impl-b
+#       role: coder
+#       tags: [peer_impl_b]
+#     - id: reviewer
+#       role: reviewer
+#       tags: [peer_reviewer]
+impl_a_tags: []
+impl_b_tags: []
+reviewer_tags: []
+
+# Auto-generated when empty (format: "peerreview_{8-hex}")
+scratchpad_prefix: ""
+
+# If set, the reviewer's RESULT is delivered to this agent's mailbox
+reply_to: null
+
+# --- Curl example ---
+# curl -s -X POST http://localhost:8000/workflows/peer-review \
+#   -H "Content-Type: application/json" \
+#   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+#   -d '{
+#     "feature": "a stack data structure with push, pop, and peek operations",
+#     "language": "python"
+#   }'

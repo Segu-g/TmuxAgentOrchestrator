@@ -1283,6 +1283,70 @@
         "title": "PdcaWorkflowSubmit",
         "type": "object"
       },
+      "PeerReviewWorkflowSubmit": {
+        "description": "Request body for POST /workflows/peer-review.\n\nSubmits a 3-agent DAG where two implementers work in **parallel** on the\nsame feature, then a single reviewer compares both implementations and\nselects the winner.\n\nWorkflow topology::\n\n    impl-a \u2500\u2500\u2510\n             \u251c\u2500\u2500\u25b6 reviewer\n    impl-b \u2500\u2500\u2518\n\nBoth ``impl-a`` and ``impl-b`` run simultaneously (no depends_on).\n``reviewer`` depends_on both so it starts only after both finish.\n\nScratchpad keys (Blackboard pattern):\n\n- ``{scratchpad_prefix}_impl_a`` : implementation A (code text)\n- ``{scratchpad_prefix}_impl_b`` : implementation B (code text)\n- ``{scratchpad_prefix}_review``  : reviewer's comparative REVIEW.md\n- ``{scratchpad_prefix}_winner``  : ``\"A\"`` or ``\"B\"`` (winner declaration)\n\nDesign references:\n- AgentReview: Exploring Peer Review Dynamics with LLM Agents \u2014 EMNLP 2024\n  https://arxiv.org/abs/2406.12708\n- \"Scaling Code Review: Multi-Agent Systems for Enterprise Engineering Teams\"\n  https://rkoots.github.io/blog/2026/03/09/bringing-code-review-to-claude-code/ (2026)\n- arXiv:2505.16339 \"Rethinking Code Review Workflows with LLM Assistance\" (2025)\n- DESIGN.md \u00a710.99 (v1.2.24)",
+        "properties": {
+          "agent_timeout": {
+            "default": 300,
+            "title": "Agent Timeout",
+            "type": "integer"
+          },
+          "feature": {
+            "title": "Feature",
+            "type": "string"
+          },
+          "impl_a_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Impl A Tags",
+            "type": "array"
+          },
+          "impl_b_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Impl B Tags",
+            "type": "array"
+          },
+          "language": {
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "reviewer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Reviewer Tags",
+            "type": "array"
+          },
+          "scratchpad_prefix": {
+            "default": "",
+            "title": "Scratchpad Prefix",
+            "type": "string"
+          }
+        },
+        "required": [
+          "feature"
+        ],
+        "title": "PeerReviewWorkflowSubmit",
+        "type": "object"
+      },
       "RateLimitUpdate": {
         "description": "Request body for PUT /rate-limit.\n\nSet ``rate=0`` to disable rate limiting (unlimited throughput).",
         "properties": {
@@ -5959,6 +6023,47 @@
           }
         },
         "summary": "Submit a PDCA (Plan-Do-Check-Act) iterative improvement workflow"
+      }
+    },
+    "/workflows/peer-review": {
+      "post": {
+        "description": "Submit a 3-agent Peer Review Workflow DAG.\n\nTwo implementer agents work **in parallel** on the same feature, then a\nsingle reviewer agent compares both implementations and declares a winner.\n\nDAG topology::\n\n    impl-a \u2500\u2500\u2510\n             \u251c\u2500\u2500\u25b6 reviewer\n    impl-b \u2500\u2500\u2518\n\nScratchpad keys:\n- ``{prefix}_impl_a`` \u2014 implementation A (code text)\n- ``{prefix}_impl_b`` \u2014 implementation B (code text)\n- ``{prefix}_review``  \u2014 reviewer's structured REVIEW.md\n- ``{prefix}_winner``  \u2014 ``\"A\"`` or ``\"B\"`` (winner declaration)\n\nReturns:\n- ``workflow_id``: workflow run UUID\n- ``name``: ``peer-review/<feature>``\n- ``task_ids``: ``{\"impl_a\": ..., \"impl_b\": ..., \"reviewer\": ...}``\n- ``scratchpad_prefix``: scratchpad namespace for this run\n\nDesign references:\n- AgentReview: EMNLP 2024 arXiv:2406.12708\n- arXiv:2505.16339 \"Rethinking Code Review Workflows\" (2025)\n- DESIGN.md \u00a710.99 (v1.2.24)",
+        "operationId": "submit_peer_review_workflow_workflows_peer_review_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PeerReviewWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Peer Review Workflow Workflows Peer Review Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a 3-agent Peer Review workflow (parallel impl-a + impl-b \u2192 reviewer)"
       }
     },
     "/workflows/redblue": {
