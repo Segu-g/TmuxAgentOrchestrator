@@ -2016,6 +2016,75 @@ class PeerReviewWorkflowSubmit(BaseModel):
         return v
 
 
+class CodeAuditWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/code-audit.
+
+    Submits a 4-agent code audit workflow: an implementer writes the feature,
+    then two specialist auditors (security + performance) review it in parallel,
+    and a synthesizer consolidates findings into a prioritised audit report.
+
+    Workflow topology::
+
+        implementer ──▶ security-auditor ──┐
+                    └──▶ performance-auditor ──┘──▶ synthesizer
+
+    The fan-out/fan-in pattern allows both audits to run simultaneously,
+    reducing total wall-clock time compared to sequential auditing.
+
+    Scratchpad keys (Blackboard pattern):
+
+    - ``{scratchpad_prefix}_impl``              : implementation (code text)
+    - ``{scratchpad_prefix}_security_audit``    : security audit findings (OWASP / CWE)
+    - ``{scratchpad_prefix}_performance_audit`` : performance audit findings
+    - ``{scratchpad_prefix}_audit_report``      : synthesiser's prioritised report
+
+    Design references:
+    - RepoAudit: Autonomous LLM-Agent for Repository-Level Code Auditing — arXiv:2501.18160 ICML 2025
+      https://arxiv.org/abs/2501.18160
+    - iAudit: Combining Fine-tuning and LLM Agents for Code Auditing — ICSE 2025
+      https://daoyuan14.github.io/papers/ICSE25_iAudit.pdf
+    - Automating Security Audit Using LLMs — arXiv:2505.10732 (2025)
+      https://arxiv.org/pdf/2505.10732
+    - DESIGN.md §10.101 (v1.2.26)
+    """
+
+    # Feature / code snippet to implement and audit
+    feature: str
+    # Programming language for the implementation
+    language: str = "python"
+    # Audit focus areas (controls which auditors are spawned)
+    audit_focus: list[str] = ["security", "performance"]
+    # Optional scratchpad prefix (auto-generated when empty)
+    scratchpad_prefix: str = ""
+    # Per-task timeout in seconds
+    agent_timeout: int = 300
+    # required_tags for each agent role (empty = any available agent)
+    implementer_tags: list[str] = []
+    security_auditor_tags: list[str] = []
+    performance_auditor_tags: list[str] = []
+    synthesizer_tags: list[str] = []
+    # When set, synthesizer RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    @field_validator("feature")
+    @classmethod
+    def _feature_not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("feature must not be empty")
+        return v
+
+    @field_validator("audit_focus")
+    @classmethod
+    def _audit_focus_not_empty(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("audit_focus must not be empty")
+        valid = {"security", "performance"}
+        for item in v:
+            if item not in valid:
+                raise ValueError(f"audit_focus item {item!r} must be one of {valid}")
+        return v
+
+
 # ---------------------------------------------------------------------------
 # Task template schemas (v1.2.17)
 # Reference: DESIGN.md §10.93 (v1.2.17)

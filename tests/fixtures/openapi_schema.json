@@ -384,6 +384,89 @@
         "title": "CleanArchWorkflowSubmit",
         "type": "object"
       },
+      "CodeAuditWorkflowSubmit": {
+        "description": "Request body for POST /workflows/code-audit.\n\nSubmits a 4-agent code audit workflow: an implementer writes the feature,\nthen two specialist auditors (security + performance) review it in parallel,\nand a synthesizer consolidates findings into a prioritised audit report.\n\nWorkflow topology::\n\n    implementer \u2500\u2500\u25b6 security-auditor \u2500\u2500\u2510\n                \u2514\u2500\u2500\u25b6 performance-auditor \u2500\u2500\u2518\u2500\u2500\u25b6 synthesizer\n\nThe fan-out/fan-in pattern allows both audits to run simultaneously,\nreducing total wall-clock time compared to sequential auditing.\n\nScratchpad keys (Blackboard pattern):\n\n- ``{scratchpad_prefix}_impl``              : implementation (code text)\n- ``{scratchpad_prefix}_security_audit``    : security audit findings (OWASP / CWE)\n- ``{scratchpad_prefix}_performance_audit`` : performance audit findings\n- ``{scratchpad_prefix}_audit_report``      : synthesiser's prioritised report\n\nDesign references:\n- RepoAudit: Autonomous LLM-Agent for Repository-Level Code Auditing \u2014 arXiv:2501.18160 ICML 2025\n  https://arxiv.org/abs/2501.18160\n- iAudit: Combining Fine-tuning and LLM Agents for Code Auditing \u2014 ICSE 2025\n  https://daoyuan14.github.io/papers/ICSE25_iAudit.pdf\n- Automating Security Audit Using LLMs \u2014 arXiv:2505.10732 (2025)\n  https://arxiv.org/pdf/2505.10732\n- DESIGN.md \u00a710.101 (v1.2.26)",
+        "properties": {
+          "agent_timeout": {
+            "default": 300,
+            "title": "Agent Timeout",
+            "type": "integer"
+          },
+          "audit_focus": {
+            "default": [
+              "security",
+              "performance"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "title": "Audit Focus",
+            "type": "array"
+          },
+          "feature": {
+            "title": "Feature",
+            "type": "string"
+          },
+          "implementer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Implementer Tags",
+            "type": "array"
+          },
+          "language": {
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "performance_auditor_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Performance Auditor Tags",
+            "type": "array"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "scratchpad_prefix": {
+            "default": "",
+            "title": "Scratchpad Prefix",
+            "type": "string"
+          },
+          "security_auditor_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Security Auditor Tags",
+            "type": "array"
+          },
+          "synthesizer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Synthesizer Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "feature"
+        ],
+        "title": "CodeAuditWorkflowSubmit",
+        "type": "object"
+      },
       "CompetitionWorkflowSubmit": {
         "description": "Request body for POST /workflows/competition \u2014 Best-of-N competitive solver.\n\nSubmits a (N+1)-agent workflow DAG where N solver agents tackle the same\nproblem independently using different strategies, and a single judge agent\nselects the winner:\n\n  **Phase 1 \u2014 Parallel Solvers** (``depends_on=[]``, all start simultaneously):\n    ``solver_{strategy}`` for each strategy in ``strategies``:\n    Each solver receives the same ``problem`` description plus a strategy\n    hint.  It writes its solution to ``solver_{strategy}_result.md``,\n    extracts a numeric score on a ``SCORE: <number>`` line, and stores the\n    result in the shared scratchpad.\n\n  **Phase 2 \u2014 Judge** (``depends_on=all solver task IDs``):\n    ``judge``: reads all solver results from the scratchpad, compares them\n    against ``scoring_criterion``, selects the winner, and writes\n    ``COMPETITION_RESULT.md`` containing:\n    - ``WINNER: <strategy>``\n    - A score table (strategy \u2192 score)\n    - Rationale for the selection\n    The judge stores the result in the shared scratchpad.\n\nScratchpad keys (Blackboard pattern):\n- ``{prefix}_solver_{strategy}``  : solver result + score for each strategy\n- ``{prefix}_judge``              : judge's ``COMPETITION_RESULT.md`` content\n\nArtifacts produced by agents:\n- ``solver_{strategy}_result.md`` \u2014 each solver's solution + SCORE line\n- ``COMPETITION_RESULT.md``       \u2014 judge's winner declaration\n\nDesign references:\n- \"Making, not Taking, the Best of N\" (FusioN), arXiv:2510.00931, 2025:\n  BoN selection vs. synthesis comparison; list-wise judge evaluation.\n- M-A-P \"Multi-Agent-based Parallel Test-Time Scaling\", arXiv:2506.12928,\n  2025: parallel BoN with list-wise verdict outperforms point-wise.\n- \"When AIs Judge AIs: Agent-as-a-Judge\", arXiv:2508.02994, 2025:\n  agent judge observes intermediate steps and produces structured scores.\n- MultiAgentBench, arXiv:2503.01935, 2025: collaboration + competition\n  benchmark demonstrating milestone-based KPIs for competitive agents.\n- DESIGN.md \u00a710.36 (v1.1.0)",
         "properties": {
@@ -5684,6 +5767,47 @@
           }
         },
         "summary": "Submit a 4-agent Clean Architecture pipeline workflow"
+      }
+    },
+    "/workflows/code-audit": {
+      "post": {
+        "description": "Submit a 4-agent Code Audit Workflow DAG.\n\nPipeline:\n\n  1. **implementer**: writes the feature implementation in the requested\n     language and stores it in ``{prefix}_impl`` (scratchpad).\n  2. **security-auditor** (parallel): reads ``{prefix}_impl`` and audits\n     for security vulnerabilities using OWASP Top 10 / CWE classifications.\n     Stores findings in ``{prefix}_security_audit``.\n  3. **performance-auditor** (parallel): reads ``{prefix}_impl`` and audits\n     for performance issues (algorithmic complexity, caching, I/O patterns).\n     Stores findings in ``{prefix}_performance_audit``.\n  4. **synthesizer**: reads both audit reports and produces a prioritised\n     ``AUDIT_REPORT.md`` stored in ``{prefix}_audit_report``.\n\nReturns:\n- ``workflow_id``: workflow run UUID\n- ``name``: ``code-audit/<feature>``\n- ``task_ids``: dict with ``implementer``, ``security_auditor``,\n  ``performance_auditor``, ``synthesizer``\n- ``scratchpad_prefix``: scratchpad namespace for this run\n- ``audit_focus``: list of audit domains included\n\nDesign references:\n- RepoAudit arXiv:2501.18160 ICML 2025: specialist auditor agents in parallel\n- iAudit ICSE 2025: multi-agent conversational architecture for code auditing\n- Automating Security Audit Using LLMs arXiv:2505.10732 (2025)\n- DESIGN.md \u00a710.101 (v1.2.26)",
+        "operationId": "submit_code_audit_workflow_workflows_code_audit_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CodeAuditWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Code Audit Workflow Workflows Code Audit Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a 4-agent Code Audit workflow (implementer \u2192 security-auditor \u2225 performance-auditor \u2192 synthesizer)"
       }
     },
     "/workflows/competition": {

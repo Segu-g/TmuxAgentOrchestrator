@@ -15,6 +15,7 @@ from tmux_orchestrator.web.schemas import (
     AdrWorkflowSubmit,
     AgentmeshWorkflowSubmit,
     CleanArchWorkflowSubmit,
+    CodeAuditWorkflowSubmit,
     CompetitionWorkflowSubmit,
     DDDWorkflowSubmit,
     DebateWorkflowSubmit,
@@ -5663,6 +5664,241 @@ def build_workflows_router(
             "task_ids": task_ids,
             "scratchpad_prefix": prefix,
             "num_mutations": n,
+        }
+
+    # -----------------------------------------------------------------------
+    # POST /workflows/code-audit  (v1.2.26)
+    # -----------------------------------------------------------------------
+
+    @router.post(
+        "/workflows/code-audit",
+        summary="Submit a 4-agent Code Audit workflow (implementer → security-auditor ∥ performance-auditor → synthesizer)",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_code_audit_workflow(body: CodeAuditWorkflowSubmit) -> dict:
+        """Submit a 4-agent Code Audit Workflow DAG.
+
+        Pipeline:
+
+          1. **implementer**: writes the feature implementation in the requested
+             language and stores it in ``{prefix}_impl`` (scratchpad).
+          2. **security-auditor** (parallel): reads ``{prefix}_impl`` and audits
+             for security vulnerabilities using OWASP Top 10 / CWE classifications.
+             Stores findings in ``{prefix}_security_audit``.
+          3. **performance-auditor** (parallel): reads ``{prefix}_impl`` and audits
+             for performance issues (algorithmic complexity, caching, I/O patterns).
+             Stores findings in ``{prefix}_performance_audit``.
+          4. **synthesizer**: reads both audit reports and produces a prioritised
+             ``AUDIT_REPORT.md`` stored in ``{prefix}_audit_report``.
+
+        Returns:
+        - ``workflow_id``: workflow run UUID
+        - ``name``: ``code-audit/<feature>``
+        - ``task_ids``: dict with ``implementer``, ``security_auditor``,
+          ``performance_auditor``, ``synthesizer``
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+        - ``audit_focus``: list of audit domains included
+
+        Design references:
+        - RepoAudit arXiv:2501.18160 ICML 2025: specialist auditor agents in parallel
+        - iAudit ICSE 2025: multi-agent conversational architecture for code auditing
+        - Automating Security Audit Using LLMs arXiv:2505.10732 (2025)
+        - DESIGN.md §10.101 (v1.2.26)
+        """
+        feature = body.feature.strip()
+        lang = body.language
+
+        wm = orchestrator.get_workflow_manager()
+        wf_name = f"code-audit/{feature}"
+
+        pre_run_id = str(uuid.uuid4())
+        prefix = body.scratchpad_prefix or f"audit_{pre_run_id[:8]}"
+
+        impl_key = f"{prefix}_impl"
+        security_key = f"{prefix}_security_audit"
+        perf_key = f"{prefix}_performance_audit"
+        report_key = f"{prefix}_audit_report"
+
+        def _py_write(key: str, varname: str) -> str:
+            """Return a Python snippet that writes varname to the scratchpad key."""
+            return (
+                f"python3 - <<'PYEOF'\n"
+                f"import json, urllib.request, os\n"
+                f"content = open('{varname}').read()\n"
+                f"url = open('__orchestrator_context__.json') if False else None\n"
+                f"ctx = json.load(open('__orchestrator_context__.json'))\n"
+                f"api_key = os.environ.get('TMUX_ORCHESTRATOR_API_KEY', '')\n"
+                f"req = urllib.request.Request(\n"
+                f"    ctx['web_base_url'] + '/scratchpad/{key}',\n"
+                f"    data=json.dumps({{'value': content}}).encode(),\n"
+                f"    headers={{'X-API-Key': api_key, 'Content-Type': 'application/json'}},\n"
+                f"    method='PUT',\n"
+                f")\n"
+                f"urllib.request.urlopen(req)\n"
+                f"PYEOF"
+            )
+
+        def _py_read(key: str, varname: str) -> str:
+            """Return a Python snippet that reads key from scratchpad into varname file."""
+            return (
+                f"python3 - <<'PYEOF'\n"
+                f"import json, urllib.request, os\n"
+                f"ctx = json.load(open('__orchestrator_context__.json'))\n"
+                f"api_key = os.environ.get('TMUX_ORCHESTRATOR_API_KEY', '')\n"
+                f"req = urllib.request.Request(\n"
+                f"    ctx['web_base_url'] + '/scratchpad/{key}',\n"
+                f"    headers={{'X-API-Key': api_key}},\n"
+                f"    method='GET',\n"
+                f")\n"
+                f"resp = json.loads(urllib.request.urlopen(req).read())\n"
+                f"open('{varname}', 'w').write(resp['value'])\n"
+                f"PYEOF"
+            )
+
+        # --- Implementer prompt ---
+        implementer_prompt = (
+            f"You are the IMPLEMENTER agent in a code audit workflow.\n"
+            f"\n"
+            f"**Feature to implement**: {feature}\n"
+            f"**Language**: {lang}\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Write a clean, working implementation of the feature above in {lang}.\n"
+            f"   Include docstrings/comments explaining your design choices.\n"
+            f"   Focus on correctness first — security and performance auditors will review later.\n"
+            f"2. Write your implementation to `implementation.{lang[:2]}` in your working directory.\n"
+            f"3. Store the implementation in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_py_write(impl_key, f'implementation.{lang[:2]}')}\n"
+            f"   ```\n"
+            f"4. Call /task-complete with a one-line summary.\n"
+        )
+
+        # --- Security auditor prompt ---
+        security_auditor_prompt = (
+            f"You are the SECURITY AUDITOR agent in a code audit workflow.\n"
+            f"\n"
+            f"**Feature being audited**: {feature} (language: {lang})\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read the implementation from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_py_read(impl_key, 'implementation_to_audit.txt')}\n"
+            f"   ```\n"
+            f"2. Audit the code for security vulnerabilities using OWASP Top 10 and CWE classifications.\n"
+            f"   For each finding, provide:\n"
+            f"   - **Severity**: CRITICAL / HIGH / MEDIUM / LOW\n"
+            f"   - **CWE ID** (if applicable)\n"
+            f"   - **Description**: what the vulnerability is and where it appears\n"
+            f"   - **Recommendation**: how to fix it\n"
+            f"3. Write your audit to `security_audit.md` in your working directory.\n"
+            f"4. Store the security audit in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_py_write(security_key, 'security_audit.md')}\n"
+            f"   ```\n"
+            f"5. Call /task-complete with a one-line summary of your findings.\n"
+        )
+
+        # --- Performance auditor prompt ---
+        performance_auditor_prompt = (
+            f"You are the PERFORMANCE AUDITOR agent in a code audit workflow.\n"
+            f"\n"
+            f"**Feature being audited**: {feature} (language: {lang})\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read the implementation from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_py_read(impl_key, 'implementation_to_audit.txt')}\n"
+            f"   ```\n"
+            f"2. Audit the code for performance issues. Evaluate:\n"
+            f"   - **Algorithmic complexity**: time and space complexity, unnecessary loops\n"
+            f"   - **I/O patterns**: redundant reads/writes, missing buffering\n"
+            f"   - **Caching opportunities**: repeated computations that could be memoised\n"
+            f"   - **Resource management**: connection pooling, memory allocation patterns\n"
+            f"   For each finding, provide Severity (HIGH/MEDIUM/LOW), Description, and Recommendation.\n"
+            f"3. Write your audit to `performance_audit.md` in your working directory.\n"
+            f"4. Store the performance audit in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_py_write(perf_key, 'performance_audit.md')}\n"
+            f"   ```\n"
+            f"5. Call /task-complete with a one-line summary of your findings.\n"
+        )
+
+        # --- Synthesizer prompt ---
+        synthesizer_prompt = (
+            f"You are the SYNTHESIZER agent in a code audit workflow.\n"
+            f"\n"
+            f"**Feature audited**: {feature} (language: {lang})\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read the security audit:\n"
+            f"   ```bash\n"
+            f"   {_py_read(security_key, 'security_audit.md')}\n"
+            f"   ```\n"
+            f"2. Read the performance audit:\n"
+            f"   ```bash\n"
+            f"   {_py_read(perf_key, 'performance_audit.md')}\n"
+            f"   ```\n"
+            f"3. Read the original implementation:\n"
+            f"   ```bash\n"
+            f"   {_py_read(impl_key, 'implementation.txt')}\n"
+            f"   ```\n"
+            f"4. Write a consolidated `AUDIT_REPORT.md` with:\n"
+            f"   - **Executive Summary**: 2–3 sentence overall assessment\n"
+            f"   - **Critical Findings** (must fix before deployment)\n"
+            f"   - **High Priority Findings** (fix in next sprint)\n"
+            f"   - **Medium / Low Priority Findings** (track as tech debt)\n"
+            f"   - **Positive Observations**: what the code does well\n"
+            f"   - **Recommended Next Steps**: ordered action items\n"
+            f"5. Store the audit report in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_py_write(report_key, 'AUDIT_REPORT.md')}\n"
+            f"   ```\n"
+            f"6. Call /task-complete with: 'Audit complete — N findings (C critical, H high, M medium, L low)'\n"
+        )
+
+        # Submit tasks — implementer first (no deps), auditors fan-out, synthesizer fan-in
+        task_impl = await orchestrator.submit_task(
+            prompt=implementer_prompt,
+            required_tags=body.implementer_tags or None,
+            timeout=body.agent_timeout,
+        )
+        task_security = await orchestrator.submit_task(
+            prompt=security_auditor_prompt,
+            required_tags=body.security_auditor_tags or None,
+            depends_on=[task_impl.id],
+            timeout=body.agent_timeout,
+        )
+        task_perf = await orchestrator.submit_task(
+            prompt=performance_auditor_prompt,
+            required_tags=body.performance_auditor_tags or None,
+            depends_on=[task_impl.id],
+            timeout=body.agent_timeout,
+        )
+        task_synth = await orchestrator.submit_task(
+            prompt=synthesizer_prompt,
+            required_tags=body.synthesizer_tags or None,
+            depends_on=[task_security.id, task_perf.id],
+            timeout=body.agent_timeout,
+            reply_to=body.reply_to,
+        )
+
+        task_ids = {
+            "implementer": task_impl.id,
+            "security_auditor": task_security.id,
+            "performance_auditor": task_perf.id,
+            "synthesizer": task_synth.id,
+        }
+
+        all_ids = list(task_ids.values())
+        run = wm.submit(name=wf_name, task_ids=all_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids,
+            "scratchpad_prefix": prefix,
+            "audit_focus": body.audit_focus,
         }
 
     return router

@@ -1,0 +1,102 @@
+# Code Audit Workflow Template
+# =============================
+# 4-agent parallel audit pipeline that uses specialist auditors to review
+# code quality from security and performance perspectives.
+#
+# Pipeline:
+#   implementer → [security-auditor ∥ performance-auditor] → synthesizer
+#
+# 1. implementer      : writes the feature implementation
+# 2. security-auditor : audits for OWASP Top 10 / CWE vulnerabilities (parallel)
+# 3. performance-auditor: audits for algorithmic complexity / I/O / caching (parallel)
+# 4. synthesizer      : consolidates findings into a prioritised AUDIT_REPORT.md
+#
+# Agent roles:
+#   implementer         → role: coder    → loads agent_plugin/docs/coder.md
+#   security-auditor    → role: reviewer → loads agent_plugin/docs/reviewer.md
+#   performance-auditor → role: reviewer → loads agent_plugin/docs/reviewer.md
+#   synthesizer         → role: reviewer → loads agent_plugin/docs/reviewer.md
+#
+# Scratchpad keys (written by agents):
+#   {scratchpad_prefix}_impl              — implementation (code text)
+#   {scratchpad_prefix}_security_audit    — security audit findings
+#   {scratchpad_prefix}_performance_audit — performance audit findings
+#   {scratchpad_prefix}_audit_report      — synthesiser's prioritised report
+#
+# Endpoint: POST /workflows/code-audit
+# References:
+#   RepoAudit arXiv:2501.18160 ICML 2025
+#   iAudit ICSE 2025
+#   Automating Security Audit Using LLMs arXiv:2505.10732 (2025)
+
+workflow:
+  endpoint: /workflows/code-audit
+
+# --- Defaults (parameter inheritance) ---
+defaults:
+  language: python
+  audit_focus: [security, performance]
+  agent_timeout: 300
+  scratchpad_prefix: ""
+  implementer_tags: []
+  security_auditor_tags: []
+  performance_auditor_tags: []
+  synthesizer_tags: []
+  reply_to: null
+
+# --- Required fields ---
+
+# Feature to implement and audit
+feature: "a REST API endpoint with input validation and database access"
+
+# --- Optional fields ---
+
+# Programming language
+language: python
+
+# Audit focus areas (controls which auditors are spawned)
+audit_focus: [security, performance]
+
+# Per-task timeout in seconds
+agent_timeout: 300
+
+# Agent capability routing (empty = any available agent)
+implementer_tags: []
+security_auditor_tags: []
+performance_auditor_tags: []
+synthesizer_tags: []
+
+# Auto-generated when empty (format: "audit_{8-hex}")
+scratchpad_prefix: ""
+
+# If set, synthesizer's RESULT is delivered to this agent's mailbox
+reply_to: null
+
+# --- Agent config example ---
+# agents:
+#   - id: implementer
+#     type: claude_code
+#     role: coder
+#     isolate: true
+#   - id: security-auditor
+#     type: claude_code
+#     role: reviewer
+#     isolate: true
+#   - id: performance-auditor
+#     type: claude_code
+#     role: reviewer
+#     isolate: true
+#   - id: synthesizer
+#     type: claude_code
+#     role: reviewer
+#     isolate: true
+
+# --- Curl example ---
+# curl -s -X POST http://localhost:8000/workflows/code-audit \
+#   -H "Content-Type: application/json" \
+#   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+#   -d '{
+#     "feature": "a user authentication module with JWT tokens",
+#     "language": "python",
+#     "audit_focus": ["security", "performance"]
+#   }'
