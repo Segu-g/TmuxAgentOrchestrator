@@ -601,8 +601,20 @@ def create_app(
     app.include_router(
         build_agents_router(orchestrator, auth, episode_store=_episode_store),
     )
+    # Resolve the workflow templates directory (examples/workflows/).
+    # The router auto-discovers phase-based YAML templates for
+    # GET /workflows/templates and POST /workflows/from-template.
+    # Reference: DESIGN.md §10.103 (v1.2.28)
+    from pathlib import Path as _PathApp  # noqa: PLC0415
+    _app_templates_dir = _PathApp(__file__).resolve().parents[3] / "examples" / "workflows"
+
     app.include_router(
-        build_workflows_router(orchestrator, auth, scratchpad=_scratchpad),
+        build_workflows_router(
+            orchestrator,
+            auth,
+            scratchpad=_scratchpad,
+            templates_dir=_app_templates_dir,
+        ),
     )
     app.include_router(
         build_scratchpad_router(auth, _scratchpad),

@@ -2407,6 +2407,60 @@
         "title": "WebhookCreate",
         "type": "object"
       },
+      "WorkflowFromTemplateSubmit": {
+        "description": "Request body for POST /workflows/from-template \u2014 YAML-driven workflow execution.\n\nLoads a phase-based YAML template from ``examples/workflows/generic/``\n(or the root ``examples/workflows/`` directory), substitutes\n``{variable}`` placeholders in prompt strings, and submits the rendered\nworkflow as a standard ``WorkflowSubmit`` (phases mode).\n\nThis enables new workflows to be added via YAML alone \u2014 no Python code\nchanges are required.\n\nAttributes\n----------\ntemplate:\n    Template identifier without the ``.yaml`` extension.\n    Examples: ``\"tdd\"``, ``\"debate\"``, ``\"review\"``.\n    The loader searches ``examples/workflows/{template}.yaml`` first,\n    then ``examples/workflows/generic/{template}.yaml``.\nvariables:\n    Mapping of ``{placeholder}`` names to their string values.\n    All variables declared as ``required: true`` in the template must\n    be supplied here.\n    Example: ``{\"feature\": \"binary search algorithm\", \"language\": \"python\"}``\nreply_to:\n    Agent ID that receives the RESULT of the workflow's last phase in its\n    mailbox.  When set, the orchestrator sends ``__MSG__:{id}`` to that\n    agent's tmux pane on completion.\nagent_timeout:\n    Per-phase task timeout override in seconds.  When provided, overrides\n    the ``defaults.timeout`` value from the YAML template.\npriority:\n    Task priority for all phases (lower = dispatched first, default ``0``).\n\nDesign references:\n- Argo Workflows parameters: ``{{inputs.parameters.message}}`` binding.\n  https://argo-workflows.readthedocs.io/en/latest/walk-through/parameters/\n- Azure Pipelines template variables: ``${{ parameters.x }}`` substitution.\n  https://learn.microsoft.com/en-us/azure/devops/pipelines/process/templates\n- Python ``str.format_map()``: lightweight stdlib variable substitution;\n  chosen over Jinja2 to avoid an extra dependency and reduce complexity.\n- GitHub Actions YAML anchors and workflow templates (2025-09-18 changelog).\n- DESIGN.md \u00a710.103 (v1.2.28)",
+        "properties": {
+          "agent_timeout": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Per-phase timeout override in seconds.",
+            "title": "Agent Timeout"
+          },
+          "priority": {
+            "default": 0,
+            "description": "Task priority for all phases (lower = dispatched first).",
+            "title": "Priority",
+            "type": "integer"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Agent ID that receives the RESULT of the last phase in its mailbox.",
+            "title": "Reply To"
+          },
+          "template": {
+            "description": "Template identifier without '.yaml' extension. Searched in examples/workflows/ then examples/workflows/generic/.",
+            "title": "Template",
+            "type": "string"
+          },
+          "variables": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Variable substitution mapping. All required template variables must be supplied here.",
+            "title": "Variables",
+            "type": "object"
+          }
+        },
+        "required": [
+          "template"
+        ],
+        "title": "WorkflowFromTemplateSubmit",
+        "type": "object"
+      },
       "WorkflowSubmit": {
         "description": "Request body for POST /workflows.\n\nSupports two mutually exclusive submission modes:\n\n1. **tasks= (legacy)**: Submit a raw DAG of :class:`WorkflowTaskSpec` nodes.\n   Backward-compatible with the original ``POST /workflows`` API.\n\n2. **phases= (new)**: Submit a declarative list of :class:`PhaseItemModel`\n   objects (each item may be a :class:`PhaseSpecModel` or a\n   :class:`LoopBlockModel`).  The server expands phases into a task DAG\n   automatically.\n\nExactly one of ``tasks`` or ``phases`` must be provided.  Providing neither\nraises HTTP 422.\n\nDesign references:\n- arXiv:2512.19769 (PayPal DSL 2025): declarative pattern reduces dev time 60%\n- \u00a712\u300c\u30ef\u30fc\u30af\u30d5\u30ed\u30fc\u8a2d\u8a08\u306e\u5c64\u69cb\u9020\u300d\u5c641 \u5ba3\u8a00\u7684\u30e2\u30fc\u30c9\n- DESIGN.md \u00a710.15 (v0.48.0)\n- DESIGN.md \u00a710.76 (v1.1.44 \u2014 LoopBlock support)",
         "properties": {
@@ -6050,6 +6104,47 @@
         "summary": "Submit a multi-round Delphi expert-consensus workflow"
       }
     },
+    "/workflows/from-template": {
+      "post": {
+        "description": "Load a phase-based YAML template, substitute variables, and submit.\n\nThis endpoint lets operators add new multi-agent workflows by writing\na YAML file \u2014 no Python code changes are required.\n\n**Template resolution order:**\n1. ``{templates_dir}/{template}.yaml``\n2. ``{templates_dir}/generic/{template}.yaml``\n\n**Variable substitution:**\nAll ``{variable}`` placeholders in phase ``name``, ``context``, and\nstring list elements are replaced with the values from ``variables``.\nRequired variables (declared in the template's ``variables:`` section)\nmust all be provided; omitting one raises HTTP 422.\n\n**Rendering pipeline:**\nTemplate \u2192 variable substitution \u2192 ``WorkflowSubmit`` (phases mode) \u2192\nphase expansion \u2192 DAG validation \u2192 task submission.\n\nReturns the same response structure as ``POST /workflows``:\n- ``workflow_id``: UUID for status polling\n- ``name``: rendered workflow name\n- ``task_ids``: ``local_id \u2192 global_task_id`` mapping\n- ``template``: the template identifier that was used\n\nDesign references:\n- Argo Workflows parameters and WorkflowTemplates\n  https://argo-workflows.readthedocs.io/en/latest/workflow-templates/\n- Azure Pipelines template parameters\n  https://learn.microsoft.com/en-us/azure/devops/pipelines/process/templates\n- Python ``str.format_map()`` \u2014 lightweight stdlib substitution\n- GitHub Actions YAML anchors and workflow templates (changelog 2025-09-18)\n- DESIGN.md \u00a710.103 (v1.2.28)",
+        "operationId": "submit_workflow_from_template_workflows_from_template_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowFromTemplateSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Workflow From Template Workflows From Template Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a workflow from a YAML template"
+      }
+    },
     "/workflows/fulldev": {
       "post": {
         "description": "Submit a 5-agent Full Software Development Lifecycle Workflow DAG.\n\nPipeline (each step depends_on the previous):\n\n1. **spec-writer**: writes a precise feature specification (SPEC.md) with\n   functional requirements and acceptance criteria; stores it to scratchpad.\n2. **architect**: reads the spec, writes an architecture/design document\n   (DESIGN.md or ADR) with component breakdown and interface definitions;\n   stores it to scratchpad.\n3. **tdd-test-writer** (RED): reads spec + design, writes failing pytest\n   tests that codify acceptance criteria; stores test file path to scratchpad.\n4. **tdd-implementer** (GREEN): reads spec + test file path, writes the\n   minimal implementation that makes all tests pass; stores impl path.\n5. **reviewer**: reads spec, tests, and implementation; writes a structured\n   code review (REVIEW.md) categorising blocking/non-blocking issues.\n\nAll artifacts are passed via the shared scratchpad (Blackboard pattern).\nScratchpad keys use underscores (not slashes) as namespace separator.\n\nReturns:\n- ``workflow_id``: workflow run UUID for status polling\n- ``name``: human-readable name (``fulldev/<feature>``)\n- ``task_ids``: dict with keys ``spec_writer``, ``architect``,\n  ``test_writer``, ``implementer``, ``reviewer`` mapping to global task IDs\n- ``scratchpad_prefix``: scratchpad namespace for this run\n  (e.g. ``fulldev_{run_id[:8]}``)\n\nDesign references:\n- MetaGPT arXiv:2308.00352 (2023/2024): PM \u2192 Architect \u2192 Engineer SOP pipeline.\n- AgentMesh arXiv:2507.19902 (2025): Planner \u2192 Coder \u2192 Debugger \u2192 Reviewer.\n- arXiv:2508.00083 \"Survey on Code Generation with LLM-based Agents\" (2025).\n- arXiv:2505.16339 \"Rethinking Code Review Workflows\" (2025).\n- DESIGN.md \u00a710.16 (v0.42.0)",
@@ -6622,6 +6717,27 @@
           }
         },
         "summary": "Submit a 3-agent TDD workflow (Red\u2192Green\u2192Refactor)"
+      }
+    },
+    "/workflows/templates": {
+      "get": {
+        "description": "Return a catalogue of phase-based YAML templates available for\n``POST /workflows/from-template``.\n\nEach entry includes:\n- ``template``: identifier to pass as the ``template`` field\n- ``name``: human-readable name (may contain ``{variable}`` placeholders)\n- ``description``: short description of the workflow\n- ``variables``: all declared variable names\n- ``required_variables``: variables that MUST be supplied in the request\n- ``path``: relative path within the templates directory\n\nDesign references:\n- Argo Workflows ``WorkflowTemplate`` listing (kubectl get workflowtemplates)\n- DESIGN.md \u00a710.103 (v1.2.28)",
+        "operationId": "list_workflow_templates_workflows_templates_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response List Workflow Templates Workflows Templates Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List available YAML workflow templates"
       }
     },
     "/workflows/{workflow_id}": {

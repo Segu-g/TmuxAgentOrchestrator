@@ -1,0 +1,75 @@
+# Generic Code Review Workflow Template (phase-based, for POST /workflows/from-template)
+# =======================================================================================
+# 2-agent pipeline: coder -> reviewer.
+#
+# Variables (required):
+#   task       — description of the coding task (e.g. "implement a Fibonacci function")
+#
+# Variables (optional):
+#   language   — programming language (default: python)
+#
+# Usage:
+#   POST /workflows/from-template
+#   {"template": "review", "variables": {"task": "implement quicksort", "language": "python"}}
+#
+# References:
+#   Microsoft Research "CodeReviewer" arXiv:2203.09095 (2022)
+#   Automating Code Review Activities arXiv:2101.02518 (2021)
+
+name: "Review: {task}"
+description: "2-agent code review pipeline: coder -> reviewer"
+
+variables:
+  task:
+    description: "Coding task description"
+    required: true
+  language:
+    description: "Programming language"
+    required: false
+    default: "python"
+
+defaults:
+  timeout: 300
+  pattern: "single"
+
+phases:
+  - name: "coder"
+    pattern: "single"
+    context: |
+      You are the CODER agent in a code review pipeline.
+
+      Task: {task}
+      Language: {language}
+
+      Your task:
+      1. Implement the solution for '{task}' in {language}.
+      2. Write clean, well-structured code with clear function/variable names.
+      3. Add docstrings/comments explaining key decisions.
+      4. Save the implementation as `solution.py`.
+      5. Write basic tests in `test_solution.py` and run them.
+      6. Call /task-complete with: 'Implementation complete. File: solution.py'
+
+  - name: "reviewer"
+    pattern: "single"
+    depends_on: ["coder"]
+    context: |
+      You are the REVIEWER agent in a code review pipeline.
+
+      Task being reviewed: {task}
+      Language: {language}
+
+      Your task:
+      1. Read `solution.py` written by the coder.
+      2. Review the code for:
+         - Correctness: does it solve the task correctly?
+         - Code quality: naming, structure, readability
+         - Edge cases: are they handled?
+         - Performance: any obvious inefficiencies?
+         - Best practices: follows {language} conventions?
+      3. Write a detailed code review to `REVIEW.md` with:
+         - Overall rating (1-5 stars)
+         - List of issues found (severity: high/medium/low)
+         - Specific suggestions for improvement
+         - Positive highlights
+      4. If issues exist, write the corrected version to `solution_revised.py`.
+      5. Call /task-complete with: 'Review complete. Rating: N/5. Issues: N high, N medium, N low.'

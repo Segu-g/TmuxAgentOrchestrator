@@ -38,6 +38,7 @@ from tmux_orchestrator.web.schemas import (
     SpecFirstWorkflowSubmit,
     SocraticWorkflowSubmit,
     TddWorkflowSubmit,
+    WorkflowFromTemplateSubmit,
     WorkflowSubmit,
 )
 
@@ -46,6 +47,7 @@ def build_workflows_router(
     orchestrator: Any,
     auth: Callable,
     scratchpad: dict | None = None,
+    templates_dir: Any = None,
 ) -> APIRouter:
     """Build and return the workflows APIRouter.
 
@@ -55,7 +57,27 @@ def build_workflows_router(
         The :class:`~tmux_orchestrator.orchestrator.Orchestrator` instance.
     auth:
         Authentication dependency callable (combined session + API key).
+    scratchpad:
+        Shared scratchpad store (for loop-until condition evaluation).
+    templates_dir:
+        ``pathlib.Path`` pointing to the workflow templates directory
+        (e.g. ``examples/workflows/``).  When ``None``, the loader falls
+        back to the package-relative default
+        (``<repo_root>/examples/workflows/``).
+        Design reference: DESIGN.md §10.103 (v1.2.28)
     """
+    from pathlib import Path as _Path  # noqa: PLC0415
+
+    # Resolve templates_dir: prefer the caller-supplied value; otherwise
+    # fall back to the package-relative ``examples/workflows/`` directory.
+    if templates_dir is not None:
+        _templates_dir: _Path = _Path(templates_dir)
+    else:
+        # Walk up from this file: routers/ → web/ → tmux_orchestrator/ → src/ → repo/
+        _this_file = _Path(__file__).resolve()
+        _repo_root = _this_file.parents[4]  # TmuxAgentOrchestrator/
+        _templates_dir = _repo_root / "examples" / "workflows"
+
     router = APIRouter()
 
     @router.post(
@@ -3276,7 +3298,46 @@ def build_workflows_router(
         Design reference: DESIGN.md §10.20 (v0.25.0).
         """
         return orchestrator.get_workflow_manager().list_all()
-    
+
+    # ------------------------------------------------------------------
+    # GET /workflows/templates — MUST be defined BEFORE /workflows/{id}
+    # to prevent FastAPI's path parameter from capturing "templates" as a
+    # workflow_id value.
+    # Design reference: DESIGN.md §10.103 (v1.2.28)
+    # ------------------------------------------------------------------
+
+    @router.get(
+        "/workflows/templates",
+        summary="List available YAML workflow templates",
+        dependencies=[Depends(auth)],
+    )
+    async def list_workflow_templates() -> dict:
+        """Return a catalogue of phase-based YAML templates available for
+        ``POST /workflows/from-template``.
+
+        Each entry includes:
+        - ``template``: identifier to pass as the ``template`` field
+        - ``name``: human-readable name (may contain ``{variable}`` placeholders)
+        - ``description``: short description of the workflow
+        - ``variables``: all declared variable names
+        - ``required_variables``: variables that MUST be supplied in the request
+        - ``path``: relative path within the templates directory
+
+        Design references:
+        - Argo Workflows ``WorkflowTemplate`` listing (kubectl get workflowtemplates)
+        - DESIGN.md §10.103 (v1.2.28)
+        """
+        from tmux_orchestrator.infrastructure.workflow_loader import list_templates  # noqa: PLC0415
+
+        try:
+            templates = list_templates(_templates_dir)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to enumerate templates: {exc}",
+            )
+        return {"templates": templates, "templates_dir": str(_templates_dir)}
+
     @router.get(
         "/workflows/{workflow_id}",
         summary="Get a specific workflow run status",
@@ -6141,5 +6202,95 @@ def build_workflows_router(
             "scratchpad_prefix": prefix,
             "refactor_goals": body.refactor_goals,
         }
+
+    # ------------------------------------------------------------------
+    # POST /workflows/from-template — YAML-driven workflow execution
+    # (GET /workflows/templates is registered above, before /workflows/{id})
+    # Design reference: DESIGN.md §10.103 (v1.2.28)
+    # ------------------------------------------------------------------
+
+    @router.post(
+        "/workflows/from-template",
+        summary="Submit a workflow from a YAML template",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_workflow_from_template(
+        body: WorkflowFromTemplateSubmit,
+    ) -> dict:
+        """Load a phase-based YAML template, substitute variables, and submit.
+
+        This endpoint lets operators add new multi-agent workflows by writing
+        a YAML file — no Python code changes are required.
+
+        **Template resolution order:**
+        1. ``{templates_dir}/{template}.yaml``
+        2. ``{templates_dir}/generic/{template}.yaml``
+
+        **Variable substitution:**
+        All ``{variable}`` placeholders in phase ``name``, ``context``, and
+        string list elements are replaced with the values from ``variables``.
+        Required variables (declared in the template's ``variables:`` section)
+        must all be provided; omitting one raises HTTP 422.
+
+        **Rendering pipeline:**
+        Template → variable substitution → ``WorkflowSubmit`` (phases mode) →
+        phase expansion → DAG validation → task submission.
+
+        Returns the same response structure as ``POST /workflows``:
+        - ``workflow_id``: UUID for status polling
+        - ``name``: rendered workflow name
+        - ``task_ids``: ``local_id → global_task_id`` mapping
+        - ``template``: the template identifier that was used
+
+        Design references:
+        - Argo Workflows parameters and WorkflowTemplates
+          https://argo-workflows.readthedocs.io/en/latest/workflow-templates/
+        - Azure Pipelines template parameters
+          https://learn.microsoft.com/en-us/azure/devops/pipelines/process/templates
+        - Python ``str.format_map()`` — lightweight stdlib substitution
+        - GitHub Actions YAML anchors and workflow templates (changelog 2025-09-18)
+        - DESIGN.md §10.103 (v1.2.28)
+        """
+        from tmux_orchestrator.infrastructure.workflow_loader import (  # noqa: PLC0415
+            load_workflow_template,
+            render_template,
+        )
+
+        # --- Load template ---
+        try:
+            tmpl = load_workflow_template(body.template, _templates_dir)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        except (ValueError, ImportError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+        # --- Render template with variable substitution ---
+        try:
+            workflow_dict = render_template(
+                tmpl,
+                body.variables,
+                agent_timeout=body.agent_timeout,
+                priority=body.priority,
+                reply_to=body.reply_to,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
+        # --- Parse into WorkflowSubmit and delegate to the core handler ---
+        try:
+            workflow_submit = WorkflowSubmit.model_validate(workflow_dict)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Rendered template failed schema validation: {exc}",
+            )
+
+        # Delegate to the core submit_workflow handler.
+        # We call it directly rather than re-posting to /workflows so that
+        # we stay in-process and share the same scratchpad / orchestrator state.
+        # submit_workflow is an inner async function captured by this closure.
+        result: dict = await submit_workflow(workflow_submit)  # type: ignore[arg-type]
+        result["template"] = body.template
+        return result
 
     return router

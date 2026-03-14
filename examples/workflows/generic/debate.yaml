@@ -1,0 +1,88 @@
+# Generic Debate Workflow Template (phase-based, for POST /workflows/from-template)
+# ===================================================================================
+# 3-role debate: Advocate / Critic / Judge.
+#
+# Variables (required):
+#   topic      — question or proposal to debate (e.g. "REST vs GraphQL")
+#
+# Variables (optional):
+#   position   — optional stance for the advocate (default: "in favour")
+#
+# Usage:
+#   POST /workflows/from-template
+#   {"template": "debate", "variables": {"topic": "REST vs GraphQL for this API"}}
+#
+# References:
+#   Du et al. ICML 2024 arXiv:2305.14325 — Improving Factuality and Reasoning in LLMs via Multiagent Debate
+#   DEBATE ACL 2024 arXiv:2405.09935
+
+name: "Debate: {topic}"
+description: "3-role debate workflow: advocate -> critic -> judge"
+
+variables:
+  topic:
+    description: "Topic or design question to debate"
+    required: true
+  position:
+    description: "Stance for the advocate agent"
+    required: false
+    default: "in favour"
+
+defaults:
+  timeout: 300
+  pattern: "single"
+
+phases:
+  - name: "advocate"
+    pattern: "single"
+    context: |
+      You are the ADVOCATE agent in a structured debate.
+
+      Topic: {topic}
+      Your position: {position}
+
+      Your task:
+      1. Build the strongest possible case for your position on the topic.
+      2. Present 3-5 clear arguments with supporting reasoning.
+      3. Anticipate the main counter-arguments and address them pre-emptively.
+      4. Write your argument to `advocate.md`.
+      5. Call /task-complete with a one-line summary of your strongest argument.
+
+  - name: "critic"
+    pattern: "single"
+    depends_on: ["advocate"]
+    context: |
+      You are the CRITIC agent in a structured debate.
+
+      Topic: {topic}
+
+      Your task:
+      1. Read `advocate.md` written by the advocate agent.
+      2. Identify weaknesses, flaws, and gaps in the advocate's arguments.
+      3. Present the strongest counter-arguments to the advocate's position.
+      4. Propose an alternative viewpoint with supporting reasoning.
+      5. Write your critique to `critic.md`.
+      6. Call /task-complete with a one-line summary of your strongest counter-argument.
+
+  - name: "judge"
+    pattern: "single"
+    depends_on: ["critic"]
+    context: |
+      You are the JUDGE agent in a structured debate.
+
+      Topic: {topic}
+
+      Your task:
+      1. Read `advocate.md` and `critic.md`.
+      2. Evaluate both sides objectively using these criteria:
+         - Strength of evidence
+         - Logical consistency
+         - Practical applicability
+         - Completeness of argument
+      3. Identify which arguments from each side were strongest.
+      4. Render a verdict: which position is better supported, and why.
+      5. Write your decision to `DECISION.md` including:
+         - Verdict (in favour / against / balanced)
+         - Strongest arguments from each side
+         - Final recommendation
+      6. Call /task-complete with: 'Verdict: [verdict] — [one sentence reason]'

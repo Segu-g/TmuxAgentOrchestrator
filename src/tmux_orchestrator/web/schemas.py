@@ -2249,3 +2249,77 @@ class TaskTemplateSubmit(BaseModel):
     required_tags: list[str] = []
     timeout: int | None = None
     reply_to: str | None = None
+
+
+class WorkflowFromTemplateSubmit(BaseModel):
+    """Request body for POST /workflows/from-template — YAML-driven workflow execution.
+
+    Loads a phase-based YAML template from ``examples/workflows/generic/``
+    (or the root ``examples/workflows/`` directory), substitutes
+    ``{variable}`` placeholders in prompt strings, and submits the rendered
+    workflow as a standard ``WorkflowSubmit`` (phases mode).
+
+    This enables new workflows to be added via YAML alone — no Python code
+    changes are required.
+
+    Attributes
+    ----------
+    template:
+        Template identifier without the ``.yaml`` extension.
+        Examples: ``"tdd"``, ``"debate"``, ``"review"``.
+        The loader searches ``examples/workflows/{template}.yaml`` first,
+        then ``examples/workflows/generic/{template}.yaml``.
+    variables:
+        Mapping of ``{placeholder}`` names to their string values.
+        All variables declared as ``required: true`` in the template must
+        be supplied here.
+        Example: ``{"feature": "binary search algorithm", "language": "python"}``
+    reply_to:
+        Agent ID that receives the RESULT of the workflow's last phase in its
+        mailbox.  When set, the orchestrator sends ``__MSG__:{id}`` to that
+        agent's tmux pane on completion.
+    agent_timeout:
+        Per-phase task timeout override in seconds.  When provided, overrides
+        the ``defaults.timeout`` value from the YAML template.
+    priority:
+        Task priority for all phases (lower = dispatched first, default ``0``).
+
+    Design references:
+    - Argo Workflows parameters: ``{{inputs.parameters.message}}`` binding.
+      https://argo-workflows.readthedocs.io/en/latest/walk-through/parameters/
+    - Azure Pipelines template variables: ``${{ parameters.x }}`` substitution.
+      https://learn.microsoft.com/en-us/azure/devops/pipelines/process/templates
+    - Python ``str.format_map()``: lightweight stdlib variable substitution;
+      chosen over Jinja2 to avoid an extra dependency and reduce complexity.
+    - GitHub Actions YAML anchors and workflow templates (2025-09-18 changelog).
+    - DESIGN.md §10.103 (v1.2.28)
+    """
+
+    template: str = Field(
+        description=(
+            "Template identifier without '.yaml' extension. "
+            "Searched in examples/workflows/ then examples/workflows/generic/."
+        )
+    )
+    variables: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Variable substitution mapping. "
+            "All required template variables must be supplied here."
+        ),
+    )
+    reply_to: str | None = Field(
+        default=None,
+        description=(
+            "Agent ID that receives the RESULT of the last phase in its mailbox."
+        ),
+    )
+    agent_timeout: int | None = Field(
+        default=None,
+        ge=1,
+        description="Per-phase timeout override in seconds.",
+    )
+    priority: int = Field(
+        default=0,
+        description="Task priority for all phases (lower = dispatched first).",
+    )

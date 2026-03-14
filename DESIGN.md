@@ -385,6 +385,7 @@ Session: my-project
 | 低 | **ワークフローテンプレートライブラリ (`examples/workflows/`)** — TDD / PairCoder / CleanArch / DDD / SpecFirst / Debate / ADR の各ワークフローを `POST /workflows` で直接投入できる自己完結 YAML として `examples/workflows/` に収録する。各 YAML はエージェント数・ロール・`system_prompt_file` 参照・`context_files`・`required_tags` を含む。`examples/debate_config.yaml`（異種エージェント討論グループ設定）を含む | CrewAI の YAML-driven workflow approach (2025) が「ドキュメントとしての設定ファイル」を普及させた。各ワークフローエンドポイント実装後に対応 YAML を追加していく継続的タスク。A-HMAD Springer 2025 + ChatEval ICLR 2024: 異種構成エージェントと役割固定化が討論品質を決定する最重要因子。 |
 | ~~新規~~ | ~~**`POST /workflows/mob-review`** — N 並列専門レビュアー + シンセサイザー DAG~~ | ~~完了 v1.1.20 — `MobReviewWorkflowSubmit`、4観点 (security/performance/maintainability/testing) 並列 + synthesizer。ChatEval (ICLR 2024) の独自ペルソナ知見を適用。41 tests PASSED。29/30 デモ PASS。~~ |
 | ~~新規~~ | ~~**`POST /workflows/refactor`** — analyzer → refactorer → verifier 3エージェント リファクタリングパイプライン~~ | ~~完了 v1.2.27 — `RefactorWorkflowSubmit`, `refactor_goals` (6種), `{prefix}_analysis` + `{prefix}_refactored` + `{prefix}_verification` スクラッチパッド。60 tests PASSED。RefAgent arXiv:2511.03153 / RefactorGPT PeerJ cs-3257 / MUARF ICSE 2025 の設計原則を適用。~~ |
+| ~~新規~~ | ~~**`POST /workflows/from-template` + `GET /workflows/templates` — YAML駆動ワークフローテンプレート実行**~~ | ~~完了 v1.2.28 — `WorkflowFromTemplateSubmit` スキーマ。`infrastructure/workflow_loader.py` (`load_workflow_template` / `render_template` / `list_templates`)。`examples/workflows/generic/` に `tdd.yaml` / `debate.yaml` / `review.yaml` 3テンプレート追加。`str.format_map()` による変数置換。61 tests PASSED。DESIGN.md §10.103。~~ |
 | 低 | **`DECISION.md` 標準フォーマットとスクラッチパッド書き込み規約** — `debate` / `adr` / `delphi` / `redblue` / `socratic` の各ワークフローが出力を書き込む共通フォーマット (title / status / context / options_considered / decision / rationale / dissenting_opinions / consequences / references) を定義し、`GET /scratchpad/DECISION` で取得できるようにする | SocraSynth arXiv:2402.06634: 討論から「構造化された結論」を抽出する段階が必須。RT-AID ScienceDirect 2025: 各ラウンドの中間出力が最終合意文書の品質を高める。既存の `GET/PUT /scratchpad/{key}` (v0.16.0) + `context_files` (v0.11.0) を組み合わせて実現可能。各ワークフロー完成後に規約を策定する。 |
 | 低 | **構造化デバッグ: トレースリプレイ CLI (`tmux-orchestrator replay`)** — `ResultStore` の JSONL + bus イベントログを組み合わせて過去の実行シーケンスを再現し、どのステップで失敗したかを特定できる CLI コマンドを追加する | LangGraph + LangSmith の replay 機能は業界標準デバッグ手法として認識 (LangChain docs 2025)。Galileo AI "Why Multi-Agent LLM Systems Fail" (2025): 「非決定的挙動のリプレイ不可」を主要問題として挙げる。チェックポイント永続化実装後の自然な拡張。 |
 
@@ -463,5 +464,56 @@ Session: my-project
 | **高** | **メールボックスをセッション単位で分離** — 同一プロジェクト内で複数のオーケストレーターセッションが並行動作する場合に備え、`{mailbox_dir}/{session_name}/{agent_id}/inbox/` の階層構造を維持しつつ、`session_name` をユニークな値（UUID または設定値）にする。現状は固定文字列 `"orchestrator"` がデフォルトで複数セッション間でメッセージが混在する可能性がある | `OrchestratorConfig.session_name` が未設定の場合、`f"session_{uuid4().hex[:8]}"` を自動生成する。設定ファイルに `session_name:` を明示することで再現性のある名前も使える |
 | **中** | **メールボックスの自動クリーンアップ** — セッション終了時 (`Orchestrator.stop()`) にメールボックスディレクトリを自動削除するオプションを追加する。現状は明示的にディレクトリを削除しないため、長期間運用すると未読メッセージが蓄積する | `OrchestratorConfig.mailbox_cleanup_on_stop: bool = True`。`Orchestrator.stop()` で `shutil.rmtree(mailbox_dir / session_name)` を実行 |
 | **低** | **メールボックスパスを CLAUDE.md エージェントガイドに明記** — エージェントが自分のメールボックスパスを確認できるよう、`__orchestrator_context__{agent_id}__.json` の `mailbox_dir` フィールドの説明と、実際のパス構成例 (`{mailbox_dir}/{session_name}/{agent_id}/inbox/`) を CLAUDE.md の "Receiving Messages" セクションに追記する | CLAUDE.md 更新のみ |
+
+---
+
+## §10.103 — v1.2.28 研究記録: YAML駆動ワークフローテンプレート実行
+
+### 選択根拠
+
+ユーザーから「ワークフローを追加するためにコードを書かなければならないのか」という質問を受けた。現状のアーキテクチャでは各ワークフロー（tdd, debate, refactor等）に専用のPythonエンドポイントが必要で、新規ワークフロー追加には必ずコード変更が伴う。この制約を解消するために汎用テンプレート実行エンドポイントを実装した。
+
+v1.2.27（refactor ワークフロー）の直後として優先度が高い。既存の `phases=` モードの `WorkflowSubmit` をそのまま活用でき、変数置換という薄い層を追加するだけで実現できる。
+
+### 調査結果
+
+**1. Argo Workflows パラメータバインディング**
+- URL: https://argo-workflows.readthedocs.io/en/latest/walk-through/parameters/ (2025)
+- `{{inputs.parameters.message}}` 構文でテンプレートパラメータを埋め込む。WorkflowTemplate は再利用可能なテンプレートとして定義し、Workflow から `templateRef` で参照する。
+- 変数はダブルブレース `{{variable}}` で、本実装の `{variable}` (Python str.format_map) とは異なる。
+
+**2. Azure Pipelines テンプレート変数置換**
+- URL: https://learn.microsoft.com/en-us/azure/devops/pipelines/process/templates (2025)
+- `${{ parameters.x }}` 構文。テンプレートファイルで `parameters:` セクションを宣言し、各パラメータに型・デフォルト値・必須フラグを付与できる。
+- 本実装の `variables:` セクション（`required: true/false`、`default: ""`）はこのパターンを参考にした。
+
+**3. ワークフロー設定駆動 vs コード駆動の比較**
+- URL: https://procycons.com/en/blogs/workflow-orchestration-platforms-comparison-2025/ (2025)
+- Kestra（YAML設定駆動）vs Temporal（コード駆動）の比較。YAML駆動は「ドキュメントとしての設定ファイル」を実現し、非エンジニアもワークフローを追加・修正できる。
+- 複雑な変換ロジックはコードで実装し、オーケストレーション定義はYAMLに委ねるハイブリッドアプローチが推奨されている（Cloud Workflows best practices）。
+
+### 設計決定
+
+**変数置換エンジン**: Jinja2 ではなく Python 標準ライブラリの `str.format_map()` を採用。
+- Jinja2 は追加依存関係が必要で、テンプレートループ・条件分岐などの複雑な機能は今回不要。
+- `str.format_map()` はカスタム辞書クラス（`_MissingKeyMap`）で未定義キーを即座に ValueError に変換できる。
+- プロンプト文字列中の `{{literal brace}}` が Jinja2 では `{{ '{{' }}` のようにエスケープが必要だが、format_map では `{{` が `{` に変換されるため既存プロンプトとの互換性が高い。
+
+**テンプレート配置**: `examples/workflows/generic/` サブディレクトリに phase-based テンプレートを配置。
+- ルートレベル (`examples/workflows/`) の既存 YAML は専用エンドポイント用のパラメータファイルで、`phases:` キーを持たない。
+- `generic/` サブディレクトリを検索優先することで、新旧フォーマットが共存できる。
+
+**CleanArchitecture 層配置**: `infrastructure/workflow_loader.py` に配置（`application/` ではなく）。
+- `yaml` ライブラリは `application/` 層では禁止されている（`test_application_purity.py` の規則）。
+- YAMLファイル読み込みはI/O操作なのでインフラ層が適切（Martin "Clean Architecture" 2017: 外部リソースアクセスは境界の外側）。
+
+### 実装サマリー
+
+- `infrastructure/workflow_loader.py`: `WorkflowTemplate`, `VariableSpec`, `load_workflow_template()`, `render_template()`, `list_templates()`
+- `web/schemas.py`: `WorkflowFromTemplateSubmit` スキーマ追加
+- `web/routers/workflows.py`: `GET /workflows/templates` (必ず `/workflows/{id}` より前に登録)、`POST /workflows/from-template` 追加
+- `web/app.py`: `_app_templates_dir` を解決して `build_workflows_router()` に渡す
+- `examples/workflows/generic/tdd.yaml`, `debate.yaml`, `review.yaml`: 3テンプレート追加
+- **61 tests** in `tests/test_workflow_from_template.py`
 
 ---

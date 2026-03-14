@@ -1,0 +1,86 @@
+# Generic TDD Workflow Template (phase-based, for POST /workflows/from-template)
+# =================================================================================
+# 3-agent Red -> Green -> Refactor pipeline.
+#
+# Variables (required):
+#   feature   — description of the feature to build (e.g. "binary search algorithm")
+#
+# Variables (optional):
+#   language  — programming language (default: python)
+#
+# Usage:
+#   POST /workflows/from-template
+#   {"template": "tdd", "variables": {"feature": "a stack data structure"}}
+#
+# References:
+#   TDFlow arXiv:2510.23761 (2025)
+#   alexop.dev "Forcing Claude Code to TDD" (2025)
+
+name: "TDD: {feature}"
+description: "Test-Driven Development pipeline: tester -> coder -> reviewer"
+
+# Declared variables (documentation + validation)
+variables:
+  feature:
+    description: "Feature to implement (e.g. 'binary search algorithm')"
+    required: true
+  language:
+    description: "Programming language"
+    required: false
+    default: "python"
+
+# Phase defaults applied to all phases
+defaults:
+  timeout: 300
+  pattern: "single"
+
+phases:
+  - name: "tester"
+    pattern: "single"
+    context: |
+      You are the TEST-WRITER agent in a Red->Green->Refactor TDD workflow.
+
+      Feature to test: {feature}
+      Language: {language}
+
+      Your task (RED phase):
+      1. Write failing {language} pytest tests for '{feature}'.
+         - Focus on behaviour, not implementation.
+         - Tests must fail when run against an empty/stub implementation.
+         - Use descriptive test function names (they are the specification).
+      2. Save the test file as `tests.py` in your working directory.
+      3. Verify the tests fail: run `python -m pytest tests.py -v` and confirm failures.
+      4. Call /task-complete with a summary of the tests written.
+
+  - name: "coder"
+    pattern: "single"
+    depends_on: ["tester"]
+    context: |
+      You are the IMPLEMENTER agent in a Red->Green->Refactor TDD workflow.
+
+      Feature to implement: {feature}
+      Language: {language}
+
+      Your task (GREEN phase):
+      1. Read the test file `tests.py` written by the tester agent.
+      2. Write the minimal {language} implementation that makes ALL tests pass.
+      3. Save the implementation as `implementation.py`.
+      4. Run `python -m pytest tests.py -v` and confirm ALL tests pass.
+      5. Call /task-complete with a summary of the implementation.
+
+  - name: "reviewer"
+    pattern: "single"
+    depends_on: ["coder"]
+    context: |
+      You are the REVIEWER agent in a Red->Green->Refactor TDD workflow.
+
+      Feature: {feature}
+      Language: {language}
+
+      Your task (REFACTOR phase):
+      1. Read `tests.py` and `implementation.py`.
+      2. Review code quality: naming, structure, readability, edge cases.
+      3. Refactor `implementation.py` to improve quality WITHOUT changing behaviour.
+      4. Run `python -m pytest tests.py -v` and confirm ALL tests still pass.
+      5. Write a brief review summary.
+      6. Call /task-complete with: 'Refactoring complete. Tests: N pass, 0 fail.'
