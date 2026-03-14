@@ -6,5 +6,13 @@ dist/
 .pytest_cache/
 .worktrees/
 .hypothesis/
+# Orchestrator runtime files (exact and per-agent variants)
 __orchestrator_context__.json
+__orchestrator_context__*__.json
 __orchestrator_api_key__
+__orchestrator_api_key__*__
+# Per-agent subdirectories (contain per-agent CLAUDE.md, settings, keys)
+.agent/
+# Task prompt files written by orchestrator
+__task_prompt__*
+__compress_context__*
