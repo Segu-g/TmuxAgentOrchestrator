@@ -31,6 +31,7 @@ from tmux_orchestrator.web.schemas import (
     PdcaWorkflowSubmit,
     PeerReviewWorkflowSubmit,
     RedBlueWorkflowSubmit,
+    RefactorWorkflowSubmit,
     SequenceBlockModel,
     SkipConditionModel,
     SpecFirstTddWorkflowSubmit,
@@ -5899,6 +5900,246 @@ def build_workflows_router(
             "task_ids": task_ids,
             "scratchpad_prefix": prefix,
             "audit_focus": body.audit_focus,
+        }
+
+    @router.post(
+        "/workflows/refactor",
+        summary="Submit a 3-agent Refactoring workflow (analyzer → refactorer → verifier)",
+        dependencies=[Depends(auth)],
+    )
+    async def submit_refactor_workflow(body: RefactorWorkflowSubmit) -> dict:
+        """Submit a 3-agent Code Refactoring Workflow DAG.
+
+        Pipeline:
+
+          1. **analyzer**: examines the provided code for quality issues
+             (complexity, duplication, naming, design patterns) and produces a
+             structured analysis report stored in ``{prefix}_analysis``.
+          2. **refactorer**: reads the analysis report and the original code,
+             applies the recommended refactorings, and stores the improved code
+             in ``{prefix}_refactored``.
+          3. **verifier**: compares the original code against the refactored
+             version, confirms behavior preservation, and reports quality metric
+             improvements in ``{prefix}_verification``.
+
+        Returns:
+        - ``workflow_id``: workflow run UUID
+        - ``name``: ``refactor/<code_snippet>``
+        - ``task_ids``: dict with ``analyzer``, ``refactorer``, ``verifier``
+        - ``scratchpad_prefix``: scratchpad namespace for this run
+        - ``refactor_goals``: goals used to drive the analysis
+
+        Design references:
+        - RefAgent arXiv:2511.03153 (November 2025): multi-agent refactoring,
+          90% unit-test pass rate, 52.5% code-smell reduction
+        - RefactorGPT PeerJ cs-3257 (October 2025): Analyzer→Refactor→Fixer pattern
+        - MUARF ICSE 2025 SRC: 3-role baseline for automated refactoring
+        - LLM-Driven Code Refactoring (IDE @ ICSE 2025): behavior preservation
+        - DESIGN.md §10.102 (v1.2.27)
+        """
+        code = body.code.strip()
+        lang = body.language
+        goals = body.refactor_goals
+
+        wm = orchestrator.get_workflow_manager()
+        code_snippet = code[:40].replace("\n", " ")
+        wf_name = f"refactor/{code_snippet}"
+
+        pre_run_id = str(uuid.uuid4())
+        prefix = body.scratchpad_prefix or f"refactor_{pre_run_id[:8]}"
+
+        analysis_key = f"{prefix}_analysis"
+        refactored_key = f"{prefix}_refactored"
+        verification_key = f"{prefix}_verification"
+
+        def _py_write(key: str, varname: str) -> str:
+            """Return a Python snippet that writes varname content to the scratchpad key."""
+            return (
+                f"python3 - <<'PYEOF'\n"
+                f"import json, urllib.request, os\n"
+                f"content = open('{varname}').read()\n"
+                f"ctx = json.load(open('__orchestrator_context__.json'))\n"
+                f"api_key = os.environ.get('TMUX_ORCHESTRATOR_API_KEY', '')\n"
+                f"req = urllib.request.Request(\n"
+                f"    ctx['web_base_url'] + '/scratchpad/{key}',\n"
+                f"    data=json.dumps({{'value': content}}).encode(),\n"
+                f"    headers={{'X-API-Key': api_key, 'Content-Type': 'application/json'}},\n"
+                f"    method='PUT',\n"
+                f")\n"
+                f"urllib.request.urlopen(req)\n"
+                f"PYEOF"
+            )
+
+        def _py_read(key: str, varname: str) -> str:
+            """Return a Python snippet that reads key from scratchpad into varname file."""
+            return (
+                f"python3 - <<'PYEOF'\n"
+                f"import json, urllib.request, os\n"
+                f"ctx = json.load(open('__orchestrator_context__.json'))\n"
+                f"api_key = os.environ.get('TMUX_ORCHESTRATOR_API_KEY', '')\n"
+                f"req = urllib.request.Request(\n"
+                f"    ctx['web_base_url'] + '/scratchpad/{key}',\n"
+                f"    headers={{'X-API-Key': api_key}},\n"
+                f"    method='GET',\n"
+                f")\n"
+                f"resp = json.loads(urllib.request.urlopen(req).read())\n"
+                f"open('{varname}', 'w').write(resp['value'])\n"
+                f"PYEOF"
+            )
+
+        goals_str = ", ".join(goals)
+
+        # --- Analyzer prompt ---
+        analyzer_prompt = (
+            f"You are the ANALYZER agent in a code refactoring workflow.\n"
+            f"\n"
+            f"**Language**: {lang}\n"
+            f"**Refactoring goals**: {goals_str}\n"
+            f"\n"
+            f"**Original code to analyze**:\n"
+            f"```{lang}\n"
+            f"{code}\n"
+            f"```\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Analyze the code above for quality issues, focusing on: {goals_str}.\n"
+            f"   For each issue found, document:\n"
+            f"   - **Issue type**: (complexity / duplication / naming / design / readability)\n"
+            f"   - **Location**: function/class/line description\n"
+            f"   - **Description**: what the problem is\n"
+            f"   - **Recommended refactoring**: specific transformation to apply\n"
+            f"   - **Priority**: HIGH / MEDIUM / LOW\n"
+            f"2. Include a **Summary** section at the top: total issues found, overall quality score (1-10), top 3 recommendations.\n"
+            f"3. Write your analysis to `analysis.md` in your working directory.\n"
+            f"4. Also write the original code to `original_code.{lang[:2]}` for the refactorer's reference.\n"
+            f"5. Store the analysis in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_py_write(analysis_key, 'analysis.md')}\n"
+            f"   ```\n"
+            f"6. Call /task-complete with: 'Analysis complete — N issues found (H high, M medium, L low)'\n"
+        )
+
+        # --- Refactorer prompt ---
+        refactorer_prompt = (
+            f"You are the REFACTORER agent in a code refactoring workflow.\n"
+            f"\n"
+            f"**Language**: {lang}\n"
+            f"**Refactoring goals**: {goals_str}\n"
+            f"\n"
+            f"**Original code** (also available via scratchpad):\n"
+            f"```{lang}\n"
+            f"{code}\n"
+            f"```\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read the analysis report from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_py_read(analysis_key, 'analysis.md')}\n"
+            f"   ```\n"
+            f"2. Apply ALL HIGH-priority and as many MEDIUM-priority refactorings as possible.\n"
+            f"   Preserve the original behavior exactly — refactoring must not change semantics.\n"
+            f"   Follow these principles:\n"
+            f"   - Extract long functions into smaller, well-named ones\n"
+            f"   - Remove code duplication (DRY principle)\n"
+            f"   - Use descriptive names for variables, functions, and classes\n"
+            f"   - Apply appropriate design patterns where beneficial\n"
+            f"   - Add/improve docstrings and comments\n"
+            f"3. Write the refactored code to `refactored_code.{lang[:2]}`.\n"
+            f"4. Write a brief `CHANGES.md` documenting each transformation applied:\n"
+            f"   - What was changed\n"
+            f"   - Why (which issue from the analysis)\n"
+            f"   - How behavior is preserved\n"
+            f"5. Combine refactored code and changes into a single document `refactored.md` with\n"
+            f"   a code block and the changes list.\n"
+            f"6. Store in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_py_write(refactored_key, 'refactored.md')}\n"
+            f"   ```\n"
+            f"7. Call /task-complete with: 'Refactoring complete — N transformations applied'\n"
+        )
+
+        # --- Verifier prompt ---
+        verifier_prompt = (
+            f"You are the VERIFIER agent in a code refactoring workflow.\n"
+            f"\n"
+            f"**Language**: {lang}\n"
+            f"**Refactoring goals**: {goals_str}\n"
+            f"\n"
+            f"**Original code** (for reference):\n"
+            f"```{lang}\n"
+            f"{code}\n"
+            f"```\n"
+            f"\n"
+            f"Steps:\n"
+            f"1. Read the refactored code from the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_py_read(refactored_key, 'refactored.md')}\n"
+            f"   ```\n"
+            f"2. Read the original analysis:\n"
+            f"   ```bash\n"
+            f"   {_py_read(analysis_key, 'analysis.md')}\n"
+            f"   ```\n"
+            f"3. Verify the refactoring by checking:\n"
+            f"   **Behavior Preservation**:\n"
+            f"   - Are all public functions/classes/methods still present with compatible signatures?\n"
+            f"   - Are edge cases (empty input, None, errors) still handled?\n"
+            f"   - Are all return types and side effects preserved?\n"
+            f"   **Quality Improvement**:\n"
+            f"   - Which original issues (from analysis.md) were addressed?\n"
+            f"   - Estimate quality score improvement (original vs refactored, 1-10)\n"
+            f"   - Are there any remaining issues or new issues introduced?\n"
+            f"   **Coverage**:\n"
+            f"   - What percentage of HIGH-priority issues were resolved?\n"
+            f"   - What percentage of MEDIUM-priority issues were resolved?\n"
+            f"4. Write `VERIFICATION_REPORT.md` with:\n"
+            f"   - **Verdict**: PASS / FAIL / PARTIAL\n"
+            f"   - **Behavior Preservation**: confirmed / issues found\n"
+            f"   - **Quality Score**: original X/10 → refactored Y/10\n"
+            f"   - **Issues Resolved**: N of M high-priority, N of M medium-priority\n"
+            f"   - **Remaining Issues**: any unaddressed items\n"
+            f"   - **Recommendations**: next steps if any\n"
+            f"5. Store in the shared scratchpad:\n"
+            f"   ```bash\n"
+            f"   {_py_write(verification_key, 'VERIFICATION_REPORT.md')}\n"
+            f"   ```\n"
+            f"6. Call /task-complete with: 'Verification complete — Verdict: PASS/FAIL/PARTIAL, quality X/10 → Y/10'\n"
+        )
+
+        # Submit tasks: analyzer → refactorer → verifier (sequential pipeline)
+        task_analyzer = await orchestrator.submit_task(
+            prompt=analyzer_prompt,
+            required_tags=body.analyzer_tags or None,
+            timeout=body.agent_timeout,
+        )
+        task_refactorer = await orchestrator.submit_task(
+            prompt=refactorer_prompt,
+            required_tags=body.refactorer_tags or None,
+            depends_on=[task_analyzer.id],
+            timeout=body.agent_timeout,
+        )
+        task_verifier = await orchestrator.submit_task(
+            prompt=verifier_prompt,
+            required_tags=body.verifier_tags or None,
+            depends_on=[task_refactorer.id],
+            timeout=body.agent_timeout,
+            reply_to=body.reply_to,
+        )
+
+        task_ids = {
+            "analyzer": task_analyzer.id,
+            "refactorer": task_refactorer.id,
+            "verifier": task_verifier.id,
+        }
+
+        all_ids = list(task_ids.values())
+        run = wm.submit(name=wf_name, task_ids=all_ids)
+
+        return {
+            "workflow_id": run.id,
+            "name": run.name,
+            "task_ids": task_ids,
+            "scratchpad_prefix": prefix,
+            "refactor_goals": body.refactor_goals,
         }
 
     return router

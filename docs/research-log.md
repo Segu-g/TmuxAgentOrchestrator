@@ -9512,3 +9512,135 @@ https://icml.cc/virtual/2025/poster/45170
 
 **次イテレーション**: history bug fix により demos が 33/33 に改善されることを確認。
 
+
+## §10.102 v1.2.27 — コードリファクタリングワークフロー (POST /workflows/refactor)
+
+### Step 0 — 選択根拠 (2026-03-15)
+
+**選択**: `POST /workflows/refactor` — 3エージェント コードリファクタリングワークフロー
+(analyzer → refactorer → verifier)
+
+**理由**:
+1. ユーザー指示「ワークフローテンプレートの拡充」に直接合致する新規ワークフロー
+2. DESIGN.md §5 の uncompleted 中優先度候補の中で最も実装価値が高い新規パターン
+3. 既存のワークフロー群 (code-audit: 読み取り専用監査, TDD: 新規実装, mutation-test: テスト品質) とは異なる「リファクタリング専用」パターン — code-audit との差別化は明確
+4. RefAgent (arXiv:2511.03153, ICSE 2025) と RefactorGPT (PeerJ cs-3257, 2025) という強力な研究的裏付けが存在する
+5. Analyzer→Refactorer→Verifier の3ロール分担が自然なデモシナリオを提供する
+
+**DAGパターン**: analyzer → refactorer → verifier (シーケンシャルパイプライン)
+- analyzer: コードを分析し、リファクタリング箇所を特定 (重複・複雑度・命名・設計問題) → `{prefix}_analysis` に書き込み
+- refactorer: 分析結果を読んでリファクタリングを実施 → `{prefix}_refactored` に書き込み
+- verifier: 元のコードと改善版を比較し、動作保証・品質改善をレポート → `{prefix}_verification` に書き込み
+
+**選択しなかった候補**:
+- DESIGN.md §5 高優先度 (372-374 行) の「チェックポイント/Stop hook/ProcessPort」: 全て既に実装済み。DESIGN.md の strikethrough が漏れていただけ
+- DriftMonitor semantic similarity: sentence-transformers 依存を追加しデモが困難
+- Hypothesis stateful testing: 本番コード変更なし、戦略方針「ワークフロー拡充」から外れる
+
+**実装範囲**:
+1. `web/schemas.py` に `RefactorWorkflowSubmit` モデル追加
+2. `web/routers/workflows.py` に `POST /workflows/refactor` エンドポイント追加
+3. `examples/workflows/refactor.yaml` テンプレート追加
+4. `tests/test_workflow_refactor.py` — 40+ テスト
+5. DESIGN.md で既実装済みの行 (372-374) を strikethrough で更新
+
+
+### Step 1 — 調査記録 (2026-03-15)
+
+#### Query 1: multi-agent LLM automated code refactoring workflow 2025 research
+
+**Source**: RefAgent: A Multi-agent LLM-based Framework for Automatic Software Refactoring — arXiv:2511.03153 (November 2025)
+https://arxiv.org/abs/2511.03153
+
+**Key findings**:
+- 4エージェント構成: Planner, Refactor, Compiler/Tester, Verifier
+- median unit test pass rate 90%、code smell 52.5% 削減、reusability 8.6% 改善
+- 単一エージェント比: unit test pass rate +64.7%、compilation success +40.1%
+- 検証フェーズの組み込みが品質の鍵
+
+**Source**: RefactorGPT: a ChatGPT-based multi-agent framework for automated code refactoring — PeerJ cs-3257 (October 2025)
+https://peerj.com/articles/cs-3257/
+
+**Key findings**:
+- 4エージェント: Analyzer→Refactor→Refine→Fixer (シーケンシャル)
+- Analyzer がコード品質問題を特定 → Refactor が変換 → Fixer がエラー修復
+- 構造化された分析 (Analysis レポート) を中間スクラッチパッドとして活用
+
+**Source**: MUARF: Leveraging Multi-Agent Workflows for Automated Code Refactoring — ICSE 2025 SRC
+https://conf.researchr.org/details/icse-2025/icse-2025-SRC/14/MUARF-Leveraging-Multi-Agent-Workflows-for-Automated-Code-Refactoring
+
+**Key findings**:
+- ICSE 2025 Student Research Competition — 最新の確立された手法
+- Analyzer→Refactorer→Verifier の3ロール分担が最もシンプルかつ効果的なベースライン
+
+#### Query 2: automated refactoring multi-agent system analyzer refactorer verifier pattern 2025
+
+**Source**: Multi-Agent Coordinated Rename Refactoring — arXiv:2601.00482 (2026)
+https://arxiv.org/html/2601.00482
+
+**Key findings**:
+- 並列エージェントによるリネームリファクタリングの協調: 一貫性検証が必須
+- Verifier Agents がユニットテスト・リグレッションスイート・リンターを実行して正確性を保証
+- Architect Agents が依存関係を分析して修正順序を計画 — これが Analyzer ロールの核心
+
+**Source**: AI Agents for Autonomous Code Refactoring: 2025's Enterprise Productivity Game-Changer — Medium (January 2026)
+https://medium.com/@jasonblake1208/ai-agents-for-autonomous-code-refactoring-2025s-enterprise-productivity-game-changer-019589fc8ec0
+
+**Key findings**:
+- Planner/Refactoring/Verifier のトリプルロールが 2025 の業界標準パターン
+- 共有メモリ (スクラッチパッド) による analysis→refactoring→verification チェーンが必須
+
+#### Query 3: LLM code refactoring pipeline behavior preservation verification agent 2025
+
+**Source**: LLM-Driven Code Refactoring: Opportunities and Limitations — IDE 2025 @ ICSE 2025
+https://seal-queensu.github.io/publications/pdf/IDE-Jonathan-2025.pdf
+
+**Key findings**:
+- 動作保全 (semantic equivalence) の検証がリファクタリングパイプラインの最重要課題
+- 静的解析 + 自動テスト + コードスメル検出の組み合わせが best practice
+- Verifier が元コードと改善版の両方を受け取り、差分・動作保全・品質改善を評価する設計推奨
+
+**Source**: Refactoring Python Code with LLM-Based Multi-Agent — SBES 2025
+https://sol.sbc.org.br/index.php/sbes/article/download/37044/36829/
+
+**Key findings**:
+- Python コード特化の3エージェントパイプライン実証
+- 改善すべき品質指標: 循環的複雑度、重複度、命名規則、設計パターン適用
+
+### Design Decisions
+
+1. **`RefactorWorkflowSubmit`**: `code` (required, コード文字列またはファイルパス説明), `language="python"`, `refactor_goals=["reduce_complexity","eliminate_duplication","improve_naming"]`, `scratchpad_prefix=""`, `agent_timeout=300`, `analyzer_tags=[]`, `refactorer_tags=[]`, `verifier_tags=[]`, `reply_to=None`
+2. **DAG構造**: analyzer → refactorer → verifier (シーケンシャル)
+3. **スクラッチパッドキー**: `{prefix}_analysis`, `{prefix}_refactored`, `{prefix}_verification`
+4. **auto-prefix**: `refactor_{8hex}`
+5. **Verifier プロンプト**: 元コード vs 改善版の diff、動作保全チェック、品質指標改善確認
+
+
+### Step 3-4 — デモ結果 + フィードバック (2026-03-15)
+
+**デモ結果**: 27/27 PASS。全チェック通過。
+
+**実際の出力**:
+- analyzer (58.5s): コード品質問題6件特定 (magic bool, 貧弱な命名 proc/calc/chk, ネストループ, calc()内重複パターン, 型ヒントなし, docstringなし)
+- refactorer (86.3s): 全関数リネーム、複雑度抽出、型ヒント追加
+- verifier (65.4s): PASS判定、品質スコア改善 3/10 → 8/10 確認
+
+**スクラッチパッドアーティファクト**:
+- `{prefix}_analysis`: 5808 chars
+- `{prefix}_refactored`: 6331 chars
+- `{prefix}_verification`: 4044 chars (verdict: PASS)
+
+**発見した問題と修正**:
+
+1. **全タスクがanalyzerエージェントに集中**: `required_tags` 未設定時に最初のアイドルエージェント(analyzer)が全3タスクを消費。
+   → **修正**: エージェント設定に `tags: [refactor_analyzer/coder/verifier]` を追加し、タスクにも対応する `*_tags` を設定。
+   → **学習**: シーケンシャルワークフローのデモでは必ずタグルーティングが必要。
+
+2. **analyzer status チェック**: submit後0.5秒で既に `in_progress` になっていた。
+   → **修正**: `queued` または `in_progress` 両方を有効とするよう条件緩和。
+
+3. **エージェントhistory競合**: 問題1の修正後は解消。リトライループ(15回×2s)で残余タイミング差を吸収。
+
+**次イテレーション候補**:
+- `examples/workflows/README.md` にタグルーティングのベストプラクティスを追記
+- `POST /workflows/spike` — research spike (researcher → prototyper → evaluator)

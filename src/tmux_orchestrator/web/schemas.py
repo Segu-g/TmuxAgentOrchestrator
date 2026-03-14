@@ -2086,6 +2086,94 @@ class CodeAuditWorkflowSubmit(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# RefactorWorkflowSubmit (v1.2.27)
+# Reference: DESIGN.md §10.102 (v1.2.27)
+# ---------------------------------------------------------------------------
+
+
+class RefactorWorkflowSubmit(BaseModel):
+    """Request body for POST /workflows/refactor.
+
+    Submits a 3-agent sequential refactoring workflow:
+    an analyzer identifies quality issues, a refactorer applies the
+    transformations, and a verifier checks behavior preservation and
+    reports quality improvements.
+
+    Workflow topology::
+
+        analyzer ──▶ refactorer ──▶ verifier
+
+    Scratchpad keys (Blackboard pattern):
+
+    - ``{scratchpad_prefix}_analysis``     : code quality analysis report
+    - ``{scratchpad_prefix}_refactored``   : refactored code
+    - ``{scratchpad_prefix}_verification`` : behavior-preservation + quality report
+
+    Design references:
+    - RefAgent: A Multi-agent LLM-based Framework for Automatic Software
+      Refactoring — arXiv:2511.03153 (November 2025)
+      https://arxiv.org/abs/2511.03153
+    - RefactorGPT: a ChatGPT-based multi-agent framework for automated code
+      refactoring — PeerJ cs-3257 (October 2025)
+      https://peerj.com/articles/cs-3257/
+    - MUARF: Leveraging Multi-Agent Workflows for Automated Code Refactoring
+      (ICSE 2025 SRC) https://conf.researchr.org/details/icse-2025/icse-2025-SRC/14/
+      MUARF-Leveraging-Multi-Agent-Workflows-for-Automated-Code-Refactoring
+    - LLM-Driven Code Refactoring: Opportunities and Limitations (IDE @ ICSE 2025)
+      https://seal-queensu.github.io/publications/pdf/IDE-Jonathan-2025.pdf
+    - DESIGN.md §10.102 (v1.2.27)
+    """
+
+    # Code to refactor (snippet, file contents, or description of what to write)
+    code: str
+    # Programming language
+    language: str = "python"
+    # Refactoring goals (controls analyzer focus areas)
+    refactor_goals: list[str] = [
+        "reduce_complexity",
+        "eliminate_duplication",
+        "improve_naming",
+    ]
+    # Optional scratchpad prefix (auto-generated when empty)
+    scratchpad_prefix: str = ""
+    # Per-task timeout in seconds
+    agent_timeout: int = 300
+    # required_tags for each agent role (empty = any available agent)
+    analyzer_tags: list[str] = []
+    refactorer_tags: list[str] = []
+    verifier_tags: list[str] = []
+    # When set, verifier RESULT is routed to this agent's mailbox
+    reply_to: str | None = None
+
+    @field_validator("code")
+    @classmethod
+    def _code_not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("code must not be empty")
+        return v
+
+    @field_validator("refactor_goals")
+    @classmethod
+    def _goals_not_empty(cls, v: list[str]) -> list[str]:
+        if not v:
+            raise ValueError("refactor_goals must not be empty")
+        valid = {
+            "reduce_complexity",
+            "eliminate_duplication",
+            "improve_naming",
+            "apply_design_patterns",
+            "improve_readability",
+            "extract_functions",
+        }
+        for item in v:
+            if item not in valid:
+                raise ValueError(
+                    f"refactor_goals item {item!r} must be one of {valid}"
+                )
+        return v
+
+
+# ---------------------------------------------------------------------------
 # Task template schemas (v1.2.17)
 # Reference: DESIGN.md §10.93 (v1.2.17)
 # ---------------------------------------------------------------------------

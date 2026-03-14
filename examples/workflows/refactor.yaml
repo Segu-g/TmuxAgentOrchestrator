@@ -1,0 +1,111 @@
+# Code Refactoring Workflow Template
+# ===================================
+# 3-agent sequential refactoring pipeline based on RefAgent (arXiv:2511.03153)
+# and RefactorGPT (PeerJ cs-3257, 2025).
+#
+# Pipeline:
+#   analyzer → refactorer → verifier
+#
+# 1. analyzer  : identifies code quality issues (complexity, duplication, naming, design)
+# 2. refactorer: applies the recommended transformations (behavior-preserving)
+# 3. verifier  : confirms behavior preservation and reports quality metric improvements
+#
+# Agent roles:
+#   analyzer  → role: reviewer → loads agent_plugin/docs/reviewer.md
+#   refactorer → role: coder  → loads agent_plugin/docs/coder.md
+#   verifier  → role: tester  → loads agent_plugin/docs/tester.md
+#
+# Scratchpad keys (written by agents):
+#   {scratchpad_prefix}_analysis     — code quality analysis report
+#   {scratchpad_prefix}_refactored   — refactored code + change log
+#   {scratchpad_prefix}_verification — behavior-preservation + quality report
+#
+# Endpoint: POST /workflows/refactor
+# References:
+#   RefAgent arXiv:2511.03153 (November 2025) — 90% unit-test pass rate, 52.5% code-smell reduction
+#   RefactorGPT PeerJ cs-3257 (October 2025) — Analyzer→Refactor→Fixer sequential pattern
+#   MUARF ICSE 2025 SRC — 3-role multi-agent refactoring baseline
+#   LLM-Driven Code Refactoring IDE @ ICSE 2025 — behavior preservation study
+
+workflow:
+  endpoint: /workflows/refactor
+
+# --- Defaults ---
+defaults:
+  language: python
+  refactor_goals:
+    - reduce_complexity
+    - eliminate_duplication
+    - improve_naming
+  agent_timeout: 300
+  scratchpad_prefix: ""
+  analyzer_tags: []
+  refactorer_tags: []
+  verifier_tags: []
+  reply_to: null
+
+# --- Required fields ---
+
+# Code snippet or module to refactor (paste inline or describe the file)
+code: |
+  def process(data, flag):
+      r = []
+      for i in range(len(data)):
+          if flag == True:
+              if data[i] > 0:
+                  r.append(data[i] * 2)
+          else:
+              if data[i] > 0:
+                  r.append(data[i])
+      return r
+
+# --- Optional fields ---
+
+# Programming language
+language: python
+
+# Refactoring goals (subset of: reduce_complexity, eliminate_duplication,
+# improve_naming, apply_design_patterns, improve_readability, extract_functions)
+refactor_goals:
+  - reduce_complexity
+  - eliminate_duplication
+  - improve_naming
+
+# Per-task timeout in seconds
+agent_timeout: 300
+
+# Agent capability routing (empty = any available agent)
+analyzer_tags: []
+refactorer_tags: []
+verifier_tags: []
+
+# Auto-generated when empty (format: "refactor_{8-hex}")
+scratchpad_prefix: ""
+
+# If set, verifier's RESULT is delivered to this agent's mailbox
+reply_to: null
+
+# --- Agent config example ---
+# agents:
+#   - id: analyzer
+#     type: claude_code
+#     role: reviewer
+#     isolate: true
+#   - id: refactorer
+#     type: claude_code
+#     role: coder
+#     isolate: true
+#   - id: verifier
+#     type: claude_code
+#     role: tester
+#     isolate: true
+
+# --- Curl example ---
+# curl -s -X POST http://localhost:8000/workflows/refactor \
+#   -H "Content-Type: application/json" \
+#   -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \
+#   -d '{
+#     "code": "def calculate(x, y, z):\n    r = 0\n    for i in range(x):\n        for j in range(y):\n            r = r + i + j\n    return r",
+#     "language": "python",
+#     "refactor_goals": ["reduce_complexity", "improve_naming"]
+#   }'

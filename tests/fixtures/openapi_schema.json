@@ -1602,6 +1602,82 @@
         "title": "RedBlueWorkflowSubmit",
         "type": "object"
       },
+      "RefactorWorkflowSubmit": {
+        "description": "Request body for POST /workflows/refactor.\n\nSubmits a 3-agent sequential refactoring workflow:\nan analyzer identifies quality issues, a refactorer applies the\ntransformations, and a verifier checks behavior preservation and\nreports quality improvements.\n\nWorkflow topology::\n\n    analyzer \u2500\u2500\u25b6 refactorer \u2500\u2500\u25b6 verifier\n\nScratchpad keys (Blackboard pattern):\n\n- ``{scratchpad_prefix}_analysis``     : code quality analysis report\n- ``{scratchpad_prefix}_refactored``   : refactored code\n- ``{scratchpad_prefix}_verification`` : behavior-preservation + quality report\n\nDesign references:\n- RefAgent: A Multi-agent LLM-based Framework for Automatic Software\n  Refactoring \u2014 arXiv:2511.03153 (November 2025)\n  https://arxiv.org/abs/2511.03153\n- RefactorGPT: a ChatGPT-based multi-agent framework for automated code\n  refactoring \u2014 PeerJ cs-3257 (October 2025)\n  https://peerj.com/articles/cs-3257/\n- MUARF: Leveraging Multi-Agent Workflows for Automated Code Refactoring\n  (ICSE 2025 SRC) https://conf.researchr.org/details/icse-2025/icse-2025-SRC/14/\n  MUARF-Leveraging-Multi-Agent-Workflows-for-Automated-Code-Refactoring\n- LLM-Driven Code Refactoring: Opportunities and Limitations (IDE @ ICSE 2025)\n  https://seal-queensu.github.io/publications/pdf/IDE-Jonathan-2025.pdf\n- DESIGN.md \u00a710.102 (v1.2.27)",
+        "properties": {
+          "agent_timeout": {
+            "default": 300,
+            "title": "Agent Timeout",
+            "type": "integer"
+          },
+          "analyzer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Analyzer Tags",
+            "type": "array"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "language": {
+            "default": "python",
+            "title": "Language",
+            "type": "string"
+          },
+          "refactor_goals": {
+            "default": [
+              "reduce_complexity",
+              "eliminate_duplication",
+              "improve_naming"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "title": "Refactor Goals",
+            "type": "array"
+          },
+          "refactorer_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Refactorer Tags",
+            "type": "array"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply To"
+          },
+          "scratchpad_prefix": {
+            "default": "",
+            "title": "Scratchpad Prefix",
+            "type": "string"
+          },
+          "verifier_tags": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Verifier Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "RefactorWorkflowSubmit",
+        "type": "object"
+      },
       "ScratchpadWrite": {
         "description": "Request body for PUT /scratchpad/{key}.",
         "properties": {
@@ -6341,6 +6417,47 @@
           }
         },
         "summary": "Submit a Red Team / Blue Team security review workflow"
+      }
+    },
+    "/workflows/refactor": {
+      "post": {
+        "description": "Submit a 3-agent Code Refactoring Workflow DAG.\n\nPipeline:\n\n  1. **analyzer**: examines the provided code for quality issues\n     (complexity, duplication, naming, design patterns) and produces a\n     structured analysis report stored in ``{prefix}_analysis``.\n  2. **refactorer**: reads the analysis report and the original code,\n     applies the recommended refactorings, and stores the improved code\n     in ``{prefix}_refactored``.\n  3. **verifier**: compares the original code against the refactored\n     version, confirms behavior preservation, and reports quality metric\n     improvements in ``{prefix}_verification``.\n\nReturns:\n- ``workflow_id``: workflow run UUID\n- ``name``: ``refactor/<code_snippet>``\n- ``task_ids``: dict with ``analyzer``, ``refactorer``, ``verifier``\n- ``scratchpad_prefix``: scratchpad namespace for this run\n- ``refactor_goals``: goals used to drive the analysis\n\nDesign references:\n- RefAgent arXiv:2511.03153 (November 2025): multi-agent refactoring,\n  90% unit-test pass rate, 52.5% code-smell reduction\n- RefactorGPT PeerJ cs-3257 (October 2025): Analyzer\u2192Refactor\u2192Fixer pattern\n- MUARF ICSE 2025 SRC: 3-role baseline for automated refactoring\n- LLM-Driven Code Refactoring (IDE @ ICSE 2025): behavior preservation\n- DESIGN.md \u00a710.102 (v1.2.27)",
+        "operationId": "submit_refactor_workflow_workflows_refactor_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefactorWorkflowSubmit"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Submit Refactor Workflow Workflows Refactor Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Submit a 3-agent Refactoring workflow (analyzer \u2192 refactorer \u2192 verifier)"
       }
     },
     "/workflows/socratic": {
