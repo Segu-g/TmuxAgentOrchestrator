@@ -544,54 +544,6 @@ or by branching from your branch (chain_branch workflow).
             self._spec_files_root = cwd
         codified_specs_section = self._load_spec_files()
 
-        # File staging section: instructions for using the /staging REST API
-        # to pass large files between agents in a pipeline.
-        # Reference: DESIGN.md §10.94 (v1.2.18)
-        file_staging_section = f"""
-## File Staging
-
-Use the staging area to pass large files (code, data, reports) to downstream
-agents without git commits or scratchpad string limits.
-
-### Upload a file (producer agent)
-
-```bash
-# Upload a file and capture the returned file_id
-file_id=$(curl -s -X POST {api}/staging \\
-  -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \\
-  -F "file=@result.py" \\
-  -F "uploaded_by={self.id}" | python3 -c "import sys,json; print(json.load(sys.stdin)['file_id'])")
-
-# Store file_id in scratchpad so the consumer agent can find it
-curl -s -X PUT {api}/scratchpad/artifact_file_id \\
-  -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d "{{\"value\": \"$file_id\"}}"
-```
-
-### Download a file (consumer agent)
-
-```bash
-# Read file_id from scratchpad
-file_id=$(curl -s {api}/scratchpad/artifact_file_id \\
-  -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" | python3 -c "import sys,json; print(json.load(sys.stdin)['value'])")
-
-# Download the file
-curl -s {api}/staging/$file_id \\
-  -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY" -o received.py
-```
-
-### Other operations
-
-```bash
-curl -s {api}/staging -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY"          # list all files
-curl -s {api}/staging/$file_id/meta -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY"   # metadata only
-curl -s -X DELETE {api}/staging/$file_id -H "X-API-Key: $TMUX_ORCHESTRATOR_API_KEY"  # delete
-```
-
-Reference: DESIGN.md §10.94 (v1.2.18)
-"""
-
         content = f"""\
 # Agent: {self.id}
 
@@ -657,7 +609,7 @@ Use `/plan <description>` before starting any non-trivial task. This writes a
 - Notes file: `NOTES.md` (your structured scratchpad — keep it updated)
 - Plan file: `PLAN.md` (created by `/plan`, deleted when task is done)
 - Slash commands: available in `.claude/commands/` — use plain `/task-complete` etc.
-{context_files_section}{custom_section}{context_strategies_section}{artifact_persistence_section}{codified_specs_section}{file_staging_section}
+{context_files_section}{custom_section}{context_strategies_section}{artifact_persistence_section}{codified_specs_section}
 ## Slash Command Reference
 
 Slash commands are copied into `.claude/commands/` at agent startup so you can

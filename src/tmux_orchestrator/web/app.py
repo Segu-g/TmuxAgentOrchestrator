@@ -109,20 +109,6 @@ from tmux_orchestrator.application.scratchpad_store import ScratchpadStore  # no
 _scratchpad: ScratchpadStore = ScratchpadStore()  # in-memory until create_app() wires persist_dir
 
 # ---------------------------------------------------------------------------
-# StagingStore — shared file staging area (v1.2.18+)
-#
-# Module-level singleton so staged files survive across multiple create_app()
-# calls in the same process (mirrors _scratchpad pattern).
-# The staging_dir is configured lazily in create_app() from OrchestratorConfig.
-#
-# Reference: DESIGN.md §10.94 (v1.2.18)
-# ---------------------------------------------------------------------------
-
-from tmux_orchestrator.application.staging_store import StagingStore  # noqa: E402
-
-_staging_store: StagingStore = StagingStore()  # in-memory until create_app() wires staging_dir
-
-# ---------------------------------------------------------------------------
 # TemplateStore — in-memory task template registry (v1.2.17+)
 #
 # Module-level singleton so templates survive across multiple test create_app()
@@ -539,7 +525,6 @@ def create_app(
         build_groups_router,
         build_memory_router,
         build_scratchpad_router,
-        build_staging_router,
         build_system_router,
         build_tasks_router,
         build_templates_router,
@@ -560,19 +545,6 @@ def create_app(
     if _scratchpad_dir_raw is not None:
         _scratchpad = ScratchpadStore(persist_dir=Path(_scratchpad_dir_raw))
     # If no config, leave the existing module-level ScratchpadStore() in place.
-
-    # ------------------------------------------------------------------
-    # Staging store — shared file staging area (v1.2.18+)
-    # Reinitialise module-level _staging_store with staging_dir from config.
-    # When config is absent (e.g. unit tests with a mock orchestrator that
-    # has no config attribute), fall back to in-memory store (no files).
-    # Reference: DESIGN.md §10.94 (v1.2.18)
-    # ------------------------------------------------------------------
-    global _staging_store
-    _staging_dir_raw: str | None = getattr(_orch_config_pre, "staging_dir", None)
-    if _staging_dir_raw is not None:
-        _staging_store = StagingStore(staging_dir=Path(_staging_dir_raw))
-    # If no config, leave the existing module-level StagingStore() in place.
 
     # Wire scratchpad + cancel function into WorkflowManager for loop-until
     # runtime evaluation (v1.2.7).
@@ -634,9 +606,6 @@ def create_app(
     )
     app.include_router(
         build_scratchpad_router(auth, _scratchpad),
-    )
-    app.include_router(
-        build_staging_router(auth, _staging_store),
     )
     # ------------------------------------------------------------------
     # MetricsCollector — time-series ring buffer (v1.2.16+)

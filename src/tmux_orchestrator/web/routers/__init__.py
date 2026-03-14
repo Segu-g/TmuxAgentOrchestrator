@@ -14,7 +14,6 @@ from tmux_orchestrator.web.routers.agents import build_agents_router
 from tmux_orchestrator.web.routers.groups import build_groups_router
 from tmux_orchestrator.web.routers.memory import build_memory_router
 from tmux_orchestrator.web.routers.scratchpad import build_scratchpad_router
-from tmux_orchestrator.web.routers.staging import build_staging_router
 from tmux_orchestrator.web.routers.system import build_system_router
 from tmux_orchestrator.web.routers.tasks import build_tasks_router
 from tmux_orchestrator.web.routers.templates import build_templates_router
@@ -26,7 +25,6 @@ __all__ = [
     "build_groups_router",
     "build_memory_router",
     "build_scratchpad_router",
-    "build_staging_router",
     "build_system_router",
     "build_tasks_router",
     "build_templates_router",
