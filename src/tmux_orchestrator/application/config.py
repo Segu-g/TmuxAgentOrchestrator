@@ -116,17 +116,6 @@ class AgentConfig:
     #   AWS ECS task replacement https://aws.amazon.com/blogs/containers/a-deep-dive-into-amazon-ecs-task-health-and-task-replacement/
     #   DESIGN.md §10.88 (v1.2.12)
     max_consecutive_failures: int = 3
-    # role_rules_file: optional path to a Markdown rules file to copy into the agent's
-    #   `.claude/rules/<basename>` at startup, instead of the built-in role rules file
-    #   derived from `agent_plugin/rules/{role}.md`.  Useful when a specific agent
-    #   needs custom role instructions that differ from the project-wide defaults.
-    #   Supports relative paths (resolved against config file directory) or absolute paths.
-    #   When None (default), the built-in rules file for the agent's role is used.
-    #   When the path does not exist, a warning is logged and the step is skipped.
-    #
-    # Reference: Claude Code .claude/rules/ documentation (code.claude.com, 2026);
-    #   DESIGN.md §10.95 (v1.2.19 — role-specific rules separation)
-    role_rules_file: str | None = None
 
 
 @dataclass
@@ -563,7 +552,6 @@ def load_config(path: str | Path, cwd: Path | str | None = None) -> Orchestrator
             merge_target=a.get("merge_target"),
             cleanup_subdir=a.get("cleanup_subdir", True),
             max_consecutive_failures=a.get("max_consecutive_failures", 3),
-            role_rules_file=a.get("role_rules_file"),
         )
         for a in data.get("agents", [])
     ]

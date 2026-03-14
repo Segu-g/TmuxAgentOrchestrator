@@ -86,11 +86,6 @@ class ClaudeCodeAgent(Agent):
         # handoffs where the successor phase needs the committed state.
         # Reference: DESIGN.md §10.82 (v1.2.6)
         keep_branch_on_stop: bool = False,
-        # role_rules_file: optional path to a Markdown rules file to copy into the
-        # agent's `.claude/rules/<basename>` at startup.  When None, the built-in
-        # `agent_plugin/rules/{role}.md` file is used if it exists.
-        # Reference: DESIGN.md §10.95 (v1.2.19)
-        role_rules_file: str | None = None,
     ) -> None:
         super().__init__(agent_id, bus, task_timeout=task_timeout)
         self.mailbox = mailbox
@@ -135,10 +130,6 @@ class ClaudeCodeAgent(Agent):
         self._spec_files_root: Path | None = spec_files_root
         # Capability tags: advertised capabilities used for smart dispatch.
         self.tags: list[str] = tags or []
-        # Role rules file: optional override for the built-in role rules file.
-        # When set, this path is used instead of agent_plugin/rules/{role}.md.
-        # Reference: DESIGN.md §10.95 (v1.2.19)
-        self._role_rules_file: str | None = role_rules_file
         # Working directory set after worktree setup; passed to completion strategy.
         self._cwd: Path | None = None
         # Completion detection strategy: how we know the task is done.
@@ -225,10 +216,6 @@ class ClaudeCodeAgent(Agent):
             # the namespace prefix (plain /task-complete instead of
             # /tmux-orchestrator:task-complete).  Does not overwrite existing files.
             await loop.run_in_executor(None, self._copy_commands, agent_dir)
-            # Copy role-specific rules file into .claude/rules/ so Claude Code
-            # loads role-scoped instructions at session start.
-            # Reference: DESIGN.md §10.95 (v1.2.19)
-            await loop.run_in_executor(None, self._copy_rules, agent_dir)
             await loop.run_in_executor(None, self._completion.on_start, agent_dir)
             # Pre-trust the agent's working directory so Claude Code does not show
             # the interactive "Do you trust the files in this folder?" prompt.
@@ -344,6 +331,36 @@ class ClaudeCodeAgent(Agent):
                 for ex in examples:
                     lines.append(f"  - `{ex}`\n")
         return "".join(lines)
+
+    def _load_role_rules(self) -> str:
+        """Load role-specific rules from ``agent_plugin/rules/{role}.md`` and return as a string.
+
+        Returns the file content under a ``## Role Rules`` section heading, ready to
+        embed at the end of CLAUDE.md.  Embedding into CLAUDE.md makes the rules
+        auto-compact-resistant: CLAUDE.md is reloaded in full after auto-compact,
+        so the rules survive context compaction without an additional file copy step.
+
+        Returns an empty string when:
+        - No rules file exists for the agent's role (silently skipped).
+
+        Reference: DESIGN.md §10.95 (v1.2.20 — rules embedded in CLAUDE.md)
+        """
+        rules_src_dir = Path(__file__).parent.parent / "agent_plugin" / "rules"
+        src = rules_src_dir / f"{self.role.value}.md"
+        if not src.exists():
+            logger.debug(
+                "Agent %s: no built-in rules file for role %r at %s — skipping",
+                self.id, self.role.value, src,
+            )
+            return ""
+        try:
+            rules_content = src.read_text()
+        except OSError:
+            logger.warning(
+                "Agent %s: could not read role rules file %s — skipping", self.id, src
+            )
+            return ""
+        return f"\n## Role Rules\n\n{rules_content}\n"
 
     def _write_agent_claude_md(self, cwd: Path) -> None:
         """Write an agent-specific CLAUDE.md to the worktree.
@@ -514,6 +531,14 @@ or by branching from your branch (chain_branch workflow).
             self._spec_files_root = cwd
         codified_specs_section = self._load_spec_files()
 
+        # Role rules: embedded from agent_plugin/rules/{role}.md into CLAUDE.md.
+        # Embedding into CLAUDE.md makes rules auto-compact-resistant — CLAUDE.md
+        # is reloaded in full after auto-compact, so rules survive context compaction.
+        # This replaces the .claude/rules/ copy approach (v1.2.19) which conflicted
+        # with shared worktrees and was not reloaded after auto-compact.
+        # Reference: DESIGN.md §10.95 (v1.2.20)
+        role_rules_section = self._load_role_rules()
+
         content = f"""\
 # Agent: {self.id}
 
@@ -598,7 +623,7 @@ use the plain form without a namespace prefix.
 | `/summarize` | `/summarize` | Compress context → NOTES.md |
 | `/delegate` | `/delegate <task>` | Spawn sub-agents and assign subtasks |
 | `/task-complete` | `/task-complete <summary>` | Signal task completion to orchestrator |
-"""
+{role_rules_section}"""
         claude_md_path = cwd / "CLAUDE.md"
         claude_md_path.write_text(content)
         logger.debug("Agent %s wrote CLAUDE.md to %s", self.id, cwd)
@@ -721,60 +746,6 @@ use the plain form without a namespace prefix.
                 logger.debug(
                     "Agent %s: copied slash command %s → %s", self.id, cmd_file.name, dest
                 )
-
-    def _copy_rules(self, cwd: Path) -> None:
-        """Copy role-specific rules file into ``{cwd}/.claude/rules/``.
-
-        Claude Code automatically loads all ``.md`` files in ``.claude/rules/``
-        at session start, giving each agent role-scoped instructions without
-        polluting the common CLAUDE.md.
-
-        Resolution order:
-        1. If ``role_rules_file`` override is set (from AgentConfig or constructor),
-           use that path.  Relative paths are resolved against the project root
-           (where the config YAML lives) or, when unavailable, the agent's cwd.
-        2. Otherwise look for ``agent_plugin/rules/{role.value}.md`` bundled with
-           the orchestrator package.
-        3. If neither source exists, skip silently — no error is raised.
-
-        The destination is ``{cwd}/.claude/rules/{source_basename}`` so that
-        the filename is preserved (e.g. ``worker.md``, ``director.md``).
-        The ``.claude/rules/`` directory is created if it does not exist.
-
-        Reference: Claude Code ``.claude/rules/`` documentation (2026);
-        DESIGN.md §10.95 (v1.2.19)
-        """
-        # Determine the source rules file
-        if self._role_rules_file is not None:
-            src = Path(self._role_rules_file)
-            if not src.is_absolute():
-                # Resolve against cwd as best available root
-                src = cwd / src
-            if not src.exists():
-                logger.warning(
-                    "Agent %s: role_rules_file %r not found at %s — skipping rules copy",
-                    self.id, self._role_rules_file, src,
-                )
-                return
-        else:
-            # Use built-in role rules file
-            rules_src_dir = Path(__file__).parent.parent / "agent_plugin" / "rules"
-            src = rules_src_dir / f"{self.role.value}.md"
-            if not src.exists():
-                logger.debug(
-                    "Agent %s: no built-in rules file for role %r at %s — skipping",
-                    self.id, self.role.value, src,
-                )
-                return
-
-        # Copy to .claude/rules/{filename}
-        rules_dst = cwd / ".claude" / "rules"
-        rules_dst.mkdir(parents=True, exist_ok=True)
-        dest = rules_dst / src.name
-        shutil.copy2(src, dest)
-        logger.debug(
-            "Agent %s: copied role rules %s → %s", self.id, src.name, dest
-        )
 
     def _write_notes_template(self, cwd: Path) -> None:
         """Write an initial NOTES.md template for structured note-taking."""
